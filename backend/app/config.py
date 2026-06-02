@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     auth_secret: str = "change-me-in-production"
     auth_token_ttl_seconds: int = 7 * 24 * 60 * 60
     allow_demo_without_auth: bool = True
+    propainter_command: str = ""
+    e2fgvi_command: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

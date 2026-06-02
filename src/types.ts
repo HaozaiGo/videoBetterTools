@@ -145,8 +145,10 @@ export type ToolFormValues = {
   mode: "manual" | "auto";
   regions: WatermarkRegion[];
   keepAudio: boolean;
-  modelAdapter: "opencv-inpaint" | "ffmpeg-delogo";
+  modelAdapter: "opencv-inpaint" | "ffmpeg-delogo" | "propainter" | "e2fgvi";
   inpaintMethod: "telea" | "ns";
   inpaintRadius: number;
   maskPadding: number;
+  maskStrategy: "rectangle" | "subtitle-text";
+  textLightThreshold: number;
 };

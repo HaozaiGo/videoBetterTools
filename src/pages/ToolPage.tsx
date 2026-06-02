@@ -23,6 +23,8 @@ const defaultValues: ToolFormValues = {
   inpaintMethod: "telea",
   inpaintRadius: 5,
   maskPadding: 8,
+  maskStrategy: "subtitle-text",
+  textLightThreshold: 155,
 };
 
 function clamp(value: number) {
@@ -61,12 +63,23 @@ export function ToolPage() {
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const tool = data.tools.find((item) => item.route === pathname);
   const isWatermarkTool = tool?.slug === "remove-watermark";
+  const isSubtitleTool = tool?.slug === "remove-subtitle";
+  const isMaskVideoTool = isWatermarkTool || isSubtitleTool;
+  const regionNoun = isSubtitleTool ? "字幕" : "水印";
 
   const createTaskMutation = useMutation({
     mutationFn: async (values: ToolFormValues) => {
       if (!tool) throw new Error("工具不存在");
       if (!file) throw new Error("请先选择一个文件");
-      const params = isWatermarkTool ? { ...values, mode: "manual" as const, regions } : values;
+      const params = isMaskVideoTool
+        ? {
+            ...values,
+            mode: "manual" as const,
+            regions,
+            removalTarget: isSubtitleTool ? "subtitle" : "watermark",
+            maskStrategy: isSubtitleTool ? values.maskStrategy : "rectangle",
+          }
+        : values;
       const upload = await uploadAsset({
         file,
         kind: tool.pricing.mode === "image" ? "image" : "video",
@@ -89,7 +102,20 @@ export function ToolPage() {
     onSubmit: async ({ value }) => createTaskMutation.mutateAsync(value),
   });
   const values = useStore(form.store, (state) => state.values);
+  const selectedModelAdapter = values.modelAdapter;
+  const isOpenCvAdapter = selectedModelAdapter === "opencv-inpaint";
+  const isFastBlurAdapter = selectedModelAdapter === "ffmpeg-delogo";
+  const showTextMaskControls = isSubtitleTool && isOpenCvAdapter;
+  const showTextThreshold = showTextMaskControls && values.maskStrategy === "subtitle-text";
+  const showOpenCvControls = isMaskVideoTool && isOpenCvAdapter;
+  const showMaskPadding = isMaskVideoTool && !isFastBlurAdapter;
   const estimate = useMemo(() => (tool ? estimateCredits(tool, values) : 0), [tool, values]);
+
+  useEffect(() => {
+    if (isSubtitleTool && !isOpenCvAdapter && values.maskStrategy !== "rectangle") {
+      form.setFieldValue("maskStrategy", "rectangle");
+    }
+  }, [form, isSubtitleTool, isOpenCvAdapter, values.maskStrategy]);
 
   useEffect(() => {
     if (!file || !file.type.startsWith("video/")) {
@@ -173,13 +199,13 @@ export function ToolPage() {
     const nextRegion = buildRegion(start, point);
     setDraftRegion(null);
     if (nextRegion.width < 0.015 || nextRegion.height < 0.015) {
-      setNotice("框选区域太小，请覆盖完整水印。");
+      setNotice(`框选区域太小，请覆盖完整${regionNoun}。`);
       return;
     }
     // MVP 先保留一个水印矩形；重新拖拽会覆盖旧区域，交互更直接。
     setRegions([nextRegion]);
     setIsSelectingRegion(false);
-    setNotice("已框选水印区域，可重新拖拽覆盖。");
+    setNotice(`已框选${regionNoun}区域，可重新拖拽覆盖。`);
   };
 
   if (!tool) {
@@ -207,8 +233,8 @@ export function ToolPage() {
         className="tool-detail"
         onSubmit={(event) => {
           event.preventDefault();
-          if (isWatermarkTool && regions.length === 0) {
-            setNotice("请先在视频预览中框选水印区域。");
+          if (isMaskVideoTool && regions.length === 0) {
+            setNotice(`请先在视频预览中框选${regionNoun}区域。`);
             return;
           }
           form.handleSubmit();
@@ -239,8 +265,8 @@ export function ToolPage() {
             <strong>{file ? file.name : tool.pricing.mode === "image" ? "选择图片文件" : "选择视频文件"}</strong>
             <span>{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB，创建任务时会上传到后端。` : "文件会上传到后端并生成 asset_id。"}</span>
           </label>
-          {isWatermarkTool && videoPreviewUrl ? (
-            <section className="video-region-editor" aria-label="水印区域框选">
+          {isMaskVideoTool && videoPreviewUrl ? (
+            <section className="video-region-editor" aria-label={`${regionNoun}区域框选`}>
               <div className="video-preview-wrap">
                 <video ref={videoRef} src={videoPreviewUrl} controls playsInline preload="metadata" onLoadedMetadata={updateMediaBox} onLoadedData={updateMediaBox} />
                 <div
@@ -270,7 +296,7 @@ export function ToolPage() {
                 </div>
               </div>
               <div className="region-help">
-                <span>{isSelectingRegion ? "在画面上拖拽框选水印区域" : regions.length ? "已选择 1 个水印区域" : "可先播放预览，再框选水印区域"}</span>
+                <span>{isSelectingRegion ? `在画面上拖拽框选${regionNoun}区域` : regions.length ? `已选择 1 个${regionNoun}区域` : `可先播放预览，再框选${regionNoun}区域`}</span>
                 <button
                   className="link-button"
                   type="button"
@@ -279,7 +305,7 @@ export function ToolPage() {
                     setIsSelectingRegion((value) => !value);
                   }}
                 >
-                  {isSelectingRegion ? "取消框选" : "框选水印"}
+                  {isSelectingRegion ? "取消框选" : `框选${regionNoun}`}
                 </button>
                 {regions.length ? (
                   <button
@@ -347,46 +373,87 @@ export function ToolPage() {
                 )}
               </form.Field>
             ) : null}
-            {isWatermarkTool ? (
+            {isMaskVideoTool ? (
               <>
                 <form.Field name="modelAdapter">
                   {(field) => (
                     <label>
                       修复模式
-                      <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["modelAdapter"])}>
+                      <select
+                        value={field.state.value}
+                        onChange={(event) => {
+                          const nextAdapter = event.target.value as ToolFormValues["modelAdapter"];
+                          field.handleChange(nextAdapter);
+                          if (nextAdapter !== "opencv-inpaint") {
+                            form.setFieldValue("maskStrategy", "rectangle");
+                          }
+                        }}
+                      >
                         <option value="opencv-inpaint">智能修复</option>
                         <option value="ffmpeg-delogo">快速模糊</option>
+                        <option value="propainter">ProPainter</option>
                       </select>
                     </label>
                   )}
                 </form.Field>
-                <form.Field name="inpaintMethod">
-                  {(field) => (
-                    <label>
-                      模型算法
-                      <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["inpaintMethod"])}>
-                        <option value="telea">Telea</option>
-                        <option value="ns">Navier-Stokes</option>
-                      </select>
-                    </label>
-                  )}
-                </form.Field>
-                <form.Field name="inpaintRadius">
-                  {(field) => (
-                    <label>
-                      修复半径
-                      <input type="number" min={1} max={32} value={field.state.value} onChange={(event) => field.handleChange(Number(event.target.value))} />
-                    </label>
-                  )}
-                </form.Field>
-                <form.Field name="maskPadding">
-                  {(field) => (
-                    <label>
-                      遮罩扩展
-                      <input type="number" min={0} max={80} value={field.state.value} onChange={(event) => field.handleChange(Number(event.target.value))} />
-                    </label>
-                  )}
-                </form.Field>
+                {showTextMaskControls ? (
+                  <>
+                    <form.Field name="maskStrategy">
+                      {(field) => (
+                        <label>
+                          遮罩策略
+                          <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["maskStrategy"])}>
+                            <option value="subtitle-text">字幕文字精修</option>
+                            <option value="rectangle">整块区域修复</option>
+                          </select>
+                        </label>
+                      )}
+                    </form.Field>
+                    {showTextThreshold ? (
+                      <form.Field name="textLightThreshold">
+                        {(field) => (
+                          <label>
+                            字幕亮度阈值
+                            <input type="number" min={80} max={245} value={field.state.value} onChange={(event) => field.handleChange(Number(event.target.value))} />
+                          </label>
+                        )}
+                      </form.Field>
+                    ) : null}
+                  </>
+                ) : null}
+                {showOpenCvControls ? (
+                  <>
+                    <form.Field name="inpaintMethod">
+                      {(field) => (
+                        <label>
+                          模型算法
+                          <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["inpaintMethod"])}>
+                            <option value="telea">Telea</option>
+                            <option value="ns">Navier-Stokes</option>
+                          </select>
+                        </label>
+                      )}
+                    </form.Field>
+                    <form.Field name="inpaintRadius">
+                      {(field) => (
+                        <label>
+                          修复半径
+                          <input type="number" min={1} max={32} value={field.state.value} onChange={(event) => field.handleChange(Number(event.target.value))} />
+                        </label>
+                      )}
+                    </form.Field>
+                  </>
+                ) : null}
+                {showMaskPadding ? (
+                  <form.Field name="maskPadding">
+                    {(field) => (
+                      <label>
+                        遮罩扩展
+                        <input type="number" min={0} max={80} value={field.state.value} onChange={(event) => field.handleChange(Number(event.target.value))} />
+                      </label>
+                    )}
+                  </form.Field>
+                ) : null}
                 <form.Field name="keepAudio">
                   {(field) => (
                     <label className="checkbox-field">
