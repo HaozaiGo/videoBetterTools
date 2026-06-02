@@ -278,6 +278,7 @@ def provider_callback(
 
     if status == "succeeded" and task.status not in {"succeeded", "failed", "cancelled"}:
         charge = min(charged_credits or task.estimated_credits, task.frozen_credits)
+        # 本地 worker 或真实供应商都可以传入结果文件；未传时用文本占位，方便其他 mock 工具继续跑通。
         storage_key = output_storage_key or f"{task.id}-result.txt"
         result_url = output_url or public_url(storage_key)
         output_asset = Asset(

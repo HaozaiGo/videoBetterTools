@@ -361,6 +361,19 @@ select {
   padding: 0 12px;
 }
 
+.checkbox-field {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+}
+
+.checkbox-field input {
+  width: 18px;
+  min-height: 18px;
+  accent-color: var(--acid);
+}
+
 .video-region-editor {
   display: grid;
   gap: 12px;
@@ -386,7 +399,12 @@ select {
   position: absolute;
   inset: 0;
   cursor: crosshair;
+  pointer-events: none;
   touch-action: none;
+}
+
+.region-overlay.active {
+  pointer-events: auto;
 }
 
 .region-box {
@@ -400,11 +418,15 @@ select {
 .region-help {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
   color: var(--teal);
   font-size: 13px;
   font-weight: 900;
+}
+
+.region-help span {
+  margin-right: auto;
 }
 
 .quote-panel h2 {

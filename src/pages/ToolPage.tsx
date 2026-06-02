@@ -19,6 +19,10 @@ const defaultValues: ToolFormValues = {
   mode: "manual",
   regions: [],
   keepAudio: true,
+  modelAdapter: "opencv-inpaint",
+  inpaintMethod: "telea",
+  inpaintRadius: 5,
+  maskPadding: 8,
 };
 
 function clamp(value: number) {
@@ -26,12 +30,20 @@ function clamp(value: number) {
 }
 
 function buildRegion(start: { x: number; y: number }, end: { x: number; y: number }): WatermarkRegion {
+  // 用归一化坐标保存框选区域，避免前端预览尺寸和真实视频分辨率不一致时出现偏移。
   const x = clamp(Math.min(start.x, end.x));
   const y = clamp(Math.min(start.y, end.y));
   const width = Math.max(0, Math.min(1 - x, Math.abs(end.x - start.x)));
   const height = Math.max(0, Math.min(1 - y, Math.abs(end.y - start.y)));
   return { x, y, width, height };
 }
+
+type MediaBox = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
 
 export function ToolPage() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -42,6 +54,9 @@ export function ToolPage() {
   const [videoPreviewUrl, setVideoPreviewUrl] = useState("");
   const [regions, setRegions] = useState<WatermarkRegion[]>([]);
   const [draftRegion, setDraftRegion] = useState<WatermarkRegion | null>(null);
+  const [isSelectingRegion, setIsSelectingRegion] = useState(false);
+  const [mediaBox, setMediaBox] = useState<MediaBox | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const tool = data.tools.find((item) => item.route === pathname);
@@ -51,7 +66,7 @@ export function ToolPage() {
     mutationFn: async (values: ToolFormValues) => {
       if (!tool) throw new Error("工具不存在");
       if (!file) throw new Error("请先选择一个文件");
-      const params = isWatermarkTool ? { ...values, mode: "manual" as const, regions, keepAudio: true } : values;
+      const params = isWatermarkTool ? { ...values, mode: "manual" as const, regions } : values;
       const upload = await uploadAsset({
         file,
         kind: tool.pricing.mode === "image" ? "image" : "video",
@@ -79,23 +94,60 @@ export function ToolPage() {
   useEffect(() => {
     if (!file || !file.type.startsWith("video/")) {
       setVideoPreviewUrl("");
+      setMediaBox(null);
       return;
     }
+    // 本地预览只在浏览器内生成临时 URL，不提前上传；提交任务时再走后端资产接口。
     const url = URL.createObjectURL(file);
     setVideoPreviewUrl(url);
     return () => URL.revokeObjectURL(url);
   }, [file]);
 
+  const updateMediaBox = () => {
+    const video = videoRef.current;
+    const overlay = overlayRef.current;
+    if (!video || !overlay || !video.videoWidth || !video.videoHeight) return;
+
+    const videoRect = video.getBoundingClientRect();
+    const overlayRect = overlay.getBoundingClientRect();
+    const mediaAspect = video.videoWidth / video.videoHeight;
+    const boxAspect = videoRect.width / videoRect.height;
+
+    let width = videoRect.width;
+    let height = videoRect.height;
+    let left = videoRect.left - overlayRect.left;
+    let top = videoRect.top - overlayRect.top;
+
+    if (boxAspect > mediaAspect) {
+      width = videoRect.height * mediaAspect;
+      left += (videoRect.width - width) / 2;
+    } else {
+      height = videoRect.width / mediaAspect;
+      top += (videoRect.height - height) / 2;
+    }
+
+    setMediaBox({ left, top, width, height });
+  };
+
+  useEffect(() => {
+    if (!videoPreviewUrl) return;
+    updateMediaBox();
+    window.addEventListener("resize", updateMediaBox);
+    return () => window.removeEventListener("resize", updateMediaBox);
+  }, [videoPreviewUrl]);
+
   const pointFromEvent = (event: PointerEvent<HTMLDivElement>) => {
     const rect = overlayRef.current?.getBoundingClientRect();
-    if (!rect) return null;
+    if (!rect || !mediaBox) return null;
+    // 将鼠标位置映射到真实视频画面区域，排除播放器左右/上下黑边后再保存 0-1 坐标。
     return {
-      x: clamp((event.clientX - rect.left) / rect.width),
-      y: clamp((event.clientY - rect.top) / rect.height),
+      x: clamp((event.clientX - rect.left - mediaBox.left) / mediaBox.width),
+      y: clamp((event.clientY - rect.top - mediaBox.top) / mediaBox.height),
     };
   };
 
   const startRegion = (event: PointerEvent<HTMLDivElement>) => {
+    if (!isSelectingRegion) return;
     const point = pointFromEvent(event);
     if (!point) return;
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -124,7 +176,9 @@ export function ToolPage() {
       setNotice("框选区域太小，请覆盖完整水印。");
       return;
     }
+    // MVP 先保留一个水印矩形；重新拖拽会覆盖旧区域，交互更直接。
     setRegions([nextRegion]);
+    setIsSelectingRegion(false);
     setNotice("已框选水印区域，可重新拖拽覆盖。");
   };
 
@@ -177,6 +231,7 @@ export function ToolPage() {
                 setFile(event.target.files?.[0] || null);
                 setRegions([]);
                 setDraftRegion(null);
+                setIsSelectingRegion(false);
                 setNotice("");
               }}
             />
@@ -187,16 +242,17 @@ export function ToolPage() {
           {isWatermarkTool && videoPreviewUrl ? (
             <section className="video-region-editor" aria-label="水印区域框选">
               <div className="video-preview-wrap">
-                <video src={videoPreviewUrl} controls playsInline preload="metadata" />
+                <video ref={videoRef} src={videoPreviewUrl} controls playsInline preload="metadata" onLoadedMetadata={updateMediaBox} onLoadedData={updateMediaBox} />
                 <div
                   ref={overlayRef}
-                  className="region-overlay"
+                  className={`region-overlay${isSelectingRegion ? " active" : ""}`}
                   onPointerDown={startRegion}
                   onPointerMove={moveRegion}
                   onPointerUp={finishRegion}
                   onPointerCancel={() => {
                     dragStartRef.current = null;
                     setDraftRegion(null);
+                    setIsSelectingRegion(false);
                   }}
                 >
                   {[...regions, ...(draftRegion ? [draftRegion] : [])].map((region, index) => (
@@ -204,17 +260,27 @@ export function ToolPage() {
                       className="region-box"
                       key={`${region.x}-${region.y}-${index}`}
                       style={{
-                        left: `${region.x * 100}%`,
-                        top: `${region.y * 100}%`,
-                        width: `${region.width * 100}%`,
-                        height: `${region.height * 100}%`,
+                        left: mediaBox ? `${mediaBox.left + region.x * mediaBox.width}px` : `${region.x * 100}%`,
+                        top: mediaBox ? `${mediaBox.top + region.y * mediaBox.height}px` : `${region.y * 100}%`,
+                        width: mediaBox ? `${region.width * mediaBox.width}px` : `${region.width * 100}%`,
+                        height: mediaBox ? `${region.height * mediaBox.height}px` : `${region.height * 100}%`,
                       }}
                     />
                   ))}
                 </div>
               </div>
               <div className="region-help">
-                <span>{regions.length ? "已选择 1 个水印区域" : "拖拽框选水印区域"}</span>
+                <span>{isSelectingRegion ? "在画面上拖拽框选水印区域" : regions.length ? "已选择 1 个水印区域" : "可先播放预览，再框选水印区域"}</span>
+                <button
+                  className="link-button"
+                  type="button"
+                  onClick={() => {
+                    setDraftRegion(null);
+                    setIsSelectingRegion((value) => !value);
+                  }}
+                >
+                  {isSelectingRegion ? "取消框选" : "框选水印"}
+                </button>
                 {regions.length ? (
                   <button
                     className="link-button"
@@ -222,6 +288,7 @@ export function ToolPage() {
                     onClick={() => {
                       setRegions([]);
                       setNotice("");
+                      setIsSelectingRegion(false);
                     }}
                   >
                     清除
@@ -279,6 +346,56 @@ export function ToolPage() {
                   </label>
                 )}
               </form.Field>
+            ) : null}
+            {isWatermarkTool ? (
+              <>
+                <form.Field name="modelAdapter">
+                  {(field) => (
+                    <label>
+                      修复模式
+                      <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["modelAdapter"])}>
+                        <option value="opencv-inpaint">智能修复</option>
+                        <option value="ffmpeg-delogo">快速模糊</option>
+                      </select>
+                    </label>
+                  )}
+                </form.Field>
+                <form.Field name="inpaintMethod">
+                  {(field) => (
+                    <label>
+                      模型算法
+                      <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["inpaintMethod"])}>
+                        <option value="telea">Telea</option>
+                        <option value="ns">Navier-Stokes</option>
+                      </select>
+                    </label>
+                  )}
+                </form.Field>
+                <form.Field name="inpaintRadius">
+                  {(field) => (
+                    <label>
+                      修复半径
+                      <input type="number" min={1} max={32} value={field.state.value} onChange={(event) => field.handleChange(Number(event.target.value))} />
+                    </label>
+                  )}
+                </form.Field>
+                <form.Field name="maskPadding">
+                  {(field) => (
+                    <label>
+                      遮罩扩展
+                      <input type="number" min={0} max={80} value={field.state.value} onChange={(event) => field.handleChange(Number(event.target.value))} />
+                    </label>
+                  )}
+                </form.Field>
+                <form.Field name="keepAudio">
+                  {(field) => (
+                    <label className="checkbox-field">
+                      <input type="checkbox" checked={field.state.value} onChange={(event) => field.handleChange(event.target.checked)} />
+                      保留原音频
+                    </label>
+                  )}
+                </form.Field>
+              </>
             ) : null}
             {tool.inputs.includes("maskComplexity") ? (
               <form.Field name="maskComplexity">

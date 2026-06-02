@@ -12,7 +12,8 @@ dependencies = [
   "redis>=5.2.0",
   "rq>=2.0.0",
   "sqlalchemy>=2.0.35",
-  "uvicorn[standard]>=0.34.0"
+  "uvicorn[standard]>=0.34.0",
+  "opencv-python-headless>=4.10.0.84",
 ]
 
 [tool.uv]

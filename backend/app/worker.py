@@ -20,6 +20,7 @@ def process_provider_job(task_id: str) -> None:
         provider_job_id = task.provider_job_id
         provider_callback(db, provider_job_id, "processing", callback_id=f"{provider_job_id}:processing")
 
+    # 视频去水印已经具备本地处理能力，单独走真实 FFmpeg 管线；其他工具仍保留模拟供应商结果。
     if task.tool_slug == "remove-watermark":
         _process_remove_watermark(task_id)
         return
@@ -57,6 +58,7 @@ def _process_remove_watermark(task_id: str) -> None:
         params = dict(task.params or {})
         input_storage_key = input_asset.storage_key
 
+    # 耗时视频处理放在数据库会话之外，避免长时间占用连接和行锁。
     try:
         result = process_watermark_removal(input_storage_key, task_id, params)
     except VideoProcessingError as exc:
@@ -72,6 +74,7 @@ def _process_remove_watermark(task_id: str) -> None:
         task = db.get(Task, task_id)
         if task is None or task.status in {"succeeded", "failed", "cancelled"}:
             return
+        # 复用供应商回调入口完成扣费、产物入库和任务状态流转，后续替换真实供应商时账务逻辑不分叉。
         provider_callback(
             db,
             task.provider_job_id,
