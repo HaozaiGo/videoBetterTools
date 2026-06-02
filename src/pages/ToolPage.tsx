@@ -77,7 +77,7 @@ export function ToolPage() {
             mode: "manual" as const,
             regions,
             removalTarget: isSubtitleTool ? "subtitle" : "watermark",
-            maskStrategy: isSubtitleTool ? values.maskStrategy : "rectangle",
+            maskStrategy: values.maskStrategy,
           }
         : values;
       const upload = await uploadAsset({
@@ -105,17 +105,17 @@ export function ToolPage() {
   const selectedModelAdapter = values.modelAdapter;
   const isOpenCvAdapter = selectedModelAdapter === "opencv-inpaint";
   const isFastBlurAdapter = selectedModelAdapter === "ffmpeg-delogo";
-  const showTextMaskControls = isSubtitleTool && isOpenCvAdapter;
+  const showTextMaskControls = isMaskVideoTool && isOpenCvAdapter;
   const showTextThreshold = showTextMaskControls && values.maskStrategy === "subtitle-text";
   const showOpenCvControls = isMaskVideoTool && isOpenCvAdapter;
   const showMaskPadding = isMaskVideoTool && !isFastBlurAdapter;
   const estimate = useMemo(() => (tool ? estimateCredits(tool, values) : 0), [tool, values]);
 
   useEffect(() => {
-    if (isSubtitleTool && !isOpenCvAdapter && values.maskStrategy !== "rectangle") {
+    if (isMaskVideoTool && !isOpenCvAdapter && values.maskStrategy !== "rectangle") {
       form.setFieldValue("maskStrategy", "rectangle");
     }
-  }, [form, isSubtitleTool, isOpenCvAdapter, values.maskStrategy]);
+  }, [form, isMaskVideoTool, isOpenCvAdapter, values.maskStrategy]);
 
   useEffect(() => {
     if (!file || !file.type.startsWith("video/")) {
@@ -403,7 +403,7 @@ export function ToolPage() {
                         <label>
                           遮罩策略
                           <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["maskStrategy"])}>
-                            <option value="subtitle-text">字幕文字精修</option>
+                            <option value="subtitle-text">{isSubtitleTool ? "字幕文字精修" : "文字水印精修"}</option>
                             <option value="rectangle">整块区域修复</option>
                           </select>
                         </label>
@@ -413,7 +413,7 @@ export function ToolPage() {
                       <form.Field name="textLightThreshold">
                         {(field) => (
                           <label>
-                            字幕亮度阈值
+                            {isSubtitleTool ? "字幕亮度阈值" : "文字亮度阈值"}
                             <input type="number" min={80} max={245} value={field.state.value} onChange={(event) => field.handleChange(Number(event.target.value))} />
                           </label>
                         )}
