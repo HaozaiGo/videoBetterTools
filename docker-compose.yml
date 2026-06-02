@@ -1,0 +1,61 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: model_plaza
+      POSTGRES_USER: model_plaza
+      POSTGRES_PASSWORD: model_plaza
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U model_plaza -d model_plaza"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  api:
+    build:
+      context: ./backend
+    command: sh -c "alembic upgrade head && python -m app.seed && uvicorn app.main:app --host 0.0.0.0 --port 8010"
+    environment:
+      DATABASE_URL: postgresql+psycopg://model_plaza:model_plaza@postgres:5432/model_plaza
+      REDIS_URL: redis://redis:6379/0
+      UPLOAD_DIR: /data/uploads
+      AUTH_SECRET: change-me-in-production
+    ports:
+      - "8010:8010"
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    build:
+      context: ./backend
+    command: sh -c "python -m app.worker"
+    environment:
+      DATABASE_URL: postgresql+psycopg://model_plaza:model_plaza@postgres:5432/model_plaza
+      REDIS_URL: redis://redis:6379/0
+      UPLOAD_DIR: /data/uploads
+      AUTH_SECRET: change-me-in-production
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      api:
+        condition: service_started
+      redis:
+        condition: service_started
+
+volumes:
+  postgres-data:
+  uploads:

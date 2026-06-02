@@ -1,0 +1,175 @@
+import logging
+
+from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy.orm import Session
+
+from app.admin import admin_ledger, admin_summary, admin_tasks, admin_users
+from app.auth import admin_user, create_token, current_user, find_user_by_email, verify_password
+from app.config import settings
+from app.database import get_db
+from app.models import User
+from app.schemas import LoginRequest, ProviderCallback, RechargeCreate, TaskCreate, UserCreate, UserRecharge
+from app.services import (
+    asset_to_dict,
+    create_user,
+    create_task,
+    provider_callback,
+    recharge_wallet,
+    save_upload,
+    serialize_bootstrap,
+    task_to_dict,
+)
+from app.storage import storage
+
+logger = logging.getLogger("model_plaza")
+
+app = FastAPI(title="Model Plaza API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+settings.upload_path.mkdir(parents=True, exist_ok=True)
+app.mount(settings.public_upload_prefix, StaticFiles(directory=settings.upload_path), name="uploads")
+
+
+@app.middleware("http")
+async def log_errors(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception:
+        logger.exception("Unhandled error while processing %s %s", request.method, request.url.path)
+        raise
+
+
+@app.get("/api/health")
+def health() -> dict:
+    return {"ok": True}
+
+
+@app.post("/api/auth/login")
+def login(payload: LoginRequest, db: Session = Depends(get_db)) -> dict:
+    user = find_user_by_email(db, payload.email)
+    if user is None or not verify_password(payload.password, user.password_hash):
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=401, detail="invalid credentials")
+    token = create_token(user.id)
+    return {
+        "token": token,
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "role": user.role,
+        },
+    }
+
+
+@app.post("/api/auth/register", status_code=201)
+def register(payload: UserCreate, db: Session = Depends(get_db)) -> dict:
+    user = create_user(db, payload.email, payload.password, payload.name, "user", 0)
+    token = create_token(user.id)
+    return {
+        "token": token,
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "role": user.role,
+        },
+    }
+
+
+@app.get("/api/auth/me")
+def me(user: User = Depends(current_user)) -> dict:
+    return {"id": user.id, "email": user.email, "name": user.name, "role": user.role}
+
+
+@app.get("/api/bootstrap")
+def bootstrap(db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    return serialize_bootstrap(db, user.id)
+
+
+@app.post("/api/assets/presign")
+def presign_asset(kind: str = "video", durationSeconds: int = 0, _user: User = Depends(current_user)) -> dict:
+    return storage.presign_upload(kind=kind, duration_seconds=durationSeconds)
+
+
+@app.post("/api/assets", status_code=201)
+async def upload_asset(
+    file: UploadFile = File(...),
+    kind: str = Form("video"),
+    durationSeconds: int = Form(0),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+) -> dict:
+    asset = await save_upload(db, user.id, file, kind=kind, duration_seconds=durationSeconds)
+    return {"asset": asset_to_dict(asset)}
+
+
+@app.post("/api/tasks", status_code=201)
+def create_task_endpoint(payload: TaskCreate, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    task = create_task(db, user.id, payload.toolSlug, payload.inputAssetId, payload.params)
+    return {"task": task_to_dict(task), "state": serialize_bootstrap(db, user.id)}
+
+
+@app.post("/api/provider/callback")
+def provider_callback_endpoint(payload: ProviderCallback, db: Session = Depends(get_db)) -> dict:
+    duplicated, _task = provider_callback(
+        db,
+        provider_job_id=payload.providerJobId,
+        status=payload.status,
+        callback_id=payload.callbackId,
+        output_url=payload.outputUrl,
+        output_storage_key=payload.outputStorageKey,
+        output_mime_type=payload.outputMimeType,
+        output_size_bytes=payload.outputSizeBytes,
+        charged_credits=payload.chargedCredits,
+        error_code=payload.errorCode,
+    )
+    return {"duplicated": duplicated, "state": serialize_bootstrap(db, _task.user_id)}
+
+
+@app.post("/api/recharge")
+def recharge(payload: RechargeCreate, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    recharge_wallet(db, user.id, payload.credits)
+    return {"state": serialize_bootstrap(db, user.id)}
+
+
+@app.get("/api/admin/summary")
+def admin_summary_endpoint(db: Session = Depends(get_db), _admin: User = Depends(admin_user)) -> dict:
+    return admin_summary(db)
+
+
+@app.get("/api/admin/users")
+def admin_users_endpoint(db: Session = Depends(get_db), _admin: User = Depends(admin_user)) -> list[dict]:
+    return admin_users(db)
+
+
+@app.post("/api/admin/users", status_code=201)
+def admin_create_user_endpoint(payload: UserCreate, db: Session = Depends(get_db), _admin: User = Depends(admin_user)) -> dict:
+    user = create_user(db, payload.email, payload.password, payload.name, payload.role, payload.initialCredits)
+    return {"id": user.id, "email": user.email, "name": user.name, "role": user.role}
+
+
+@app.post("/api/admin/users/{user_id}/recharge")
+def admin_recharge_user_endpoint(user_id: str, payload: UserRecharge, db: Session = Depends(get_db), _admin: User = Depends(admin_user)) -> dict:
+    recharge_wallet(db, user_id, payload.credits)
+    return {"ok": True}
+
+
+@app.get("/api/admin/tasks")
+def admin_tasks_endpoint(db: Session = Depends(get_db), _admin: User = Depends(admin_user)) -> list[dict]:
+    return admin_tasks(db)
+
+
+@app.get("/api/admin/ledger")
+def admin_ledger_endpoint(db: Session = Depends(get_db), _admin: User = Depends(admin_user)) -> list[dict]:
+    return admin_ledger(db)

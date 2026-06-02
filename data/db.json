@@ -1,0 +1,30 @@
+{
+  "users": [
+    {
+      "id": "demo-user",
+      "email": "demo@modelplaza.local",
+      "name": "演示用户"
+    }
+  ],
+  "wallets": [
+    {
+      "userId": "demo-user",
+      "credits": 280,
+      "frozenCredits": 0
+    }
+  ],
+  "walletLedger": [
+    {
+      "id": "7490081e-655c-45ea-a27d-821f7aa284ab",
+      "userId": "demo-user",
+      "type": "recharge",
+      "amount": 100,
+      "title": "模拟充值",
+      "taskId": null,
+      "createdAt": 1780286908008
+    }
+  ],
+  "assets": [],
+  "tasks": [],
+  "processedCallbacks": []
+}
