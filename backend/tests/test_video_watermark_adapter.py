@@ -55,3 +55,34 @@ def test_external_model_receives_regions_and_full_params(tmp_path, monkeypatch) 
     params_path = captured["env"]["MODEL_PLAZA_PARAMS"]
     assert "--params" in captured["command"]
     assert json.loads(open(params_path, encoding="utf-8").read()) == params
+
+
+def test_external_model_can_return_remote_result_metadata(tmp_path, monkeypatch) -> None:
+    input_path = tmp_path / "input.mp4"
+    output_path = tmp_path / "output.mp4"
+    input_path.write_bytes(b"fake-video")
+
+    def fake_run(command, check, capture_output, text, env):
+        meta_path = env["MODEL_PLAZA_RESULT_META"]
+        with open(meta_path, "w", encoding="utf-8") as file:
+            json.dump(
+                {
+                    "storage_key": "model-plaza/output/videos/job.mp4",
+                    "url": "https://tos.example.com/model-plaza/output/videos/job.mp4",
+                    "mime_type": "video/mp4",
+                    "size_bytes": 123,
+                },
+                file,
+            )
+
+    monkeypatch.setattr(watermark.settings, "propainter_command", "python runner.py")
+    monkeypatch.setattr(watermark.subprocess, "run", fake_run)
+
+    result = process_with_external_model(input_path, output_path, {"regions": [{"x": 0, "y": 0, "width": 1, "height": 1}]}, "propainter")
+
+    assert result == {
+        "storage_key": "model-plaza/output/videos/job.mp4",
+        "url": "https://tos.example.com/model-plaza/output/videos/job.mp4",
+        "mime_type": "video/mp4",
+        "size_bytes": 123,
+    }

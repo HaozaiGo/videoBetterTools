@@ -26,6 +26,16 @@ class TaskCreate(BaseModel):
     params: dict[str, Any] = {}
 
 
+class AssetComplete(BaseModel):
+    assetId: str
+    kind: str = "video"
+    originalName: str
+    mimeType: str = "application/octet-stream"
+    storageKey: str
+    sizeBytes: int = 0
+    durationSeconds: int = 0
+
+
 class RechargeCreate(BaseModel):
     credits: int
 

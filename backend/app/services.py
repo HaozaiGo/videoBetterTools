@@ -11,7 +11,7 @@ from app.config import settings
 from app.models import Asset, ProcessedCallback, Task, User, Wallet, WalletLedger
 from app.pricing import estimate_credits
 from app.queue import enqueue_provider_job
-from app.storage import storage
+from app.storage import object_key_for_upload, safe_storage_name, storage
 from app.tool_config import CATEGORIES, TOOLS, get_tool
 
 
@@ -181,8 +181,8 @@ def serialize_bootstrap(db: Session, user_id: str | None = None) -> dict:
 async def save_upload(db: Session, user_id: str, file: UploadFile, kind: str, duration_seconds: int = 0) -> Asset:
     settings.upload_path.mkdir(parents=True, exist_ok=True)
     asset_id = str(uuid4())
-    original_name = Path(file.filename or "upload.bin").name.replace("/", "-")
-    storage_key = f"{asset_id}-{original_name}"
+    original_name = safe_storage_name(file.filename or "upload.bin")
+    storage_key = object_key_for_upload(asset_id, kind, original_name) if storage.is_remote else f"{asset_id}-{original_name}"
     content = await file.read()
     storage.save_bytes(storage_key, content)
 
@@ -195,6 +195,50 @@ async def save_upload(db: Session, user_id: str, file: UploadFile, kind: str, du
         storage_key=storage_key,
         url=public_url(storage_key),
         size_bytes=len(content),
+        duration_seconds=duration_seconds,
+        expires_at=now() + timedelta(days=7),
+    )
+    db.add(asset)
+    db.commit()
+    db.refresh(asset)
+    return asset
+
+
+def create_presigned_asset_upload(db: Session, user_id: str, kind: str, duration_seconds: int = 0, original_name: str = "upload.bin") -> dict:
+    asset_id = str(uuid4())
+    storage_key = object_key_for_upload(asset_id, kind, original_name)
+    presign = storage.presign_upload(kind=kind, duration_seconds=duration_seconds, storage_key=storage_key)
+    presign["assetId"] = asset_id
+    presign["storageKey"] = storage_key
+    presign["publicUrl"] = public_url(storage_key)
+    return presign
+
+
+def complete_uploaded_asset(
+    db: Session,
+    user_id: str,
+    asset_id: str,
+    kind: str,
+    original_name: str,
+    mime_type: str,
+    storage_key: str,
+    size_bytes: int = 0,
+    duration_seconds: int = 0,
+) -> Asset:
+    if db.get(Asset, asset_id) is not None:
+        raise HTTPException(status_code=409, detail="asset already exists")
+    normalized_key = storage_key.strip("/")
+    if asset_id not in normalized_key:
+        raise HTTPException(status_code=400, detail="storage key does not match asset")
+    asset = Asset(
+        id=asset_id,
+        user_id=user_id,
+        kind=kind,
+        original_name=safe_storage_name(original_name),
+        mime_type=mime_type or "application/octet-stream",
+        storage_key=normalized_key,
+        url=public_url(normalized_key),
+        size_bytes=max(0, size_bytes),
         duration_seconds=duration_seconds,
         expires_at=now() + timedelta(days=7),
     )

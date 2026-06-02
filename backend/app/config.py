@@ -16,8 +16,18 @@ class Settings(BaseSettings):
     allow_demo_without_auth: bool = True
     propainter_command: str = ""
     e2fgvi_command: str = ""
+    storage_backend: str = "local"
+    volcengine_openapi_ak: str = ""
+    volcengine_openapi_sk: str = ""
+    volcengine_tos_endpoint: str = "tos-cn-guangzhou.volces.com"
+    volcengine_tos_region: str = "cn-guangzhou"
+    volcengine_tos_bucket: str = ""
+    volcengine_tos_public_base_url: str = ""
+    volcengine_tos_ak: str = ""
+    volcengine_tos_sk: str = ""
+    volcengine_tos_presign_expires_seconds: int = 3600
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @property
     def upload_path(self) -> Path:

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
+from app.storage import storage
 
 
 class VideoProcessingError(RuntimeError):
@@ -134,12 +135,21 @@ def _output_key(task_id: str, suffix: str = "watermark-removed") -> str:
     return f"{task_id}-{suffix}.mp4"
 
 
+def _is_http_url(value: str) -> bool:
+    return value.startswith("http://") or value.startswith("https://")
+
+
+def _adapter_name(params: dict[str, Any]) -> str:
+    return str(params.get("modelAdapter") or params.get("algorithm") or "opencv-inpaint").lower()
+
+
 def _final_result(output_key: str, output_path: Path) -> dict:
+    stored = storage.save_file(output_key, output_path)
     return {
-        "storage_key": output_key,
-        "url": f"{settings.public_upload_prefix}/{output_key}",
+        "storage_key": stored.storage_key,
+        "url": stored.public_url,
         "mime_type": "video/mp4",
-        "size_bytes": output_path.stat().st_size,
+        "size_bytes": stored.size,
     }
 
 
@@ -259,7 +269,28 @@ def process_with_opencv_inpaint(input_path: Path, output_path: Path, params: dic
     temp_video_path.unlink(missing_ok=True)
 
 
-def process_with_external_model(input_path: Path, output_path: Path, params: dict[str, Any], adapter: str) -> None:
+def _result_upload_target(output_key: str) -> dict[str, Any] | None:
+    if not storage.is_remote:
+        return None
+    presign = storage.presign_upload(kind="result", duration_seconds=0, storage_key=output_key)
+    if presign.get("mode") != "tos-put":
+        return None
+    return {
+        "upload_url": presign["uploadUrl"],
+        "headers": presign.get("headers") or {},
+        "storage_key": output_key,
+        "url": storage.public_url(output_key),
+    }
+
+
+def process_with_external_model(
+    input_path: Path,
+    output_path: Path,
+    params: dict[str, Any],
+    adapter: str,
+    input_url: str | None = None,
+    result_upload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     command_template = settings.propainter_command if adapter == "propainter" else settings.e2fgvi_command
     if not command_template:
         raise VideoProcessingError(f"{adapter} command is not configured.")
@@ -268,6 +299,7 @@ def process_with_external_model(input_path: Path, output_path: Path, params: dic
     work_dir.mkdir(parents=True, exist_ok=True)
     regions_path = work_dir / "regions.json"
     params_path = work_dir / "params.json"
+    result_meta_path = work_dir / "result.json"
     regions_path.write_text(json.dumps(params.get("regions") or [], ensure_ascii=False), encoding="utf-8")
     params_path.write_text(json.dumps(params, ensure_ascii=False), encoding="utf-8")
 
@@ -277,6 +309,14 @@ def process_with_external_model(input_path: Path, output_path: Path, params: dic
     env["MODEL_PLAZA_REGIONS"] = str(regions_path)
     env["MODEL_PLAZA_PARAMS"] = str(params_path)
     env["MODEL_PLAZA_WORKDIR"] = str(work_dir)
+    env["MODEL_PLAZA_RESULT_META"] = str(result_meta_path)
+    if input_url:
+        env["MODEL_PLAZA_INPUT_URL"] = input_url
+    if result_upload:
+        env["MODEL_PLAZA_RESULT_UPLOAD_URL"] = str(result_upload["upload_url"])
+        env["MODEL_PLAZA_RESULT_UPLOAD_HEADERS"] = json.dumps(result_upload.get("headers") or {}, ensure_ascii=False)
+        env["MODEL_PLAZA_RESULT_STORAGE_KEY"] = str(result_upload["storage_key"])
+        env["MODEL_PLAZA_RESULT_URL"] = str(result_upload["url"])
     command = [
         part.format(
             input=str(input_path),
@@ -288,26 +328,42 @@ def process_with_external_model(input_path: Path, output_path: Path, params: dic
         for part in shlex.split(command_template)
     ]
     subprocess.run(command, check=True, capture_output=True, text=True, env=env)
+    if result_meta_path.exists():
+        return json.loads(result_meta_path.read_text(encoding="utf-8"))
+    return None
 
 
-def process_with_model_adapter(input_path: Path, output_path: Path, params: dict[str, Any]) -> str:
-    adapter = str(params.get("modelAdapter") or params.get("algorithm") or "opencv-inpaint").lower()
+def process_with_model_adapter(
+    input_path: Path,
+    output_path: Path,
+    params: dict[str, Any],
+    input_url: str | None = None,
+    result_upload: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any] | None]:
+    adapter = _adapter_name(params)
     if adapter in {"ffmpeg", "ffmpeg-delogo", "delogo"}:
         process_with_ffmpeg_delogo(input_path, output_path, params)
-        return "ffmpeg-delogo"
+        return "ffmpeg-delogo", None
     if adapter in {"opencv", "opencv-inpaint", "model", "inpaint"}:
         process_with_opencv_inpaint(input_path, output_path, params)
-        return "opencv-inpaint"
+        return "opencv-inpaint", None
     if adapter in {"propainter", "e2fgvi"}:
-        process_with_external_model(input_path, output_path, params, adapter)
-        return adapter
+        return adapter, process_with_external_model(input_path, output_path, params, adapter, input_url=input_url, result_upload=result_upload)
     raise VideoProcessingError(f"Unsupported video model adapter: {adapter}")
 
 
 def process_masked_video_removal(input_storage_key: str, task_id: str, params: dict, suffix: str = "watermark-removed") -> dict:
-    input_path = settings.upload_path / input_storage_key
+    input_url = storage.public_url(input_storage_key)
+    adapter = _adapter_name(params)
+    input_path = storage.local_path(input_storage_key)
     if not input_path.exists():
-        raise VideoProcessingError("Input video file not found.")
+        if adapter in {"propainter", "e2fgvi"} and _is_http_url(input_url):
+            input_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            try:
+                input_path = storage.ensure_local(input_storage_key)
+            except FileNotFoundError as exc:
+                raise VideoProcessingError("Input video file not found.") from exc
 
     regions = params.get("regions") or []
     if not regions:
@@ -317,7 +373,21 @@ def process_masked_video_removal(input_storage_key: str, task_id: str, params: d
     output_key = _output_key(task_id, suffix)
     output_path = settings.upload_path / output_key
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    process_with_model_adapter(input_path, output_path, params)
+    result_upload = _result_upload_target(output_key) if adapter in {"propainter", "e2fgvi"} else None
+    _, remote_result = process_with_model_adapter(
+        input_path,
+        output_path,
+        params,
+        input_url=input_url if _is_http_url(input_url) else None,
+        result_upload=result_upload,
+    )
+    if remote_result:
+        return {
+            "storage_key": str(remote_result["storage_key"]),
+            "url": str(remote_result["url"]),
+            "mime_type": str(remote_result.get("mime_type") or "video/mp4"),
+            "size_bytes": int(remote_result.get("size_bytes") or 0),
+        }
     return _final_result(output_key, output_path)
 
 

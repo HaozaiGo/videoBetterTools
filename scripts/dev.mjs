@@ -2,7 +2,10 @@ import { spawn } from "node:child_process";
 
 const backendEnv = {
   ...process.env,
-  PROPAINTER_COMMAND: process.env.PROPAINTER_COMMAND ?? "python ../scripts/gpu/propainter_ssh_adapter.py",
+  PROPAINTER_COMMAND: process.env.PROPAINTER_COMMAND ?? "python ../scripts/gpu/propainter_api_adapter.py",
+  MODEL_PLAZA_GPU_API_URL: process.env.MODEL_PLAZA_GPU_API_URL ?? "http://32.196.46.122:18080",
+  MODEL_PLAZA_GPU_API_KEY: process.env.MODEL_PLAZA_GPU_API_KEY ?? "model-plaza-dev-gpu-key",
+  MODEL_PLAZA_GPU_API_TUNNEL: process.env.MODEL_PLAZA_GPU_API_TUNNEL ?? "0",
 };
 
 const processes = [

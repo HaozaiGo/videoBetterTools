@@ -10,9 +10,11 @@ from app.auth import admin_user, create_token, current_user, find_user_by_email,
 from app.config import settings
 from app.database import get_db
 from app.models import User
-from app.schemas import LoginRequest, ProviderCallback, RechargeCreate, TaskCreate, UserCreate, UserRecharge
+from app.schemas import AssetComplete, LoginRequest, ProviderCallback, RechargeCreate, TaskCreate, UserCreate, UserRecharge
 from app.services import (
     asset_to_dict,
+    complete_uploaded_asset,
+    create_presigned_asset_upload,
     create_user,
     create_task,
     provider_callback,
@@ -21,7 +23,6 @@ from app.services import (
     serialize_bootstrap,
     task_to_dict,
 )
-from app.storage import storage
 
 logger = logging.getLogger("model_plaza")
 
@@ -98,8 +99,14 @@ def bootstrap(db: Session = Depends(get_db), user: User = Depends(current_user))
 
 
 @app.post("/api/assets/presign")
-def presign_asset(kind: str = "video", durationSeconds: int = 0, _user: User = Depends(current_user)) -> dict:
-    return storage.presign_upload(kind=kind, duration_seconds=durationSeconds)
+def presign_asset(
+    kind: str = "video",
+    durationSeconds: int = 0,
+    originalName: str = "upload.bin",
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+) -> dict:
+    return create_presigned_asset_upload(db, user.id, kind=kind, duration_seconds=durationSeconds, original_name=originalName)
 
 
 @app.post("/api/assets", status_code=201)
@@ -111,6 +118,22 @@ async def upload_asset(
     user: User = Depends(current_user),
 ) -> dict:
     asset = await save_upload(db, user.id, file, kind=kind, duration_seconds=durationSeconds)
+    return {"asset": asset_to_dict(asset)}
+
+
+@app.post("/api/assets/complete", status_code=201)
+def complete_asset_upload(payload: AssetComplete, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    asset = complete_uploaded_asset(
+        db,
+        user.id,
+        asset_id=payload.assetId,
+        kind=payload.kind,
+        original_name=payload.originalName,
+        mime_type=payload.mimeType,
+        storage_key=payload.storageKey,
+        size_bytes=payload.sizeBytes,
+        duration_seconds=payload.durationSeconds,
+    )
     return {"asset": asset_to_dict(asset)}
 
 

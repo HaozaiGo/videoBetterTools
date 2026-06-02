@@ -19,7 +19,7 @@ const defaultValues: ToolFormValues = {
   mode: "manual",
   regions: [],
   keepAudio: true,
-  modelAdapter: "opencv-inpaint",
+  modelAdapter: "propainter",
   inpaintMethod: "telea",
   inpaintRadius: 5,
   maskPadding: 8,
@@ -389,9 +389,9 @@ export function ToolPage() {
                           }
                         }}
                       >
-                        <option value="opencv-inpaint">智能修复</option>
-                        <option value="ffmpeg-delogo">快速模糊</option>
-                        <option value="propainter">ProPainter</option>
+                        <option value="propainter">高质量修复</option>
+                        <option value="opencv-inpaint">轻量修复</option>
+                        <option value="ffmpeg-delogo">快速遮盖</option>
                       </select>
                     </label>
                   )}

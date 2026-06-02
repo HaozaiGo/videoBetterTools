@@ -39,6 +39,38 @@ export function getBootstrap() {
 }
 
 export function uploadAsset(input: { file: File; kind: "video" | "image"; durationSeconds?: number }) {
+  return uploadAssetWithStorage(input);
+}
+
+async function uploadAssetWithStorage(input: { file: File; kind: "video" | "image"; durationSeconds?: number }) {
+  const presign = await presignAsset(input.kind, input.durationSeconds || 0, input.file.name);
+  if (presign.mode === "tos-put") {
+    if (!presign.assetId || !presign.storageKey) {
+      throw new Error("上传签名缺少资产信息");
+    }
+    const uploadResponse = await fetch(presign.uploadUrl, {
+      method: presign.method,
+      headers: presign.headers || {},
+      body: input.file,
+    });
+    if (!uploadResponse.ok) {
+      throw new Error("上传到火山存储失败");
+    }
+    return request<{ asset: Asset }>("/api/assets/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        assetId: presign.assetId,
+        kind: input.kind,
+        originalName: input.file.name,
+        mimeType: input.file.type || "application/octet-stream",
+        storageKey: presign.storageKey,
+        sizeBytes: input.file.size,
+        durationSeconds: input.durationSeconds || 0,
+      }),
+    });
+  }
+
   const body = new FormData();
   body.append("file", input.file);
   body.append("kind", input.kind);
@@ -49,9 +81,18 @@ export function uploadAsset(input: { file: File; kind: "video" | "image"; durati
   });
 }
 
-export function presignAsset(kind: "video" | "image", durationSeconds = 0) {
-  return request<{ mode: string; method: string; uploadUrl: string; fields: Record<string, unknown> }>(
-    `/api/assets/presign?kind=${kind}&durationSeconds=${durationSeconds}`,
+export function presignAsset(kind: "video" | "image", durationSeconds = 0, originalName = "upload.bin") {
+  return request<{
+    mode: string;
+    method: string;
+    uploadUrl: string;
+    headers?: Record<string, string>;
+    fields: Record<string, unknown>;
+    assetId?: string;
+    storageKey?: string;
+    publicUrl?: string;
+  }>(
+    `/api/assets/presign?kind=${kind}&durationSeconds=${durationSeconds}&originalName=${encodeURIComponent(originalName)}`,
     { method: "POST" },
   );
 }
