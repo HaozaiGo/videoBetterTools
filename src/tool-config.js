@@ -14,10 +14,9 @@ export const tools = [
       unitSeconds: 10,
       unitCredits: 5,
       minimumCredits: 10,
-      resolutionMultiplier: { "720p": 1, "1080p": 1.2, "2K": 1.6, "4K": 2.2 },
       priorityMultiplier: { standard: 1, express: 1.45 },
     },
-    inputs: ["duration", "resolution", "priority", "watermarkCount"],
+    inputs: ["priority", "watermarkCount"],
   },
   {
     slug: "remove-subtitle",
@@ -34,10 +33,9 @@ export const tools = [
       unitSeconds: 10,
       unitCredits: 4,
       minimumCredits: 8,
-      resolutionMultiplier: { "720p": 1, "1080p": 1.15, "2K": 1.45, "4K": 2 },
       priorityMultiplier: { standard: 1, express: 1.4 },
     },
-    inputs: ["duration", "resolution", "priority"],
+    inputs: ["priority"],
   },
   {
     slug: "object-removal",

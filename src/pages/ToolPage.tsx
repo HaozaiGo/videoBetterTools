@@ -71,15 +71,19 @@ export function ToolPage() {
     mutationFn: async (values: ToolFormValues) => {
       if (!tool) throw new Error("工具不存在");
       if (!file) throw new Error("请先选择一个文件");
+      const taskValues = {
+        ...values,
+        resolution: tool.inputs.includes("resolution") ? values.resolution : "",
+      };
       const params = isMaskVideoTool
         ? {
-            ...values,
+            ...taskValues,
             mode: "manual" as const,
             regions,
             removalTarget: isSubtitleTool ? "subtitle" : "watermark",
             maskStrategy: values.maskStrategy,
           }
-        : values;
+        : taskValues;
       const upload = await uploadAsset({
         file,
         kind: tool.pricing.mode === "image" ? "image" : "video",
@@ -104,18 +108,19 @@ export function ToolPage() {
   const values = useStore(form.store, (state) => state.values);
   const selectedModelAdapter = values.modelAdapter;
   const isOpenCvAdapter = selectedModelAdapter === "opencv-inpaint";
+  const isTextMaskAdapter = selectedModelAdapter === "opencv-inpaint" || selectedModelAdapter === "propainter";
   const isFastBlurAdapter = selectedModelAdapter === "ffmpeg-delogo";
-  const showTextMaskControls = isMaskVideoTool && isOpenCvAdapter;
+  const showTextMaskControls = isMaskVideoTool && isTextMaskAdapter;
   const showTextThreshold = showTextMaskControls && values.maskStrategy === "subtitle-text";
   const showOpenCvControls = isMaskVideoTool && isOpenCvAdapter;
   const showMaskPadding = isMaskVideoTool && !isFastBlurAdapter;
   const estimate = useMemo(() => (tool ? estimateCredits(tool, values) : 0), [tool, values]);
 
   useEffect(() => {
-    if (isMaskVideoTool && !isOpenCvAdapter && values.maskStrategy !== "rectangle") {
+    if (isMaskVideoTool && !isTextMaskAdapter && values.maskStrategy !== "rectangle") {
       form.setFieldValue("maskStrategy", "rectangle");
     }
-  }, [form, isMaskVideoTool, isOpenCvAdapter, values.maskStrategy]);
+  }, [form, isMaskVideoTool, isTextMaskAdapter, values.maskStrategy]);
 
   useEffect(() => {
     if (!file || !file.type.startsWith("video/")) {
@@ -153,6 +158,17 @@ export function ToolPage() {
     }
 
     setMediaBox({ left, top, width, height });
+  };
+
+  const handleLoadedMetadata = () => {
+    updateMediaBox();
+    const seconds = videoRef.current?.duration;
+    if (seconds && Number.isFinite(seconds)) {
+      const roundedSeconds = Math.max(1, Math.ceil(seconds));
+      if (values.duration !== roundedSeconds) {
+        form.setFieldValue("duration", roundedSeconds);
+      }
+    }
   };
 
   useEffect(() => {
@@ -268,7 +284,7 @@ export function ToolPage() {
           {isMaskVideoTool && videoPreviewUrl ? (
             <section className="video-region-editor" aria-label={`${regionNoun}区域框选`}>
               <div className="video-preview-wrap">
-                <video ref={videoRef} src={videoPreviewUrl} controls playsInline preload="metadata" onLoadedMetadata={updateMediaBox} onLoadedData={updateMediaBox} />
+                <video ref={videoRef} src={videoPreviewUrl} controls playsInline preload="metadata" onLoadedMetadata={handleLoadedMetadata} onLoadedData={updateMediaBox} />
                 <div
                   ref={overlayRef}
                   className={`region-overlay${isSelectingRegion ? " active" : ""}`}
@@ -328,8 +344,8 @@ export function ToolPage() {
               <form.Field name="duration">
                 {(field) => (
                   <label>
-                    视频时长（秒）
-                    <input type="number" min={1} max={7200} value={field.state.value} onChange={(event) => field.handleChange(Number(event.target.value))} />
+                    视频时长（自动）
+                    <input type="number" min={1} max={7200} value={field.state.value} readOnly={Boolean(videoPreviewUrl)} onChange={(event) => field.handleChange(Number(event.target.value))} />
                   </label>
                 )}
               </form.Field>
@@ -384,7 +400,7 @@ export function ToolPage() {
                         onChange={(event) => {
                           const nextAdapter = event.target.value as ToolFormValues["modelAdapter"];
                           field.handleChange(nextAdapter);
-                          if (nextAdapter !== "opencv-inpaint") {
+                          if (nextAdapter !== "opencv-inpaint" && nextAdapter !== "propainter") {
                             form.setFieldValue("maskStrategy", "rectangle");
                           }
                         }}
@@ -404,6 +420,7 @@ export function ToolPage() {
                           遮罩策略
                           <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["maskStrategy"])}>
                             <option value="subtitle-text">{isSubtitleTool ? "字幕文字精修" : "文字水印精修"}</option>
+                            {isSubtitleTool ? <option value="dark-subtitle-line">黑色字幕整行修复</option> : null}
                             <option value="rectangle">整块区域修复</option>
                           </select>
                         </label>

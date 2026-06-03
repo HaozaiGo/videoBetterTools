@@ -85,7 +85,6 @@ export function TasksPage() {
       <div className="panel-head">
         <div>
           <h1>任务列表</h1>
-          <p>任务状态来自后端。创建任务会冻结积分，供应商回调成功扣费，失败释放冻结。</p>
         </div>
         <button className="ghost" onClick={() => queryClient.invalidateQueries({ queryKey: ["bootstrap"] })}>
           刷新

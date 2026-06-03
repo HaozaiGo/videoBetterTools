@@ -3,10 +3,16 @@ from app.pricing import estimate_credits
 from app.tool_config import get_tool
 
 
-def test_video_pricing_uses_duration_resolution_and_minimum() -> None:
+def test_mask_video_pricing_uses_duration_and_minimum() -> None:
     tool = get_tool("remove-watermark")
-    assert estimate_credits(tool, {"duration": 30, "resolution": "1080p", "priority": "standard"}) == 18
+    assert estimate_credits(tool, {"duration": 30, "resolution": "1080p", "priority": "standard"}) == 15
     assert estimate_credits(tool, {"duration": 1, "resolution": "720p", "priority": "standard"}) == 10
+
+
+def test_enhance_video_pricing_uses_resolution() -> None:
+    tool = get_tool("enhance")
+    assert estimate_credits(tool, {"duration": 30, "resolution": "1080p", "priority": "standard"}) == 30
+    assert estimate_credits(tool, {"duration": 30, "resolution": "4K", "priority": "standard"}) == 68
 
 
 def test_image_pricing_uses_count() -> None:

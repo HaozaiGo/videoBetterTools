@@ -42,6 +42,30 @@ def _normalized_region_to_pixels(region: dict, width: int, height: int) -> tuple
     return px, py, pw, ph
 
 
+def _even_dimension(value: float) -> int:
+    dimension = max(2, int(round(value)))
+    return dimension if dimension % 2 == 0 else dimension + 1
+
+
+def _target_video_dimensions(width: int, height: int, params: dict) -> tuple[int, int]:
+    target_short_side = {
+        "720p": 720,
+        "1080p": 1080,
+        "2k": 1440,
+        "4k": 2160,
+    }.get(str(params.get("resolution") or "").lower())
+    if not target_short_side or width <= 0 or height <= 0:
+        return width, height
+
+    if width >= height:
+        target_height = target_short_side
+        target_width = width * target_height / height
+    else:
+        target_width = target_short_side
+        target_height = height * target_width / width
+    return _even_dimension(target_width), _even_dimension(target_height)
+
+
 def _video_meta(input_path: Path) -> tuple[int, int, float]:
     import cv2
 
@@ -88,6 +112,104 @@ def _generate_rectangle_masks(mask_dir: Path, frame_count: int, width: int, heig
 
     # ProPainter 接收逐帧 mask；固定字幕区域先复制同一张 mask，后续可扩展为跟踪 mask。
     for index in range(1, frame_count + 1):
+        cv2.imwrite(str(mask_dir / f"{index:06d}.png"), mask)
+
+
+def _mask_strategy(params: dict) -> str:
+    strategy = str(params.get("maskStrategy") or "").lower()
+    if strategy:
+        return strategy
+    return "subtitle-text" if params.get("removalTarget") == "subtitle" else "rectangle"
+
+
+def _text_mask_for_frame(frame, regions: list[dict], padding: int, params: dict):
+    import cv2
+    import numpy as np
+
+    height, width = frame.shape[:2]
+    mask = np.zeros((height, width), dtype=np.uint8)
+    light_threshold = max(80, min(245, int(params.get("textLightThreshold") or 155)))
+    edge_low = max(10, min(200, int(params.get("textEdgeLow") or 45)))
+    edge_high = max(edge_low + 10, min(255, int(params.get("textEdgeHigh") or 150)))
+    local_padding = max(1, min(16, padding))
+
+    for region in regions:
+        x, y, w, h = _normalized_region_to_pixels(region, width, height)
+        left = max(0, x - local_padding)
+        top = max(0, y - local_padding)
+        right = min(width, x + w + local_padding)
+        bottom = min(height, y + h + local_padding)
+        crop = frame[top:bottom, left:right]
+        if crop.size == 0:
+            continue
+
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        bright = cv2.inRange(gray, light_threshold, 255)
+        gold = cv2.inRange(hsv, (8, 45, max(80, light_threshold - 80)), (45, 255, 255))
+        edges = cv2.Canny(gray, edge_low, edge_high)
+
+        kernel_size = max(3, local_padding | 1)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        dark_threshold = max(20, min(120, int(params.get("textDarkThreshold") or 70)))
+        dark = cv2.inRange(gray, 0, dark_threshold)
+        dark_near_edge = cv2.bitwise_and(dark, cv2.dilate(edges, kernel, iterations=1))
+        dark_text = np.zeros_like(dark)
+        component_count, labels, stats, _ = cv2.connectedComponentsWithStats(dark_near_edge, 8)
+        crop_area = max(1, crop.shape[0] * crop.shape[1])
+        for component_index in range(1, component_count):
+            area = int(stats[component_index, cv2.CC_STAT_AREA])
+            component_width = int(stats[component_index, cv2.CC_STAT_WIDTH])
+            component_height = int(stats[component_index, cv2.CC_STAT_HEIGHT])
+            if area < 8 or area > crop_area * 0.18:
+                continue
+            if component_width < 3 or component_height < 3:
+                continue
+            if component_height > crop.shape[0] * 0.62:
+                continue
+            dark_text[labels == component_index] = 255
+        dark_text = cv2.dilate(dark_text, kernel, iterations=1)
+
+        text_seed = cv2.bitwise_or(cv2.bitwise_or(bright, gold), dark_text)
+        bright_area = cv2.dilate(text_seed, kernel, iterations=1)
+        edge_near_text = cv2.bitwise_and(cv2.dilate(edges, kernel, iterations=1), cv2.dilate(text_seed, kernel, iterations=2))
+        text_mask = cv2.bitwise_or(bright_area, edge_near_text)
+
+        gold_pixels = cv2.countNonZero(gold)
+        crop_pixels = max(1, crop.shape[0] * crop.shape[1])
+        gold_mode = gold_pixels >= 80 and gold_pixels / crop_pixels >= 0.003
+        if gold_mode or params.get("textShadowExpansion"):
+            shadow_expansion = max(local_padding + 2, min(64, int(params.get("textShadowExpansion") or round(min(crop.shape[:2]) * 0.16))))
+            shadow_kernel_size = max(3, shadow_expansion | 1)
+            shadow_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (shadow_kernel_size, shadow_kernel_size))
+            near_text = cv2.dilate(text_seed, shadow_kernel, iterations=1)
+            darker_than_text = cv2.inRange(gray, 0, max(80, light_threshold - 35))
+            shadow_edges = cv2.bitwise_and(cv2.dilate(edges, kernel, iterations=1), near_text)
+            shadow_area = cv2.bitwise_and(cv2.bitwise_or(darker_than_text, shadow_edges), near_text)
+            text_mask = cv2.bitwise_or(text_mask, shadow_area)
+        text_mask = cv2.morphologyEx(text_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+        mask[top:bottom, left:right] = cv2.bitwise_or(mask[top:bottom, left:right], text_mask)
+
+    return mask
+
+
+def _generate_text_masks(mask_dir: Path, frames_dir: Path, width: int, height: int, regions: list[dict], padding: int, params: dict) -> None:
+    import cv2
+
+    mask_dir.mkdir(parents=True, exist_ok=True)
+    fallback_mask = None
+    for index, frame_path in enumerate(sorted(frames_dir.glob("*.png")), start=1):
+        frame = cv2.imread(str(frame_path))
+        if frame is None:
+            raise RuntimeError(f"Cannot read extracted frame: {frame_path}")
+        mask = _text_mask_for_frame(frame, regions, padding, params)
+        if mask.max() == 0:
+            if fallback_mask is None:
+                fallback_dir = mask_dir.parent / "fallback-rect-mask"
+                _generate_rectangle_masks(fallback_dir, 1, width, height, regions, padding)
+                fallback_mask = cv2.imread(str(fallback_dir / "000001.png"), cv2.IMREAD_GRAYSCALE)
+            mask = fallback_mask
         cv2.imwrite(str(mask_dir / f"{index:06d}.png"), mask)
 
 
@@ -156,6 +278,7 @@ def main() -> None:
     workdir.mkdir(parents=True, exist_ok=True)
 
     width, height, fps = _video_meta(input_path)
+    target_width, target_height = _target_video_dimensions(width, height, params)
     mask_padding = max(0, min(120, int(params.get("maskPadding") or 8)))
     keep_audio = bool(params.get("keepAudio", True))
 
@@ -163,8 +286,14 @@ def main() -> None:
     frame_count = len(sorted(frames_dir.glob("*.png")))
     if frame_count <= 0:
         raise RuntimeError("No frames were extracted from input video.")
-    _generate_rectangle_masks(masks_dir, frame_count, width, height, regions, mask_padding)
+    strategy = _mask_strategy(params)
+    if strategy in {"subtitle", "subtitle-text", "text", "ocr"}:
+        _generate_text_masks(masks_dir, frames_dir, width, height, regions, mask_padding, params)
+    else:
+        _generate_rectangle_masks(masks_dir, frame_count, width, height, regions, mask_padding)
 
+    precise_mask_strategies = {"subtitle", "subtitle-text", "text", "ocr", "dark-subtitle-line"}
+    default_mask_dilation = 1 if strategy in precise_mask_strategies else 5
     command = [
         args.python,
         "inference_propainter.py",
@@ -180,17 +309,19 @@ def main() -> None:
         "--subvideo_length",
         str(int(params.get("subvideoLength") or 40)),
         "--mask_dilation",
-        str(int(params.get("propainterMaskDilation") or 5)),
+        str(int(params.get("propainterMaskDilation") or default_mask_dilation)),
     ]
-    if params.get("propainterHeight") and params.get("propainterWidth"):
-        command += ["--height", str(int(params["propainterHeight"])), "--width", str(int(params["propainterWidth"]))]
+    propainter_width = int(params.get("propainterWidth") or target_width)
+    propainter_height = int(params.get("propainterHeight") or target_height)
+    if (propainter_width, propainter_height) != (width, height):
+        command += ["--height", str(propainter_height), "--width", str(propainter_width)]
     _run(command, cwd=propainter_root)
 
     inpaint_path = results_dir / frames_dir.name / "inpaint_out.mp4"
     if not inpaint_path.exists():
         raise RuntimeError(f"ProPainter output not found: {inpaint_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    _encode_with_audio(inpaint_path, input_path, output_path, keep_audio, width, height)
+    _encode_with_audio(inpaint_path, input_path, output_path, keep_audio, target_width, target_height)
     print(f"ProPainter result saved to {output_path}", flush=True)
 
 

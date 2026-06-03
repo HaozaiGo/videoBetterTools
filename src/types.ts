@@ -149,6 +149,6 @@ export type ToolFormValues = {
   inpaintMethod: "telea" | "ns";
   inpaintRadius: number;
   maskPadding: number;
-  maskStrategy: "rectangle" | "subtitle-text";
+  maskStrategy: "rectangle" | "subtitle-text" | "dark-subtitle-line";
   textLightThreshold: number;
 };
