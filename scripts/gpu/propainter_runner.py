@@ -338,13 +338,17 @@ def _prepare_chunk(
     start: int,
     end: int,
 ) -> tuple[Path, Path]:
+    if chunk_dir.exists():
+        shutil.rmtree(chunk_dir)
     chunk_frames_dir = chunk_dir / "frames"
     chunk_masks_dir = chunk_dir / "masks"
     chunk_frames_dir.mkdir(parents=True, exist_ok=True)
     chunk_masks_dir.mkdir(parents=True, exist_ok=True)
     for output_index, source_index in enumerate(range(start, end), start=1):
-        _link_or_copy(frames[source_index], chunk_frames_dir / f"{output_index:06d}.png")
-        _link_or_copy(masks[source_index], chunk_masks_dir / f"{output_index:06d}.png")
+        shutil.copy2(frames[source_index], chunk_frames_dir / f"{output_index:06d}.png")
+        shutil.copy2(masks[source_index], chunk_masks_dir / f"{output_index:06d}.png")
+    if not chunk_frames_dir.is_dir() or not chunk_masks_dir.is_dir():
+        raise RuntimeError(f"Chunk directories were not created correctly: {chunk_dir}")
     return chunk_frames_dir, chunk_masks_dir
 
 
