@@ -123,6 +123,10 @@ export function TasksPage() {
       header: "创建时间",
       cell: (info) => formatDate(info.getValue()),
     }),
+    columnHelper.accessor("completedAt", {
+      header: "完成时间",
+      cell: (info) => formatDate(info.getValue()),
+    }),
     columnHelper.display({
       id: "result",
       header: "结果",

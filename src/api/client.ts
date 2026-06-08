@@ -46,8 +46,10 @@ type UploadAssetInput = {
   file: File;
   kind: "video" | "image";
   durationSeconds?: number;
-  onProgress?: (progress: { percent: number; uploadedBytes: number; totalBytes: number; stage: string }) => void;
+  onProgress?: (progress: UploadProgress) => void;
 };
+
+type UploadProgress = { percent: number; uploadedBytes: number; totalBytes: number; stage: string };
 
 const multipartThresholdBytes = 32 * 1024 * 1024;
 const multipartChunkSize = 8 * 1024 * 1024;
@@ -64,14 +66,135 @@ function multipartStorageKey(input: UploadAssetInput) {
   return `model-plaza-multipart:${input.kind}:${input.file.name}:${input.file.size}:${input.file.lastModified}`;
 }
 
-function uploadAssetViaBackend(input: { file: File; kind: "video" | "image"; durationSeconds?: number }) {
+function emitUploadProgress(input: Pick<UploadAssetInput, "file" | "onProgress">, progress: Partial<UploadProgress> & { stage: string }) {
+  const totalBytes = progress.totalBytes || input.file.size || 1;
+  const uploadedBytes = Math.min(progress.uploadedBytes || 0, totalBytes);
+  const percent = progress.percent ?? Math.round((uploadedBytes / totalBytes) * 100);
+  input.onProgress?.({
+    stage: progress.stage,
+    percent: Math.max(0, Math.min(100, percent)),
+    uploadedBytes,
+    totalBytes,
+  });
+}
+
+function parseResponsePayload<T>(text: string): T {
+  if (!text) return {} as T;
+  return JSON.parse(text) as T;
+}
+
+function getErrorMessage(payload: unknown) {
+  if (payload && typeof payload === "object") {
+    const candidate = payload as { error?: unknown; detail?: unknown };
+    if (typeof candidate.error === "string") return candidate.error;
+    if (typeof candidate.detail === "string") return candidate.detail;
+  }
+  return "请求失败";
+}
+
+function requestWithUploadProgress<T>(
+  path: string,
+  init: {
+    method: string;
+    body: XMLHttpRequestBodyInit;
+    headers?: Record<string, string>;
+    onProgress?: UploadAssetInput["onProgress"];
+    progressTotalBytes: number;
+    progressStage: string;
+  },
+) {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(init.method, path);
+    const token = getAuthToken();
+    if (token && !init.headers?.Authorization) {
+      xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    }
+    for (const [key, value] of Object.entries(init.headers || {})) {
+      xhr.setRequestHeader(key, value);
+    }
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      const percent = Math.round((event.loaded / event.total) * 100);
+      init.onProgress?.({
+        stage: init.progressStage,
+        percent,
+        uploadedBytes: Math.min(event.loaded, init.progressTotalBytes),
+        totalBytes: init.progressTotalBytes,
+      });
+    };
+    xhr.onload = () => {
+      let payload: unknown = {};
+      try {
+        payload = parseResponsePayload(xhr.responseText);
+      } catch {
+        payload = {};
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(payload as T);
+        return;
+      }
+      if (xhr.status === 401) {
+        clearAuthToken();
+        if (!location.pathname.startsWith("/login")) {
+          location.assign("/login");
+        }
+      }
+      reject(new Error(getErrorMessage(payload)));
+    };
+    xhr.onerror = () => reject(new Error("网络请求失败"));
+    xhr.send(init.body);
+  });
+}
+
+function putFileWithProgress(
+  url: string,
+  init: {
+    method: string;
+    headers?: Record<string, string>;
+    file: File;
+    onProgress?: UploadAssetInput["onProgress"];
+  },
+) {
+  return new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(init.method, url);
+    for (const [key, value] of Object.entries(init.headers || {})) {
+      xhr.setRequestHeader(key, value);
+    }
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      init.onProgress?.({
+        stage: "上传视频",
+        percent: Math.round((event.loaded / event.total) * 100),
+        uploadedBytes: Math.min(event.loaded, init.file.size),
+        totalBytes: init.file.size,
+      });
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+        return;
+      }
+      reject(new Error("上传到火山存储失败"));
+    };
+    xhr.onerror = () => reject(new Error("网络请求失败"));
+    xhr.send(init.file);
+  });
+}
+
+function uploadAssetViaBackend(input: UploadAssetInput) {
   const body = new FormData();
   body.append("file", input.file);
   body.append("kind", input.kind);
   body.append("durationSeconds", String(input.durationSeconds || 0));
-  return request<{ asset: Asset }>("/api/assets", {
+  emitUploadProgress(input, { stage: "准备上传", percent: 0, uploadedBytes: 0 });
+  return requestWithUploadProgress<{ asset: Asset }>("/api/assets", {
     method: "POST",
     body,
+    onProgress: input.onProgress,
+    progressStage: "上传视频",
+    progressTotalBytes: input.file.size,
   });
 }
 
@@ -155,19 +278,18 @@ async function uploadAssetWithStorage(input: UploadAssetInput) {
     if (!presign.assetId || !presign.storageKey) {
       throw new Error("上传签名缺少资产信息");
     }
-    let uploadResponse: Response;
+    emitUploadProgress(input, { stage: "准备上传", percent: 0, uploadedBytes: 0 });
     try {
-      uploadResponse = await fetch(presign.uploadUrl, {
+      await putFileWithProgress(presign.uploadUrl, {
         method: presign.method,
         headers: presign.headers || {},
-        body: input.file,
+        file: input.file,
+        onProgress: input.onProgress,
       });
     } catch {
       return uploadAssetViaBackend(input);
     }
-    if (!uploadResponse.ok) {
-      throw new Error("上传到火山存储失败");
-    }
+    emitUploadProgress(input, { stage: "登记素材", percent: 100, uploadedBytes: input.file.size });
     return request<{ asset: Asset }>("/api/assets/complete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

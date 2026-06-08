@@ -34,6 +34,18 @@ function clamp(value: number) {
   return Math.max(0, Math.min(1, value));
 }
 
+function formatBytes(bytes: number) {
+  if (!bytes) return "0 MB";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
 function buildRegion(start: { x: number; y: number }, end: { x: number; y: number }): WatermarkRegion {
   // 用归一化坐标保存框选区域，避免前端预览尺寸和真实视频分辨率不一致时出现偏移。
   const x = clamp(Math.min(start.x, end.x));
@@ -50,12 +62,20 @@ type MediaBox = {
   height: number;
 };
 
+type SubmitProgress = {
+  stage: string;
+  percent: number;
+  uploadedBytes: number;
+  totalBytes: number;
+};
+
 export function ToolPage() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const queryClient = useQueryClient();
   const { data } = useSuspenseQuery({ queryKey: ["bootstrap"], queryFn: getBootstrap });
   const [file, setFile] = useState<File | null>(null);
   const [notice, setNotice] = useState("");
+  const [submitProgress, setSubmitProgress] = useState<SubmitProgress | null>(null);
   const [videoPreviewUrl, setVideoPreviewUrl] = useState("");
   const [regions, setRegions] = useState<WatermarkRegion[]>([]);
   const [draftRegion, setDraftRegion] = useState<WatermarkRegion | null>(null);
@@ -77,6 +97,8 @@ export function ToolPage() {
     mutationFn: async (values: ToolFormValues) => {
       if (!tool) throw new Error("工具不存在");
       if (!file) throw new Error("请先选择一个文件");
+      setNotice("");
+      setSubmitProgress({ stage: "准备上传", percent: 0, uploadedBytes: 0, totalBytes: file.size });
       const taskValues = {
         ...values,
         resolution: tool.inputs.includes("resolution") ? values.resolution : "",
@@ -110,10 +132,11 @@ export function ToolPage() {
         file,
         kind: tool.pricing.mode === "image" ? "image" : "video",
         durationSeconds: values.duration,
-        onProgress: ({ percent, stage }) => {
-          setNotice(`${stage}：${percent}%`);
+        onProgress: ({ percent, stage, uploadedBytes, totalBytes }) => {
+          setSubmitProgress({ percent, stage, uploadedBytes, totalBytes });
         },
       });
+      setSubmitProgress({ stage: "创建任务", percent: 100, uploadedBytes: file.size, totalBytes: file.size });
       return createTask({ toolSlug: tool.slug, inputAssetId: upload.asset.id, params });
     },
     onSuccess: (payload) => {
@@ -121,9 +144,13 @@ export function ToolPage() {
       setFile(null);
       setRegions([]);
       setDraftRegion(null);
+      setSubmitProgress(null);
       setNotice("任务已创建，积分已冻结。");
     },
-    onError: (error) => setNotice(error.message),
+    onError: (error) => {
+      setSubmitProgress(null);
+      setNotice(error.message);
+    },
   });
 
   const form = useForm({
@@ -263,6 +290,14 @@ export function ToolPage() {
 
   const available = data.account.availableCredits;
   const accept = tool.pricing.mode === "image" ? "image/*" : "video/*";
+  const submitButtonLabel =
+    available < estimate
+      ? "余额不足"
+      : createTaskMutation.isPending && submitProgress?.stage === "创建任务"
+        ? "正在创建任务..."
+        : createTaskMutation.isPending && submitProgress
+          ? `${submitProgress.stage} ${submitProgress.percent}%`
+          : "上传并创建任务";
 
   return (
     <div className="tool-page">
@@ -306,6 +341,7 @@ export function ToolPage() {
                 setRegions([]);
                 setDraftRegion(null);
                 setIsSelectingRegion(false);
+                setSubmitProgress(null);
                 setNotice("");
               }}
             />
@@ -635,8 +671,24 @@ export function ToolPage() {
             </div>
           </dl>
           <button className="primary wide" type="submit" disabled={available < estimate || createTaskMutation.isPending}>
-            {available < estimate ? "余额不足" : createTaskMutation.isPending ? "正在创建..." : "上传并创建任务"}
+            {submitButtonLabel}
           </button>
+          {createTaskMutation.isPending && submitProgress ? (
+            <div className="submit-progress" aria-live="polite">
+              <div className="submit-progress-head">
+                <span>{submitProgress.stage}</span>
+                <strong>{submitProgress.percent}%</strong>
+              </div>
+              <div className="submit-progress-track">
+                <span style={{ width: `${submitProgress.percent}%` }} />
+              </div>
+              <p>
+                {submitProgress.stage === "创建任务"
+                  ? "视频已上传，正在提交处理参数。"
+                  : `已上传 ${formatBytes(submitProgress.uploadedBytes)} / ${formatBytes(submitProgress.totalBytes)}`}
+              </p>
+            </div>
+          ) : null}
           <p className="fine-print">创建任务后后端冻结积分；供应商回调成功后扣费，失败则释放冻结积分。</p>
         </aside>
       </form>
