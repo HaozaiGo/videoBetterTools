@@ -40,6 +40,7 @@ services:
       PROPAINTER_COMMAND: ${PROPAINTER_COMMAND:-python /app/scripts/gpu/propainter_api_adapter.py}
       ENHANCE_COMMAND: ${ENHANCE_COMMAND:-python /app/scripts/gpu/video_enhance_api_adapter.py}
       TRANSLATE_COMMAND: ${TRANSLATE_COMMAND:-python /app/scripts/gpu/video_translate_api_adapter.py}
+      MODEL_PLAZA_CALLBACK_URL: ${MODEL_PLAZA_CALLBACK_URL:-http://api:8010/api/provider/callback}
     volumes:
       - uploads:/data/uploads
     depends_on:

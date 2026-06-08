@@ -33,6 +33,14 @@ def _run(command: list[str], cwd: Path | None = None) -> None:
     subprocess.run(command, cwd=cwd, check=True)
 
 
+def _link_or_copy(source: Path, target: Path) -> None:
+    target.unlink(missing_ok=True)
+    try:
+        target.symlink_to(source.resolve())
+    except OSError:
+        shutil.copy2(source, target)
+
+
 def _load_json(path: Path, fallback):
     if not path or not path.exists():
         return fallback
@@ -272,6 +280,143 @@ def _encode_with_audio(video_only_path: Path, input_path: Path, output_path: Pat
     _run(command)
 
 
+def _build_propainter_command(
+    python: str,
+    frames_dir: Path,
+    masks_dir: Path,
+    results_dir: Path,
+    fps: float,
+    frame_count: int,
+    width: int,
+    height: int,
+    params: dict,
+    strategy: str,
+    sizing_frame_count: int | None = None,
+) -> list[str]:
+    memory_frame_count = sizing_frame_count or frame_count
+    precise_mask_strategies = {"subtitle", "subtitle-text", "text", "ocr", "dark-subtitle-line"}
+    default_mask_dilation = 1 if strategy in precise_mask_strategies else 5
+    command = [
+        python,
+        "inference_propainter.py",
+        "--video",
+        str(frames_dir),
+        "--mask",
+        str(masks_dir),
+        "--output",
+        str(results_dir),
+        "--save_fps",
+        str(max(1, round(fps))),
+        "--fp16",
+        "--subvideo_length",
+        str(int(params.get("subvideoLength") or 40)),
+        "--mask_dilation",
+        str(int(params.get("propainterMaskDilation") or default_mask_dilation)),
+    ]
+    propainter_width, propainter_height = _processing_dimensions(width, height, memory_frame_count, params)
+    if (propainter_width, propainter_height) != (width, height):
+        print(
+            f"Using ProPainter internal size {propainter_width}x{propainter_height} for {memory_frame_count} source frames; final output remains {width}x{height}",
+            flush=True,
+        )
+        command += ["--height", str(propainter_height), "--width", str(propainter_width)]
+    if "propainterNeighborLength" in params:
+        command += ["--neighbor_length", str(int(params["propainterNeighborLength"]))]
+    elif memory_frame_count > int(params.get("propainterLongVideoFrames") or 900):
+        command += ["--neighbor_length", "6"]
+    if "propainterRefStride" in params:
+        command += ["--ref_stride", str(int(params["propainterRefStride"]))]
+    elif memory_frame_count > int(params.get("propainterLongVideoFrames") or 900):
+        command += ["--ref_stride", "20"]
+    return command
+
+
+def _prepare_chunk(
+    frames: list[Path],
+    masks: list[Path],
+    chunk_dir: Path,
+    start: int,
+    end: int,
+) -> tuple[Path, Path]:
+    chunk_frames_dir = chunk_dir / "frames"
+    chunk_masks_dir = chunk_dir / "masks"
+    chunk_frames_dir.mkdir(parents=True, exist_ok=True)
+    chunk_masks_dir.mkdir(parents=True, exist_ok=True)
+    for output_index, source_index in enumerate(range(start, end), start=1):
+        _link_or_copy(frames[source_index], chunk_frames_dir / f"{output_index:06d}.png")
+        _link_or_copy(masks[source_index], chunk_masks_dir / f"{output_index:06d}.png")
+    return chunk_frames_dir, chunk_masks_dir
+
+
+def _concat_videos(parts: list[Path], output_path: Path, workdir: Path) -> None:
+    if len(parts) == 1:
+        shutil.copy2(parts[0], output_path)
+        return
+    concat_list = workdir / "concat.txt"
+    concat_list.write_text("".join(f"file '{part.resolve()}'\n" for part in parts), encoding="utf-8")
+    _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(output_path)])
+
+
+def _run_propainter(
+    python: str,
+    propainter_root: Path,
+    frames_dir: Path,
+    masks_dir: Path,
+    results_dir: Path,
+    fps: float,
+    width: int,
+    height: int,
+    frame_count: int,
+    params: dict,
+    strategy: str,
+    workdir: Path,
+) -> Path:
+    chunk_frames = int(params.get("propainterChunkFrames") or params.get("propainterLongVideoFrames") or 900)
+    if frame_count <= chunk_frames:
+        command = _build_propainter_command(python, frames_dir, masks_dir, results_dir, fps, frame_count, width, height, params, strategy)
+        _run(command, cwd=propainter_root)
+        return results_dir / frames_dir.name / "inpaint_out.mp4"
+
+    frames = sorted(frames_dir.glob("*.png"))
+    masks = sorted(masks_dir.glob("*.png"))
+    if len(frames) != len(masks):
+        raise RuntimeError(f"Frame/mask count mismatch: {len(frames)} frames, {len(masks)} masks")
+
+    print(f"Running ProPainter in chunks: {frame_count} frames, {chunk_frames} frames per chunk", flush=True)
+    chunk_outputs: list[Path] = []
+    chunks_dir = workdir / "chunks"
+    chunk_results_root = workdir / "chunk-results"
+    for chunk_index, start in enumerate(range(0, frame_count, chunk_frames), start=1):
+        end = min(start + chunk_frames, frame_count)
+        chunk_dir = chunks_dir / f"chunk-{chunk_index:04d}"
+        chunk_results_dir = chunk_results_root / f"chunk-{chunk_index:04d}"
+        chunk_frames_dir, chunk_masks_dir = _prepare_chunk(frames, masks, chunk_dir, start, end)
+        chunk_count = end - start
+        print(f"Processing ProPainter chunk {chunk_index}: frames {start + 1}-{end}", flush=True)
+        command = _build_propainter_command(
+            python,
+            chunk_frames_dir,
+            chunk_masks_dir,
+            chunk_results_dir,
+            fps,
+            chunk_count,
+            width,
+            height,
+            params,
+            strategy,
+            sizing_frame_count=frame_count,
+        )
+        _run(command, cwd=propainter_root)
+        chunk_output = chunk_results_dir / chunk_frames_dir.name / "inpaint_out.mp4"
+        if not chunk_output.exists():
+            raise RuntimeError(f"ProPainter chunk output not found: {chunk_output}")
+        chunk_outputs.append(chunk_output)
+
+    merged_path = workdir / "propainter-merged.mp4"
+    _concat_videos(chunk_outputs, merged_path, workdir)
+    return merged_path
+
+
 def main() -> None:
     _raise_open_file_limit()
 
@@ -319,44 +464,27 @@ def main() -> None:
     else:
         _generate_rectangle_masks(masks_dir, frame_count, width, height, regions, mask_padding)
 
-    precise_mask_strategies = {"subtitle", "subtitle-text", "text", "ocr", "dark-subtitle-line"}
-    default_mask_dilation = 1 if strategy in precise_mask_strategies else 5
-    command = [
-        args.python,
-        "inference_propainter.py",
-        "--video",
-        str(frames_dir),
-        "--mask",
-        str(masks_dir),
-        "--output",
-        str(results_dir),
-        "--save_fps",
-        str(max(1, round(fps))),
-        "--fp16",
-        "--subvideo_length",
-        str(int(params.get("subvideoLength") or 40)),
-        "--mask_dilation",
-        str(int(params.get("propainterMaskDilation") or default_mask_dilation)),
-    ]
     propainter_width, propainter_height = _processing_dimensions(width, height, frame_count, params)
     if (propainter_width, propainter_height) != (width, height):
         print(
             f"Using ProPainter internal size {propainter_width}x{propainter_height} for {frame_count} frames; final output remains {target_width}x{target_height}",
             flush=True,
         )
-    if (propainter_width, propainter_height) != (width, height):
-        command += ["--height", str(propainter_height), "--width", str(propainter_width)]
-    if "propainterNeighborLength" in params:
-        command += ["--neighbor_length", str(int(params["propainterNeighborLength"]))]
-    elif frame_count > int(params.get("propainterLongVideoFrames") or 900):
-        command += ["--neighbor_length", "6"]
-    if "propainterRefStride" in params:
-        command += ["--ref_stride", str(int(params["propainterRefStride"]))]
-    elif frame_count > int(params.get("propainterLongVideoFrames") or 900):
-        command += ["--ref_stride", "20"]
-    _run(command, cwd=propainter_root)
 
-    inpaint_path = results_dir / frames_dir.name / "inpaint_out.mp4"
+    inpaint_path = _run_propainter(
+        args.python,
+        propainter_root,
+        frames_dir,
+        masks_dir,
+        results_dir,
+        fps,
+        width,
+        height,
+        frame_count,
+        params,
+        strategy,
+        workdir,
+    )
     if not inpaint_path.exists():
         raise RuntimeError(f"ProPainter output not found: {inpaint_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)

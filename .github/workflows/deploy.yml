@@ -93,9 +93,11 @@ jobs:
           AUTH_SECRET=$auth_secret
           ALLOW_DEMO_WITHOUT_AUTH=false
           WEB_PORT=8003
+          WORKER_REPLICAS=3
           TASK_JOB_TIMEOUT_SECONDS=7200
           MODEL_PLAZA_GPU_API_URL=http://32.196.46.122:18080
           MODEL_PLAZA_GPU_API_KEY=model-plaza-dev-gpu-key
+          MODEL_PLAZA_CALLBACK_URL=http://api:8010/api/provider/callback
           STORAGE_BACKEND=local
           EOF
           fi
@@ -111,7 +113,9 @@ jobs:
           ln -sfn "$shared_env" "$release_dir/.env"
           cd "$release_dir"
 
-          docker compose -f docker-compose.prod.yml up -d --build --remove-orphans
+          worker_replicas="$(grep -E '^WORKER_REPLICAS=' .env | tail -n 1 | cut -d= -f2- || true)"
+          worker_replicas="${worker_replicas:-3}"
+          docker compose -f docker-compose.prod.yml up -d --build --remove-orphans --scale "worker=$worker_replicas"
           docker compose -f docker-compose.prod.yml ps
 
           ln -sfn "$release_dir" "$DEPLOY_DIR/current"

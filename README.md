@@ -137,6 +137,8 @@ PRODUCTION_ENV     可选，生产环境变量，参考 deploy/production.env.ex
 
 服务器已有 Caddy 占用 `80/443` 时，项目默认暴露在 `WEB_PORT=8003`，再由现有网关或安全组决定是否对外开放。
 
+平台 worker 默认 `WORKER_REPLICAS=3`，GPU 服务默认 `MODEL_PLAZA_GPU_MAX_WORKERS=1`；也就是平台可以同时领取并提交多个任务，但 GPU 侧仍串行执行模型，降低显存爆掉的风险。
+
 测试：
 
 ```bash
