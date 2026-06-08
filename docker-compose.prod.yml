@@ -80,7 +80,7 @@ services:
       dockerfile: Dockerfile.web
     restart: unless-stopped
     ports:
-      - "${WEB_PORT:-80}:80"
+      - "${WEB_PORT:-8003}:80"
     depends_on:
       api:
         condition: service_started
