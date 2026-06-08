@@ -87,17 +87,17 @@ jobs:
             auth_secret="$(openssl rand -hex 32)"
             postgres_password="$(openssl rand -hex 24)"
             cat > "$shared_env" <<EOF
-POSTGRES_DB=model_plaza
-POSTGRES_USER=model_plaza
-POSTGRES_PASSWORD=$postgres_password
-AUTH_SECRET=$auth_secret
-ALLOW_DEMO_WITHOUT_AUTH=false
-WEB_PORT=80
-TASK_JOB_TIMEOUT_SECONDS=7200
-MODEL_PLAZA_GPU_API_URL=http://32.196.46.122:18080
-MODEL_PLAZA_GPU_API_KEY=
-STORAGE_BACKEND=local
-EOF
+          POSTGRES_DB=model_plaza
+          POSTGRES_USER=model_plaza
+          POSTGRES_PASSWORD=$postgres_password
+          AUTH_SECRET=$auth_secret
+          ALLOW_DEMO_WITHOUT_AUTH=false
+          WEB_PORT=80
+          TASK_JOB_TIMEOUT_SECONDS=7200
+          MODEL_PLAZA_GPU_API_URL=http://32.196.46.122:18080
+          MODEL_PLAZA_GPU_API_KEY=
+          STORAGE_BACKEND=local
+          EOF
           fi
 
           ln -sfn "$shared_env" "$release_dir/.env"
