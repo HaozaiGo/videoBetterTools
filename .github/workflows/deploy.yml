@@ -1,0 +1,113 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
+env:
+  DEPLOY_HOST: 35.220.200.97
+  DEPLOY_USER: huangguojie
+  DEPLOY_PORT: "22"
+  DEPLOY_DIR: /opt/videoBetterTools
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Prepare SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          test -n "$SSH_PRIVATE_KEY"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$DEPLOY_PORT" "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Create source archive
+        run: |
+          tar \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='node_modules' \
+            --exclude='dist' \
+            --exclude='data' \
+            --exclude='backend/.venv' \
+            --exclude='backend/.env' \
+            --exclude='backend/.pytest_cache' \
+            --exclude='**/__pycache__' \
+            -czf /tmp/model-plaza-release.tar.gz .
+
+      - name: Upload archive
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "sudo mkdir -p '$DEPLOY_DIR/releases' '$DEPLOY_DIR/shared' && sudo chown -R '$DEPLOY_USER':'$DEPLOY_USER' '$DEPLOY_DIR'"
+          scp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" /tmp/model-plaza-release.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/release.tar.gz"
+
+      - name: Deploy with Docker Compose
+        env:
+          PRODUCTION_ENV: ${{ secrets.PRODUCTION_ENV }}
+        run: |
+          production_env_b64="$(printf '%s' "${PRODUCTION_ENV:-}" | base64 -w 0)"
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_DIR='$DEPLOY_DIR' GITHUB_SHA='$GITHUB_SHA' PRODUCTION_ENV_B64='$production_env_b64' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          release_dir="$DEPLOY_DIR/releases/$GITHUB_SHA"
+          shared_env="$DEPLOY_DIR/shared/.env"
+
+          mkdir -p "$release_dir" "$DEPLOY_DIR/shared"
+          tar -xzf "$DEPLOY_DIR/release.tar.gz" -C "$release_dir"
+
+          if [ -n "${PRODUCTION_ENV_B64:-}" ]; then
+            printf '%s' "$PRODUCTION_ENV_B64" | base64 -d > "$shared_env"
+          elif [ ! -f "$shared_env" ]; then
+            auth_secret="$(openssl rand -hex 32)"
+            postgres_password="$(openssl rand -hex 24)"
+            cat > "$shared_env" <<EOF
+POSTGRES_DB=model_plaza
+POSTGRES_USER=model_plaza
+POSTGRES_PASSWORD=$postgres_password
+AUTH_SECRET=$auth_secret
+ALLOW_DEMO_WITHOUT_AUTH=false
+WEB_PORT=80
+TASK_JOB_TIMEOUT_SECONDS=7200
+MODEL_PLAZA_GPU_API_URL=http://32.196.46.122:18080
+MODEL_PLAZA_GPU_API_KEY=
+STORAGE_BACKEND=local
+EOF
+          fi
+
+          ln -sfn "$shared_env" "$release_dir/.env"
+          cd "$release_dir"
+
+          docker compose -f docker-compose.prod.yml up -d --build --remove-orphans
+          docker compose -f docker-compose.prod.yml ps
+
+          ln -sfn "$release_dir" "$DEPLOY_DIR/current"
+          rm -f "$DEPLOY_DIR/release.tar.gz"
+          find "$DEPLOY_DIR/releases" -mindepth 1 -maxdepth 1 -type d | sort | head -n -5 | xargs -r rm -rf
+          docker image prune -f
+          REMOTE

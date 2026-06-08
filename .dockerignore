@@ -1,0 +1,12 @@
+.git
+.github
+.DS_Store
+node_modules
+dist
+data
+backend/.venv
+backend/.env
+backend/.pytest_cache
+backend/**/__pycache__
+scripts/gpu/__pycache__
+.pencil-previews

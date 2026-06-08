@@ -118,6 +118,23 @@ Docker Compose:
 docker compose up --build
 ```
 
+## GitHub Actions 部署
+
+推送 `main` 分支会触发 `.github/workflows/deploy.yml`，构建前端后通过 SSH 部署到：
+
+```text
+huangguojie@35.220.200.97:/opt/videoBetterTools
+```
+
+需要在 GitHub 仓库的 `Settings -> Secrets and variables -> Actions` 配置：
+
+```text
+DEPLOY_SSH_KEY     SSH 私钥内容，对应服务器登录 key
+PRODUCTION_ENV     可选，生产环境变量，参考 deploy/production.env.example
+```
+
+远端会使用 `docker-compose.prod.yml` 启动 `web/api/worker/postgres/redis`。首次部署如果没有提供 `PRODUCTION_ENV`，脚本会在服务器自动生成 `/opt/videoBetterTools/shared/.env` 的基础配置，后续可直接在服务器或 GitHub Secret 中替换正式密钥。
+
 测试：
 
 ```bash
