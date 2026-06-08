@@ -1,4 +1,4 @@
-import type { LedgerEntry, TaskStatus } from "../types";
+import type { LedgerEntry, Task, TaskStatus } from "../types";
 
 export function formatCredits(value: number | undefined) {
   return `${Number(value || 0).toFixed(0)} 积分`;
@@ -17,6 +17,20 @@ export function statusLabel(status: TaskStatus) {
     failed: "失败已退还",
     cancelled: "已取消",
   }[status];
+}
+
+export function taskProgressDisplay(task: Task) {
+  const rawPercent = Math.max(0, Math.min(100, Number(task.progressPercent || 0)));
+
+  if (task.status === "succeeded") {
+    return { percent: 100, stage: task.progressStage || "处理完成，结果已入库" };
+  }
+
+  if (task.status === "processing" && rawPercent >= 100) {
+    return { percent: 95, stage: "远端处理完成，正在回传结果" };
+  }
+
+  return { percent: rawPercent, stage: task.progressStage };
 }
 
 export function ledgerAmount(entry: LedgerEntry) {

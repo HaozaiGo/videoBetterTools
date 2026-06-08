@@ -1,7 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { getBootstrap } from "../api/client";
-import { formatCredits, statusLabel } from "../lib/format";
+import { formatCredits, statusLabel, taskProgressDisplay } from "../lib/format";
 import { ToolIcon } from "../lib/tool-icons";
 
 export function ToolsPage() {
@@ -110,13 +110,14 @@ export function ToolsPage() {
             {recentTasks.length ? (
               recentTasks.map((task) => {
                 const tool = data.tools.find((item) => item.slug === task.toolSlug);
+                const progress = taskProgressDisplay(task);
                 return (
                   <Link className="recent-item" key={task.id} to="/tasks">
                     <div>
                       <strong>{tool?.name || task.toolSlug}</strong>
-                      <span>{task.progressStage || statusLabel(task.status)}</span>
+                      <span>{progress.stage || statusLabel(task.status)}</span>
                     </div>
-                    <em>{task.status === "succeeded" ? "查看" : `${task.progressPercent || 0}%`}</em>
+                    <em>{task.status === "succeeded" ? "查看" : `${progress.percent}%`}</em>
                   </Link>
                 );
               })

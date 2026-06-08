@@ -402,7 +402,12 @@ def process_with_external_model(
         )
         for part in shlex.split(command_template)
     ]
-    subprocess.run(command, check=True, capture_output=True, text=True, env=env)
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True, env=env)
+    except subprocess.CalledProcessError as exc:
+        detail = "\n".join(part for part in [exc.stdout, exc.stderr] if part).strip()
+        tail = detail[-1000:] if detail else str(exc)
+        raise VideoProcessingError(f"{adapter} command failed: {tail}") from exc
     if result_meta_path.exists():
         return json.loads(result_meta_path.read_text(encoding="utf-8"))
     return None

@@ -2,7 +2,7 @@ import { useMutation, useQueryClient, useQuery, useSuspenseQuery } from "@tansta
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import { Fragment, useState } from "react";
 import { cancelTask, getBootstrap } from "../api/client";
-import { formatCredits, formatDate, statusLabel } from "../lib/format";
+import { formatCredits, formatDate, statusLabel, taskProgressDisplay } from "../lib/format";
 import type { BootstrapState, Task } from "../types";
 
 const columnHelper = createColumnHelper<Task>();
@@ -96,18 +96,18 @@ export function TasksPage() {
       cell: ({ row }) => {
         const task = row.original;
         const showProgress = ["queued", "processing"].includes(task.status);
-        const percent = Math.max(0, Math.min(100, Number(task.progressPercent || 0)));
+        const progress = taskProgressDisplay(task);
         return (
           <div className="status-cell">
             <span className={`status ${task.status}`}>{statusLabel(task.status)}</span>
             {showProgress ? (
-              <div className="task-progress" aria-label={`任务进度 ${percent}%`}>
+              <div className="task-progress" aria-label={`任务进度 ${progress.percent}%`}>
                 <div className="task-progress-head">
-                  <span>{percent}%</span>
-                  {task.progressStage ? <em>{task.progressStage}</em> : null}
+                  <span>{progress.percent}%</span>
+                  {progress.stage ? <em>{progress.stage}</em> : null}
                 </div>
                 <div className="task-progress-track">
-                  <span style={{ width: `${percent}%` }} />
+                  <span style={{ width: `${progress.percent}%` }} />
                 </div>
               </div>
             ) : null}

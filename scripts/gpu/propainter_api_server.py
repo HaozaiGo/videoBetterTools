@@ -19,7 +19,7 @@ import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from multiprocessing import Process, Queue as ProcessQueue
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote
@@ -196,7 +196,7 @@ def _upload_result(job_id: str, output_path: Path) -> dict:
     return {}
 
 
-def _upload_result_worker(job_id: str, output_path: str, queue: ProcessQueue) -> None:
+def _upload_result_worker(job_id: str, output_path: str, queue) -> None:
     try:
         queue.put({"ok": True, "result": _upload_result(job_id, Path(output_path))})
     except Exception as exc:
@@ -205,8 +205,9 @@ def _upload_result_worker(job_id: str, output_path: str, queue: ProcessQueue) ->
 
 def _upload_result_with_deadline(job_id: str, output_path: Path) -> dict:
     timeout = int(os.environ.get("MODEL_PLAZA_GPU_RESULT_UPLOAD_TOTAL_TIMEOUT", "900"))
-    queue: ProcessQueue = ProcessQueue()
-    process = Process(target=_upload_result_worker, args=(job_id, str(output_path), queue))
+    context = get_context("spawn")
+    queue = context.Queue()
+    process = context.Process(target=_upload_result_worker, args=(job_id, str(output_path), queue))
     process.start()
     process.join(timeout)
     if process.is_alive():

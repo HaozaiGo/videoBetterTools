@@ -13,9 +13,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import resource
 import shutil
 import subprocess
 from pathlib import Path
+
+
+def _raise_open_file_limit() -> None:
+    """ProPainter reads long frame/mask sequences and can exceed the default 1024 fd limit."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = min(max(soft, 65535), hard)
+    if soft < target:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+        print(f"Raised open file limit from {soft} to {target}", flush=True)
 
 
 def _run(command: list[str], cwd: Path | None = None) -> None:
@@ -64,6 +74,21 @@ def _target_video_dimensions(width: int, height: int, params: dict) -> tuple[int
         target_width = target_short_side
         target_height = height * target_width / width
     return _even_dimension(target_width), _even_dimension(target_height)
+
+
+def _processing_dimensions(width: int, height: int, frame_count: int, params: dict) -> tuple[int, int]:
+    explicit_width = params.get("propainterWidth")
+    explicit_height = params.get("propainterHeight")
+    if explicit_width and explicit_height:
+        return int(explicit_width), int(explicit_height)
+
+    max_frames = int(params.get("propainterLongVideoFrames") or 900)
+    max_short_side = int(params.get("propainterLongVideoShortSide") or 360)
+    if frame_count <= max_frames or min(width, height) <= max_short_side:
+        return width, height
+
+    scale = max_short_side / min(width, height)
+    return _even_dimension(width * scale), _even_dimension(height * scale)
 
 
 def _video_meta(input_path: Path) -> tuple[int, int, float]:
@@ -248,6 +273,8 @@ def _encode_with_audio(video_only_path: Path, input_path: Path, output_path: Pat
 
 
 def main() -> None:
+    _raise_open_file_limit()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", default=os.environ.get("MODEL_PLAZA_INPUT"))
     parser.add_argument("--output", default=os.environ.get("MODEL_PLAZA_OUTPUT"))
@@ -311,10 +338,22 @@ def main() -> None:
         "--mask_dilation",
         str(int(params.get("propainterMaskDilation") or default_mask_dilation)),
     ]
-    propainter_width = int(params.get("propainterWidth") or target_width)
-    propainter_height = int(params.get("propainterHeight") or target_height)
+    propainter_width, propainter_height = _processing_dimensions(width, height, frame_count, params)
+    if (propainter_width, propainter_height) != (width, height):
+        print(
+            f"Using ProPainter internal size {propainter_width}x{propainter_height} for {frame_count} frames; final output remains {target_width}x{target_height}",
+            flush=True,
+        )
     if (propainter_width, propainter_height) != (width, height):
         command += ["--height", str(propainter_height), "--width", str(propainter_width)]
+    if "propainterNeighborLength" in params:
+        command += ["--neighbor_length", str(int(params["propainterNeighborLength"]))]
+    elif frame_count > int(params.get("propainterLongVideoFrames") or 900):
+        command += ["--neighbor_length", "6"]
+    if "propainterRefStride" in params:
+        command += ["--ref_stride", str(int(params["propainterRefStride"]))]
+    elif frame_count > int(params.get("propainterLongVideoFrames") or 900):
+        command += ["--ref_stride", "20"]
     _run(command, cwd=propainter_root)
 
     inpaint_path = results_dir / frames_dir.name / "inpaint_out.mp4"

@@ -515,9 +515,17 @@ def provider_callback(
     tool = get_tool(task.tool_slug) or {"name": task.tool_slug}
 
     if progress_percent is not None:
-        task.progress_percent = max(0, min(100, progress_percent))
+        normalized_progress = max(0, min(100, progress_percent))
+        if status == "processing":
+            # 远端模型完成后还需要上传结果、平台入库和扣费，处理中最多展示到 95%。
+            normalized_progress = min(normalized_progress, 95)
+        task.progress_percent = normalized_progress
     if progress_stage is not None:
-        task.progress_stage = progress_stage[:160]
+        normalized_stage = progress_stage
+        if status == "processing" and progress_percent is not None and progress_percent >= 100:
+            # 避免用户看到“100% + 处理中”的矛盾状态。
+            normalized_stage = "远端处理完成，正在回传结果"
+        task.progress_stage = normalized_stage[:160]
 
     if status == "processing" and task.status in {"queued", "processing"}:
         task.status = "processing"
