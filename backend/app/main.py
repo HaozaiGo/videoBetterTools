@@ -10,23 +10,28 @@ from app.auth import admin_user, create_token, current_user, find_user_by_email,
 from app.config import settings
 from app.database import get_db
 from app.models import User
-from app.schemas import AssetComplete, LoginRequest, ProviderCallback, RechargeCreate, TaskCreate, UserCreate, UserRecharge
+from app.schemas import AssetComplete, LoginRequest, MultipartUploadInit, ProviderCallback, RechargeCreate, TaskCreate, UserCreate, UserRecharge
 from app.services import (
     asset_to_dict,
+    cancel_task,
+    complete_multipart_upload,
     complete_uploaded_asset,
+    create_multipart_upload,
     create_presigned_asset_upload,
     create_user,
     create_task,
+    get_multipart_upload,
     provider_callback,
     recharge_wallet,
     save_upload,
+    save_multipart_chunk,
     serialize_bootstrap,
     task_to_dict,
 )
 
 logger = logging.getLogger("model_plaza")
 
-app = FastAPI(title="Model Plaza API")
+app = FastAPI(title="片刻修AI API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -137,9 +142,50 @@ def complete_asset_upload(payload: AssetComplete, db: Session = Depends(get_db),
     return {"asset": asset_to_dict(asset)}
 
 
+@app.post("/api/assets/multipart/init", status_code=201)
+def init_multipart_upload(payload: MultipartUploadInit, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    return create_multipart_upload(
+        db,
+        user.id,
+        kind=payload.kind,
+        original_name=payload.originalName,
+        mime_type=payload.mimeType,
+        size_bytes=payload.sizeBytes,
+        duration_seconds=payload.durationSeconds,
+        chunk_size=payload.chunkSize,
+    )
+
+
+@app.get("/api/assets/multipart/{upload_id}")
+def multipart_upload_status(upload_id: str, user: User = Depends(current_user)) -> dict:
+    return get_multipart_upload(user.id, upload_id)
+
+
+@app.post("/api/assets/multipart/{upload_id}/chunks/{chunk_index}")
+async def upload_multipart_chunk(
+    upload_id: str,
+    chunk_index: int,
+    file: UploadFile = File(...),
+    user: User = Depends(current_user),
+) -> dict:
+    return await save_multipart_chunk(user.id, upload_id, chunk_index, file)
+
+
+@app.post("/api/assets/multipart/{upload_id}/complete", status_code=201)
+def complete_multipart_upload_endpoint(upload_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    asset = complete_multipart_upload(db, user.id, upload_id)
+    return {"asset": asset_to_dict(asset)}
+
+
 @app.post("/api/tasks", status_code=201)
 def create_task_endpoint(payload: TaskCreate, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
     task = create_task(db, user.id, payload.toolSlug, payload.inputAssetId, payload.params)
+    return {"task": task_to_dict(task), "state": serialize_bootstrap(db, user.id)}
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+def cancel_task_endpoint(task_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    task = cancel_task(db, user.id, task_id)
     return {"task": task_to_dict(task), "state": serialize_bootstrap(db, user.id)}
 
 
@@ -156,6 +202,8 @@ def provider_callback_endpoint(payload: ProviderCallback, db: Session = Depends(
         output_size_bytes=payload.outputSizeBytes,
         charged_credits=payload.chargedCredits,
         error_code=payload.errorCode,
+        progress_percent=payload.progressPercent,
+        progress_stage=payload.progressStage,
     )
     return {"duplicated": duplicated, "state": serialize_bootstrap(db, _task.user_id)}
 

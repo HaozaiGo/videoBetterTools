@@ -45,7 +45,7 @@ TOOLS = [
         "summary": "消除动态水印、不需要的人或物、马赛克或遮挡，并尽量恢复视频内容。",
         "route": "/tools/video/object-removal",
         "icon": "grid",
-        "status": "online",
+        "status": "disabled",
         "provider": "mock-video-provider",
         "pricing": {
             "mode": "duration",

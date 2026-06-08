@@ -1,8 +1,11 @@
 import { spawn } from "node:child_process";
 
+const frontendPort = process.env.FRONTEND_PORT ?? "5175";
+
 const backendEnv = {
   ...process.env,
   PROPAINTER_COMMAND: process.env.PROPAINTER_COMMAND ?? "python ../scripts/gpu/propainter_api_adapter.py",
+  ENHANCE_COMMAND: process.env.ENHANCE_COMMAND ?? "python ../scripts/gpu/video_enhance_api_adapter.py",
   MODEL_PLAZA_GPU_API_URL: process.env.MODEL_PLAZA_GPU_API_URL ?? "http://32.196.46.122:18080",
   MODEL_PLAZA_GPU_API_KEY: process.env.MODEL_PLAZA_GPU_API_KEY ?? "model-plaza-dev-gpu-key",
   MODEL_PLAZA_GPU_API_TUNNEL: process.env.MODEL_PLAZA_GPU_API_TUNNEL ?? "0",
@@ -11,7 +14,7 @@ const backendEnv = {
 const processes = [
   spawn("uv", ["--directory", "backend", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8010", "--reload", "--reload-dir", "app"], { stdio: "inherit", env: backendEnv }),
   spawn("uv", ["--directory", "backend", "run", "python", "-m", "app.worker"], { stdio: "inherit", env: backendEnv }),
-  spawn("npx", ["vite", "--host", "0.0.0.0"], { stdio: "inherit" }),
+  spawn("npx", ["vite", "--host", "0.0.0.0", "--port", frontendPort], { stdio: "inherit" }),
 ];
 
 function stop() {

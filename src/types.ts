@@ -103,6 +103,8 @@ export type Task = {
   provider: string;
   providerJobId: string;
   errorCode: string | null;
+  progressPercent: number;
+  progressStage: string;
   createdAt: number;
   completedAt: number | null;
   outputUrl: string;
@@ -145,6 +147,7 @@ export type ToolFormValues = {
   mode: "manual" | "auto";
   regions: WatermarkRegion[];
   keepAudio: boolean;
+  enhanceMode: "quality" | "natural";
   modelAdapter: "opencv-inpaint" | "ffmpeg-delogo" | "propainter" | "e2fgvi";
   inpaintMethod: "telea" | "ns";
   inpaintRadius: number;

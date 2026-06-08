@@ -19,6 +19,7 @@ const defaultValues: ToolFormValues = {
   mode: "manual",
   regions: [],
   keepAudio: true,
+  enhanceMode: "quality",
   modelAdapter: "propainter",
   inpaintMethod: "telea",
   inpaintRadius: 5,
@@ -64,7 +65,9 @@ export function ToolPage() {
   const tool = data.tools.find((item) => item.route === pathname);
   const isWatermarkTool = tool?.slug === "remove-watermark";
   const isSubtitleTool = tool?.slug === "remove-subtitle";
+  const isEnhanceTool = tool?.slug === "enhance";
   const isMaskVideoTool = isWatermarkTool || isSubtitleTool;
+  const showVideoPreview = Boolean(videoPreviewUrl && (isMaskVideoTool || isEnhanceTool));
   const regionNoun = isSubtitleTool ? "字幕" : "水印";
 
   const createTaskMutation = useMutation({
@@ -83,11 +86,22 @@ export function ToolPage() {
             removalTarget: isSubtitleTool ? "subtitle" : "watermark",
             maskStrategy: values.maskStrategy,
           }
-        : taskValues;
+        : isEnhanceTool
+          ? {
+              duration: values.duration,
+              resolution: values.resolution,
+              enhanceMode: values.enhanceMode,
+              keepAudio: values.keepAudio,
+              priority: values.priority,
+            }
+          : taskValues;
       const upload = await uploadAsset({
         file,
         kind: tool.pricing.mode === "image" ? "image" : "video",
         durationSeconds: values.duration,
+        onProgress: ({ percent, stage }) => {
+          setNotice(`${stage}：${percent}%`);
+        },
       });
       return createTask({ toolSlug: tool.slug, inputAssetId: upload.asset.id, params });
     },
@@ -224,10 +238,10 @@ export function ToolPage() {
     setNotice(`已框选${regionNoun}区域，可重新拖拽覆盖。`);
   };
 
-  if (!tool) {
+  if (!tool || tool.status === "disabled") {
     return (
       <section className="panel">
-        <h1>工具不存在</h1>
+        <h1>工具暂未开放</h1>
         <p>请返回工具广场选择一个可用工具。</p>
         <Link className="primary" to="/tools">
           返回工具广场
@@ -240,13 +254,13 @@ export function ToolPage() {
   const accept = tool.pricing.mode === "image" ? "image/*" : "video/*";
 
   return (
-    <>
+    <div className="tool-page">
       <Link className="back-link" to="/tools">
-        ‹ 返回工具广场
+        ‹ 返回工具搜索首页
       </Link>
       {notice ? <div className="notice">{notice}</div> : null}
       <form
-        className="tool-detail"
+        className={`tool-detail${isEnhanceTool ? " enhance-detail" : ""}${isMaskVideoTool ? " mask-detail" : ""}`}
         onSubmit={(event) => {
           event.preventDefault();
           if (isMaskVideoTool && regions.length === 0) {
@@ -262,6 +276,12 @@ export function ToolPage() {
             <div>
               <h1>{tool.name}</h1>
               <p>{tool.summary}</p>
+              <div className="detail-badges">
+                <span>{tool.pricing.mode === "image" ? "图片工具" : "视频工具"}</span>
+                <span>{tool.status === "online" ? "已上线" : "即将上线"}</span>
+                {isEnhanceTool ? <span>远端 GPU 超分</span> : null}
+                {isMaskVideoTool ? <span>区域框选修复</span> : null}
+              </div>
             </div>
           </div>
           <label className="upload-zone">
@@ -279,68 +299,76 @@ export function ToolPage() {
             />
             <div className="upload-visual">+</div>
             <strong>{file ? file.name : tool.pricing.mode === "image" ? "选择图片文件" : "选择视频文件"}</strong>
-            <span>{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB，创建任务时会上传到后端。` : "文件会上传到后端并生成 asset_id。"}</span>
+            <span>{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB，创建任务时会上传到后端。` : "超过 32MB 自动使用分片与断点续传。"}</span>
           </label>
-          {isMaskVideoTool && videoPreviewUrl ? (
-            <section className="video-region-editor" aria-label={`${regionNoun}区域框选`}>
+          {showVideoPreview ? (
+            <section className="video-region-editor" aria-label={isMaskVideoTool ? `${regionNoun}区域框选` : "视频预览"}>
               <div className="video-preview-wrap">
                 <video ref={videoRef} src={videoPreviewUrl} controls playsInline preload="metadata" onLoadedMetadata={handleLoadedMetadata} onLoadedData={updateMediaBox} />
-                <div
-                  ref={overlayRef}
-                  className={`region-overlay${isSelectingRegion ? " active" : ""}`}
-                  onPointerDown={startRegion}
-                  onPointerMove={moveRegion}
-                  onPointerUp={finishRegion}
-                  onPointerCancel={() => {
-                    dragStartRef.current = null;
-                    setDraftRegion(null);
-                    setIsSelectingRegion(false);
-                  }}
-                >
-                  {[...regions, ...(draftRegion ? [draftRegion] : [])].map((region, index) => (
-                    <div
-                      className="region-box"
-                      key={`${region.x}-${region.y}-${index}`}
-                      style={{
-                        left: mediaBox ? `${mediaBox.left + region.x * mediaBox.width}px` : `${region.x * 100}%`,
-                        top: mediaBox ? `${mediaBox.top + region.y * mediaBox.height}px` : `${region.y * 100}%`,
-                        width: mediaBox ? `${region.width * mediaBox.width}px` : `${region.width * 100}%`,
-                        height: mediaBox ? `${region.height * mediaBox.height}px` : `${region.height * 100}%`,
-                      }}
-                    />
-                  ))}
-                </div>
+                {isMaskVideoTool ? (
+                  <div
+                    ref={overlayRef}
+                    className={`region-overlay${isSelectingRegion ? " active" : ""}`}
+                    onPointerDown={startRegion}
+                    onPointerMove={moveRegion}
+                    onPointerUp={finishRegion}
+                    onPointerCancel={() => {
+                      dragStartRef.current = null;
+                      setDraftRegion(null);
+                      setIsSelectingRegion(false);
+                    }}
+                  >
+                    {[...regions, ...(draftRegion ? [draftRegion] : [])].map((region, index) => (
+                      <div
+                        className="region-box"
+                        key={`${region.x}-${region.y}-${index}`}
+                        style={{
+                          left: mediaBox ? `${mediaBox.left + region.x * mediaBox.width}px` : `${region.x * 100}%`,
+                          top: mediaBox ? `${mediaBox.top + region.y * mediaBox.height}px` : `${region.y * 100}%`,
+                          width: mediaBox ? `${region.width * mediaBox.width}px` : `${region.width * 100}%`,
+                          height: mediaBox ? `${region.height * mediaBox.height}px` : `${region.height * 100}%`,
+                        }}
+                      />
+                    ))}
+                  </div>
+                ) : null}
               </div>
-              <div className="region-help">
-                <span>{isSelectingRegion ? `在画面上拖拽框选${regionNoun}区域` : regions.length ? `已选择 1 个${regionNoun}区域` : `可先播放预览，再框选${regionNoun}区域`}</span>
-                <button
-                  className="link-button"
-                  type="button"
-                  onClick={() => {
-                    setDraftRegion(null);
-                    setIsSelectingRegion((value) => !value);
-                  }}
-                >
-                  {isSelectingRegion ? "取消框选" : `框选${regionNoun}`}
-                </button>
-                {regions.length ? (
+              {isMaskVideoTool ? (
+                <div className="region-help">
+                  <span>{isSelectingRegion ? `在画面上拖拽框选${regionNoun}区域` : regions.length ? `已选择 1 个${regionNoun}区域` : `可先播放预览，再框选${regionNoun}区域`}</span>
                   <button
                     className="link-button"
                     type="button"
                     onClick={() => {
-                      setRegions([]);
-                      setNotice("");
-                      setIsSelectingRegion(false);
+                      setDraftRegion(null);
+                      setIsSelectingRegion((value) => !value);
                     }}
                   >
-                    清除
+                    {isSelectingRegion ? "取消框选" : `框选${regionNoun}`}
                   </button>
-                ) : null}
-              </div>
+                  {regions.length ? (
+                    <button
+                      className="link-button"
+                      type="button"
+                      onClick={() => {
+                        setRegions([]);
+                        setNotice("");
+                        setIsSelectingRegion(false);
+                      }}
+                    >
+                      清除
+                    </button>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="region-help">
+                  <span>已读取视频预览，时长会自动用于计费。</span>
+                </div>
+              )}
             </section>
           ) : null}
           <div className="form-grid">
-            {tool.inputs.includes("duration") ? (
+            {tool.inputs.includes("duration") && !isEnhanceTool ? (
               <form.Field name="duration">
                 {(field) => (
                   <label>
@@ -365,6 +393,29 @@ export function ToolPage() {
                   </label>
                 )}
               </form.Field>
+            ) : null}
+            {isEnhanceTool ? (
+              <>
+                <form.Field name="enhanceMode">
+                  {(field) => (
+                    <label>
+                      增强模式
+                      <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["enhanceMode"])}>
+                        <option value="quality">高质量超分</option>
+                        <option value="natural">自然增强</option>
+                      </select>
+                    </label>
+                  )}
+                </form.Field>
+                <form.Field name="keepAudio">
+                  {(field) => (
+                    <label className="checkbox-field">
+                      <input type="checkbox" checked={field.state.value} onChange={(event) => field.handleChange(event.target.checked)} />
+                      保留原音频
+                    </label>
+                  )}
+                </form.Field>
+              </>
             ) : null}
             {tool.inputs.includes("imageCount") ? (
               <form.Field name="imageCount">
@@ -520,6 +571,7 @@ export function ToolPage() {
           </div>
         </div>
         <aside className="quote-panel">
+          <span className="quote-kicker">任务结算</span>
           <h2>费用预估</h2>
           <div className="quote-number">{formatCredits(estimate)}</div>
           <dl>
@@ -542,6 +594,6 @@ export function ToolPage() {
           <p className="fine-print">创建任务后后端冻结积分；供应商回调成功后扣费，失败则释放冻结积分。</p>
         </aside>
       </form>
-    </>
+    </div>
   );
 }

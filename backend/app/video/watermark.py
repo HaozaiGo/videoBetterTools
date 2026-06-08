@@ -382,6 +382,9 @@ def process_with_external_model(
     env["MODEL_PLAZA_PARAMS"] = str(params_path)
     env["MODEL_PLAZA_WORKDIR"] = str(work_dir)
     env["MODEL_PLAZA_RESULT_META"] = str(result_meta_path)
+    env["MODEL_PLAZA_CANCEL_FILE"] = str(settings.upload_path / f"{params.get('taskId') or ''}.cancel")
+    env["MODEL_PLAZA_PROVIDER_JOB_ID"] = str(params.get("providerJobId") or "")
+    env["MODEL_PLAZA_CALLBACK_URL"] = os.environ.get("MODEL_PLAZA_CALLBACK_URL", "http://127.0.0.1:8010/api/provider/callback")
     if input_url:
         env["MODEL_PLAZA_INPUT_URL"] = input_url
     if result_upload:
@@ -425,6 +428,7 @@ def process_with_model_adapter(
 
 
 def process_masked_video_removal(input_storage_key: str, task_id: str, params: dict, suffix: str = "watermark-removed") -> dict:
+    params = {**params, "taskId": task_id}
     input_url = storage.public_url(input_storage_key)
     adapter = _adapter_name(params)
     input_path = storage.local_path(input_storage_key)

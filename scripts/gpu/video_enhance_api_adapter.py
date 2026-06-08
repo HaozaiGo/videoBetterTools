@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Submit a ProPainter job to the GPU worker API and poll until completion."""
+"""Submit a video enhancement job to the GPU worker API."""
 
 from __future__ import annotations
 
 import json
 import os
-import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -13,7 +12,7 @@ import uuid
 from pathlib import Path
 
 
-DEFAULT_API_URL = "http://127.0.0.1:18080"
+DEFAULT_API_URL = "http://32.196.46.122:18080"
 DEFAULT_API_KEY = "model-plaza-dev-gpu-key"
 
 
@@ -33,56 +32,6 @@ def _api_url(path: str) -> str:
 def _headers() -> dict[str, str]:
     api_key = os.environ.get("MODEL_PLAZA_GPU_API_KEY", DEFAULT_API_KEY)
     return {"X-API-Key": api_key} if api_key else {}
-
-
-def _health_ok(timeout: int = 2) -> bool:
-    request = urllib.request.Request(_api_url("/health"), headers=_headers(), method="GET")
-    try:
-        _request_json(request, timeout=timeout)
-        return True
-    except Exception:
-        return False
-
-
-def _start_tunnel_if_needed() -> subprocess.Popen | None:
-    tunnel_enabled = os.environ.get("MODEL_PLAZA_GPU_API_TUNNEL", "1").lower() not in {"0", "false", "no"}
-    if not tunnel_enabled or _health_ok():
-        return None
-
-    host = os.environ.get("MODEL_PLAZA_GPU_SSH_HOST", "ubuntu@32.196.46.122")
-    identity = str(Path(os.environ.get("MODEL_PLAZA_GPU_IDENTITY", "~/.ssh/moda-gpu-new-prod01.pem")).expanduser())
-    local_port = os.environ.get("MODEL_PLAZA_GPU_TUNNEL_LOCAL_PORT", "18080")
-    remote_port = os.environ.get("MODEL_PLAZA_GPU_TUNNEL_REMOTE_PORT", "18080")
-    process = subprocess.Popen(
-        [
-            "ssh",
-            "-N",
-            "-L",
-            f"127.0.0.1:{local_port}:127.0.0.1:{remote_port}",
-            "-i",
-            identity,
-            "-o",
-            "IdentitiesOnly=yes",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ExitOnForwardFailure=yes",
-            host,
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    deadline = time.time() + int(os.environ.get("MODEL_PLAZA_GPU_TUNNEL_TIMEOUT", "15"))
-    while time.time() < deadline:
-        if process.poll() is not None:
-            raise GpuApiError("GPU API tunnel exited before it became ready")
-        if _health_ok():
-            return process
-        time.sleep(0.5)
-    process.terminate()
-    raise GpuApiError("GPU API tunnel did not become ready in time")
 
 
 def _request_json(request: urllib.request.Request, timeout: int = 30) -> dict:
@@ -152,11 +101,10 @@ def _multipart(fields: dict[str, str], files: dict[str, Path]) -> tuple[bytes, s
             ]
         )
     for name, path in files.items():
-        filename = path.name
         chunks.extend(
             [
                 f"--{boundary}\r\n".encode(),
-                f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode(),
+                f'Content-Disposition: form-data; name="{name}"; filename="{path.name}"\r\n'.encode(),
                 b"Content-Type: video/mp4\r\n\r\n",
                 path.read_bytes(),
                 b"\r\n",
@@ -168,7 +116,6 @@ def _multipart(fields: dict[str, str], files: dict[str, Path]) -> tuple[bytes, s
 
 def _submit_job(
     input_path: Path,
-    regions_path: Path,
     params_path: Path,
     input_url: str = "",
     result_upload_url: str = "",
@@ -177,7 +124,8 @@ def _submit_job(
     result_url: str = "",
 ) -> str:
     fields = {
-        "regions": regions_path.read_text(encoding="utf-8"),
+        "job_type": "enhance",
+        "regions": "[]",
         "params": params_path.read_text(encoding="utf-8"),
     }
     files = {}
@@ -208,20 +156,20 @@ def _poll_job(job_id: str) -> dict:
     while time.time() < deadline:
         if _cancel_requested():
             _cancel_job(job_id)
-            raise GpuJobCancelled(f"GPU job cancelled: {job_id}")
+            raise GpuJobCancelled(f"GPU enhance job cancelled: {job_id}")
         request = urllib.request.Request(_api_url(f"/jobs/{job_id}"), headers=_headers(), method="GET")
         status = _request_json(request, timeout=30)
         state = status.get("status")
         _sync_progress(job_id, status)
-        print(f"GPU job {job_id}: {state}", flush=True)
+        print(f"GPU enhance job {job_id}: {state}", flush=True)
         if state == "succeeded":
             return status
         if state == "cancelled":
-            raise GpuJobCancelled(f"GPU job cancelled: {job_id}")
+            raise GpuJobCancelled(f"GPU enhance job cancelled: {job_id}")
         if state == "failed":
-            raise GpuApiError(f"GPU job failed: {status.get('error') or 'unknown error'}")
+            raise GpuApiError(f"GPU enhance job failed: {status.get('error') or 'unknown error'}")
         time.sleep(interval)
-    raise GpuApiError(f"GPU job timed out after {timeout}s: {job_id}")
+    raise GpuApiError(f"GPU enhance job timed out after {timeout}s: {job_id}")
 
 
 def _download_result(job_id: str, output_path: Path) -> None:
@@ -257,11 +205,9 @@ def _write_result_meta(status: dict, meta_path: Path) -> bool:
 
 
 def main() -> None:
-    tunnel = _start_tunnel_if_needed()
     input_path = Path(os.environ["MODEL_PLAZA_INPUT"]).expanduser().resolve()
     output_path = Path(os.environ["MODEL_PLAZA_OUTPUT"]).expanduser().resolve()
-    regions_path = Path(os.environ["MODEL_PLAZA_REGIONS"]).expanduser().resolve()
-    params_path = Path(os.environ.get("MODEL_PLAZA_PARAMS", regions_path)).expanduser().resolve()
+    params_path = Path(os.environ["MODEL_PLAZA_PARAMS"]).expanduser().resolve()
     input_url = os.environ.get("MODEL_PLAZA_INPUT_URL", "").strip()
     result_upload_url = os.environ.get("MODEL_PLAZA_RESULT_UPLOAD_URL", "").strip()
     result_upload_headers = os.environ.get("MODEL_PLAZA_RESULT_UPLOAD_HEADERS", "{}").strip() or "{}"
@@ -270,26 +216,21 @@ def main() -> None:
     meta_path_value = os.environ.get("MODEL_PLAZA_RESULT_META", "").strip()
     meta_path = Path(meta_path_value).expanduser().resolve() if meta_path_value else output_path.with_suffix(".result.json")
 
-    try:
-        job_id = _submit_job(
-            input_path,
-            regions_path,
-            params_path,
-            input_url=input_url,
-            result_upload_url=result_upload_url,
-            result_upload_headers=result_upload_headers,
-            result_storage_key=result_storage_key,
-            result_url=result_url,
-        )
-        status = _poll_job(job_id)
-        if _write_result_meta(status, meta_path):
-            print(f"GPU API result metadata written to {meta_path}", flush=True)
-        else:
-            _download_result(job_id, output_path)
-            print(f"Downloaded GPU API result to {output_path}", flush=True)
-    finally:
-        if tunnel is not None and tunnel.poll() is None:
-            tunnel.terminate()
+    job_id = _submit_job(
+        input_path,
+        params_path,
+        input_url=input_url,
+        result_upload_url=result_upload_url,
+        result_upload_headers=result_upload_headers,
+        result_storage_key=result_storage_key,
+        result_url=result_url,
+    )
+    status = _poll_job(job_id)
+    if _write_result_meta(status, meta_path):
+        print(f"GPU enhance result metadata written to {meta_path}", flush=True)
+    else:
+        _download_result(job_id, output_path)
+        print(f"Downloaded GPU enhance result to {output_path}", flush=True)
 
 
 if __name__ == "__main__":

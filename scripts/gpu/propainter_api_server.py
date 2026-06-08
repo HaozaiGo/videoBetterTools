@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""HTTP GPU worker for ProPainter jobs.
+"""HTTP GPU worker for video model jobs.
 
 服务部署在 GPU 服务器上，负责接收本地平台上传的视频和参数，然后异步执行
-propainter_runner.py。状态写入磁盘，服务重启后仍能查询已完成任务的结果。
+具体模型 runner。状态写入磁盘，服务重启后仍能查询已完成任务的结果。
 """
 
 from __future__ import annotations
@@ -12,12 +12,14 @@ import os
 import secrets
 import shutil
 import subprocess
+import threading
 import time
 import urllib.parse
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from multiprocessing import Process, Queue as ProcessQueue
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote
@@ -29,13 +31,17 @@ from fastapi.responses import FileResponse
 ROOT = Path(os.environ.get("MODEL_PLAZA_VIDEO_ROOT", "/data1/model-plaza-video-worker")).resolve()
 JOBS_ROOT = Path(os.environ.get("MODEL_PLAZA_GPU_JOBS_ROOT", str(ROOT / "work" / "api-jobs"))).resolve()
 LOGS_ROOT = Path(os.environ.get("MODEL_PLAZA_GPU_LOGS_ROOT", str(ROOT / "logs"))).resolve()
-RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_PROPAINTER_RUNNER", str(ROOT / "scripts" / "propainter_runner.py"))).resolve()
+PROPAINTER_RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_PROPAINTER_RUNNER", str(ROOT / "scripts" / "propainter_runner.py"))).resolve()
+ENHANCE_RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_ENHANCE_RUNNER", str(ROOT / "scripts" / "video_enhance_runner.py"))).resolve()
 PYTHON_PATH = os.environ.get("PROPAINTER_PYTHON", "/data1/conda/miniconda3/envs/video-inpaint/bin/python")
 API_KEY = os.environ.get("MODEL_PLAZA_GPU_API_KEY", "model-plaza-dev-gpu-key")
 MAX_WORKERS = max(1, int(os.environ.get("MODEL_PLAZA_GPU_MAX_WORKERS", "1")))
 
-app = FastAPI(title="Model Plaza ProPainter GPU Worker")
+app = FastAPI(title="片刻修AI GPU Worker")
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+running_processes: dict[str, subprocess.Popen] = {}
+running_processes_lock = threading.Lock()
+recover_lock = threading.Lock()
 
 
 def _check_auth(api_key: str | None) -> None:
@@ -51,6 +57,10 @@ def _job_dir(job_id: str) -> Path:
 
 def _status_path(job_id: str) -> Path:
     return _job_dir(job_id) / "status.json"
+
+
+def _progress_path(job_id: str) -> Path:
+    return _job_dir(job_id) / "progress.json"
 
 
 def _write_status(job_id: str, **updates) -> dict:
@@ -69,7 +79,18 @@ def _read_status(job_id: str) -> dict:
     status_path = _status_path(job_id)
     if not status_path.exists():
         raise HTTPException(status_code=404, detail="job not found")
-    return json.loads(status_path.read_text(encoding="utf-8"))
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    progress_path = _progress_path(job_id)
+    if progress_path.exists() and status.get("status") not in {"succeeded", "failed", "cancelled"}:
+        try:
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            progress = {}
+        if "progress_percent" in progress:
+            status["progress_percent"] = progress["progress_percent"]
+        if "progress_stage" in progress:
+            status["progress_stage"] = progress["progress_stage"]
+    return status
 
 
 def _tos_config() -> dict[str, str]:
@@ -141,6 +162,8 @@ def _upload_result_to_presigned_url(job_id: str, output_path: Path) -> dict | No
             headers=headers,
             timeout=int(os.environ.get("MODEL_PLAZA_GPU_RESULT_UPLOAD_TIMEOUT", "600")),
         )
+    if response.status_code >= 400:
+        raise RuntimeError(f"presigned upload failed with HTTP {response.status_code}")
     response.raise_for_status()
     return {
         "result_storage_key": storage_key,
@@ -150,19 +173,78 @@ def _upload_result_to_presigned_url(job_id: str, output_path: Path) -> dict | No
     }
 
 
-def _run_propainter_job(job_id: str) -> None:
+def _upload_result(job_id: str, output_path: Path) -> dict:
+    """Upload directly to TOS when configured, with backend presigned PUT as compatibility fallback."""
+    upload_errors: list[str] = []
+    try:
+        result_updates = _upload_result_to_tos(job_id, output_path)
+        if result_updates:
+            return result_updates
+    except Exception as exc:
+        upload_errors.append(f"tos upload failed: {exc}")
+
+    try:
+        result_updates = _upload_result_to_presigned_url(job_id, output_path)
+        if result_updates:
+            return result_updates
+    except Exception as exc:
+        upload_errors.append(f"presigned upload failed: {exc}")
+
+    if upload_errors:
+        raise RuntimeError("; ".join(upload_errors))
+    return {}
+
+
+def _upload_result_worker(job_id: str, output_path: str, queue: ProcessQueue) -> None:
+    try:
+        queue.put({"ok": True, "result": _upload_result(job_id, Path(output_path))})
+    except Exception as exc:
+        queue.put({"ok": False, "error": str(exc)})
+
+
+def _upload_result_with_deadline(job_id: str, output_path: Path) -> dict:
+    timeout = int(os.environ.get("MODEL_PLAZA_GPU_RESULT_UPLOAD_TOTAL_TIMEOUT", "900"))
+    queue: ProcessQueue = ProcessQueue()
+    process = Process(target=_upload_result_worker, args=(job_id, str(output_path), queue))
+    process.start()
+    process.join(timeout)
+    if process.is_alive():
+        process.terminate()
+        process.join(10)
+        raise RuntimeError(f"result upload exceeded total timeout {timeout}s")
+    if queue.empty():
+        raise RuntimeError("result upload worker exited without a result")
+    payload = queue.get()
+    if not payload.get("ok"):
+        raise RuntimeError(str(payload.get("error") or "result upload failed"))
+    return dict(payload.get("result") or {})
+
+
+def _runner_for_job_type(job_type: str) -> Path:
+    if job_type == "propainter":
+        return PROPAINTER_RUNNER_PATH
+    if job_type == "enhance":
+        return ENHANCE_RUNNER_PATH
+    raise RuntimeError(f"Unsupported job type: {job_type}")
+
+
+def _run_model_job(job_id: str) -> None:
     job_dir = _job_dir(job_id)
+    status = _read_status(job_id)
+    if status.get("status") == "cancelled":
+        return
+    job_type = str(status.get("job_type") or "propainter")
     input_path = job_dir / "input.mp4"
     output_path = job_dir / "output.mp4"
     regions_path = job_dir / "regions.json"
     params_path = job_dir / "params.json"
     work_dir = job_dir / "runner-work"
-    log_path = LOGS_ROOT / f"propainter-api-{job_id}.log"
+    log_path = LOGS_ROOT / f"{job_type}-api-{job_id}.log"
 
-    _write_status(job_id, status="processing", started_at=time.time(), log_path=str(log_path))
+    _write_status(job_id, status="processing", started_at=time.time(), log_path=str(log_path), progress_percent=8, progress_stage="远端 GPU 已领取任务")
     command = [
         PYTHON_PATH,
-        str(RUNNER_PATH),
+        str(_runner_for_job_type(job_type)),
         "--input",
         str(input_path),
         "--output",
@@ -177,10 +259,49 @@ def _run_propainter_job(job_id: str) -> None:
     LOGS_ROOT.mkdir(parents=True, exist_ok=True)
     try:
         with log_path.open("w", encoding="utf-8") as log_file:
-            subprocess.run(command, check=True, stdout=log_file, stderr=subprocess.STDOUT, text=True)
+            env = {**os.environ, "MODEL_PLAZA_PROGRESS_FILE": str(_progress_path(job_id))}
+            process = subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT, text=True, env=env)
+            with running_processes_lock:
+                running_processes[job_id] = process
+            return_code = process.wait()
+            with running_processes_lock:
+                running_processes.pop(job_id, None)
+            if _read_status(job_id).get("status") == "cancelled":
+                return
+            if return_code != 0:
+                raise subprocess.CalledProcessError(return_code, command)
         if not output_path.exists():
             raise RuntimeError("runner completed but output.mp4 was not created")
-        result_updates = _upload_result_to_presigned_url(job_id, output_path) or _upload_result_to_tos(job_id, output_path) or {}
+        _write_status(job_id, status="uploading", upload_started_at=time.time())
+        result_updates = _upload_result_with_deadline(job_id, output_path)
+        _write_status(
+            job_id,
+            status="succeeded",
+            completed_at=time.time(),
+            result_path=str(output_path),
+            progress_percent=100,
+            progress_stage="远端处理完成",
+            **result_updates,
+        )
+    except Exception as exc:
+        with running_processes_lock:
+            running_processes.pop(job_id, None)
+        if _read_status(job_id).get("status") == "cancelled":
+            return
+        _write_status(job_id, status="failed", completed_at=time.time(), error=str(exc), log_path=str(log_path))
+
+
+def _job_age_seconds(status: dict) -> float:
+    timestamp = float(status.get("updated_at") or status.get("created_at") or 0)
+    if timestamp <= 0:
+        return 0
+    return max(0, time.time() - timestamp)
+
+
+def _recover_finished_job(job_id: str, output_path: Path) -> None:
+    try:
+        _write_status(job_id, status="uploading", upload_started_at=time.time(), result_path=str(output_path), error="")
+        result_updates = _upload_result_with_deadline(job_id, output_path)
         _write_status(
             job_id,
             status="succeeded",
@@ -189,7 +310,55 @@ def _run_propainter_job(job_id: str) -> None:
             **result_updates,
         )
     except Exception as exc:
-        _write_status(job_id, status="failed", completed_at=time.time(), error=str(exc), log_path=str(log_path))
+        _write_status(
+            job_id,
+            status="failed",
+            completed_at=time.time(),
+            result_path=str(output_path),
+            error=f"recovery upload failed: {exc}",
+        )
+
+
+def _recover_stale_jobs() -> None:
+    if os.environ.get("MODEL_PLAZA_GPU_RECOVER_INCOMPLETE_JOBS", "1").lower() in {"0", "false", "no"}:
+        return
+    if not JOBS_ROOT.exists():
+        return
+
+    with recover_lock:
+        max_age_seconds = int(os.environ.get("MODEL_PLAZA_GPU_RECOVER_MAX_AGE_SECONDS", str(24 * 60 * 60)))
+        recoverable_statuses = {"queued", "processing", "uploading"}
+        for status_path in sorted(JOBS_ROOT.glob("*/status.json")):
+            job_id = status_path.parent.name
+            try:
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if status.get("status") not in recoverable_statuses:
+                continue
+            if max_age_seconds > 0 and _job_age_seconds(status) > max_age_seconds:
+                _write_status(
+                    job_id,
+                    status="failed",
+                    completed_at=time.time(),
+                    error="stale incomplete job was not recovered after restart",
+                )
+                continue
+
+            output_path = status_path.parent / "output.mp4"
+            input_path = status_path.parent / "input.mp4"
+            if output_path.exists():
+                _recover_finished_job(job_id, output_path)
+            elif input_path.exists():
+                _write_status(job_id, status="queued", recovered_at=time.time(), error="")
+                executor.submit(_run_model_job, job_id)
+            else:
+                _write_status(
+                    job_id,
+                    status="failed",
+                    completed_at=time.time(),
+                    error="incomplete job has no input.mp4 to recover",
+                )
 
 
 def _download_input_url(input_url: str, output_path: Path) -> None:
@@ -202,6 +371,12 @@ def _download_input_url(input_url: str, output_path: Path) -> None:
             shutil.copyfileobj(response, output_file)
 
 
+@app.on_event("startup")
+def recover_incomplete_jobs_on_startup() -> None:
+    # 启动恢复可能包含大文件补传，不能阻塞 /health 和新任务提交。
+    threading.Thread(target=_recover_stale_jobs, name="recover-stale-gpu-jobs", daemon=True).start()
+
+
 @app.get("/health")
 def health() -> dict:
     return {"ok": True, "max_workers": MAX_WORKERS}
@@ -211,6 +386,7 @@ def health() -> dict:
 async def create_job(
     regions: Annotated[str, Form()],
     params: Annotated[str, Form()] = "{}",
+    job_type: Annotated[str, Form()] = "propainter",
     input_file: Annotated[UploadFile | None, File()] = None,
     input_url: Annotated[str | None, Form()] = None,
     result_upload_url: Annotated[str | None, Form()] = None,
@@ -225,7 +401,12 @@ async def create_job(
         params_json = json.loads(params)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="regions/params must be valid JSON") from exc
-    if not isinstance(regions_json, list) or not regions_json:
+    job_type = job_type.lower().strip()
+    if job_type not in {"propainter", "enhance"}:
+        raise HTTPException(status_code=400, detail="unsupported job type")
+    if not isinstance(regions_json, list):
+        raise HTTPException(status_code=400, detail="regions must be a JSON array")
+    if job_type == "propainter" and not regions_json:
         raise HTTPException(status_code=400, detail="regions must be a non-empty JSON array")
     if not isinstance(params_json, dict):
         raise HTTPException(status_code=400, detail="params must be a JSON object")
@@ -263,8 +444,8 @@ async def create_job(
         )
     (job_dir / "regions.json").write_text(json.dumps(regions_json, ensure_ascii=False), encoding="utf-8")
     (job_dir / "params.json").write_text(json.dumps(params_json, ensure_ascii=False), encoding="utf-8")
-    _write_status(job_id, status="queued", created_at=time.time(), result_path="", error="")
-    executor.submit(_run_propainter_job, job_id)
+    _write_status(job_id, status="queued", job_type=job_type, created_at=time.time(), result_path="", error="", progress_percent=0, progress_stage="远端任务排队中")
+    executor.submit(_run_model_job, job_id)
     return {"job_id": job_id, "status": "queued", "status_url": f"/jobs/{job_id}", "result_url": f"/jobs/{job_id}/result"}
 
 
@@ -272,6 +453,24 @@ async def create_job(
 def get_job(job_id: str, x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None) -> dict:
     _check_auth(x_api_key)
     return _read_status(job_id)
+
+
+@app.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None) -> dict:
+    _check_auth(x_api_key)
+    status = _read_status(job_id)
+    if status.get("status") in {"succeeded", "failed", "cancelled"}:
+        return status
+    cancelled_status = _write_status(job_id, status="cancelled", completed_at=time.time(), error="USER_CANCELLED", progress_percent=0, progress_stage="远端任务已取消")
+    with running_processes_lock:
+        process = running_processes.get(job_id)
+    if process is not None and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=int(os.environ.get("MODEL_PLAZA_GPU_CANCEL_GRACE_SECONDS", "8")))
+        except subprocess.TimeoutExpired:
+            process.kill()
+    return cancelled_status
 
 
 @app.get("/jobs/{job_id}/result")

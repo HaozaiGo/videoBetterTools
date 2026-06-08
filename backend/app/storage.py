@@ -50,7 +50,7 @@ class LocalStorage:
         target = self.local_path(storage_key)
         target.parent.mkdir(parents=True, exist_ok=True)
         if local_path.resolve() != target.resolve():
-            target.write_bytes(local_path.read_bytes())
+            shutil.copyfile(local_path, target)
         return StoredObject(storage_key=storage_key, public_url=self.public_url(storage_key), size=target.stat().st_size)
 
     def write_text(self, storage_key: str, content: str) -> None:

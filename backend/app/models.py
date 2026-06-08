@@ -68,6 +68,8 @@ class Task(Base):
     provider: Mapped[str] = mapped_column(String(120), nullable=False)
     provider_job_id: Mapped[str] = mapped_column(String(160), unique=True, index=True, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    progress_percent: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    progress_stage: Mapped[str] = mapped_column(String(160), nullable=False, default="")
     output_url: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

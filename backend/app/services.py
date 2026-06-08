@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import shutil
 from uuid import uuid4
 
 from fastapi import HTTPException, UploadFile
@@ -132,6 +133,8 @@ def task_to_dict(task: Task) -> dict:
         "provider": task.provider,
         "providerJobId": task.provider_job_id,
         "errorCode": task.error_code,
+        "progressPercent": task.progress_percent,
+        "progressStage": task.progress_stage,
         "createdAt": serialize_datetime(task.created_at),
         "completedAt": serialize_datetime(task.completed_at),
         "outputUrl": task.output_url,
@@ -248,6 +251,167 @@ def complete_uploaded_asset(
     return asset
 
 
+def _multipart_root() -> Path:
+    root = settings.upload_path / ".multipart"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _safe_upload_id(upload_id: str) -> str:
+    cleaned = upload_id.replace("-", "")
+    if not cleaned.isalnum():
+        raise HTTPException(status_code=400, detail="invalid upload id")
+    return upload_id
+
+
+def _multipart_dir(upload_id: str) -> Path:
+    return _multipart_root() / _safe_upload_id(upload_id)
+
+
+def _multipart_manifest_path(upload_id: str) -> Path:
+    return _multipart_dir(upload_id) / "manifest.json"
+
+
+def _read_multipart_manifest(upload_id: str) -> dict:
+    path = _multipart_manifest_path(upload_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="multipart upload not found")
+    import json
+
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_multipart_manifest(upload_id: str, manifest: dict) -> None:
+    import json
+
+    path = _multipart_manifest_path(upload_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _uploaded_chunk_indexes(upload_id: str) -> list[int]:
+    chunks_dir = _multipart_dir(upload_id) / "chunks"
+    if not chunks_dir.exists():
+        return []
+    indexes: list[int] = []
+    for path in chunks_dir.glob("*.part"):
+        try:
+            indexes.append(int(path.stem))
+        except ValueError:
+            continue
+    return sorted(indexes)
+
+
+def create_multipart_upload(
+    db: Session,
+    user_id: str,
+    kind: str,
+    original_name: str,
+    mime_type: str,
+    size_bytes: int,
+    duration_seconds: int = 0,
+    chunk_size: int = 8 * 1024 * 1024,
+) -> dict:
+    if size_bytes < 1:
+        raise HTTPException(status_code=400, detail="sizeBytes must be positive")
+    chunk_size = max(1024 * 1024, min(chunk_size, 64 * 1024 * 1024))
+    asset_id = str(uuid4())
+    upload_id = str(uuid4())
+    safe_name = safe_storage_name(original_name)
+    storage_key = object_key_for_upload(asset_id, kind, safe_name) if storage.is_remote else f"{asset_id}-{safe_name}"
+    total_chunks = (size_bytes + chunk_size - 1) // chunk_size
+    manifest = {
+        "uploadId": upload_id,
+        "assetId": asset_id,
+        "userId": user_id,
+        "kind": kind,
+        "originalName": safe_name,
+        "mimeType": mime_type or "application/octet-stream",
+        "storageKey": storage_key,
+        "sizeBytes": size_bytes,
+        "durationSeconds": duration_seconds,
+        "chunkSize": chunk_size,
+        "totalChunks": total_chunks,
+        "createdAt": int(now().timestamp() * 1000),
+    }
+    _write_multipart_manifest(upload_id, manifest)
+    (_multipart_dir(upload_id) / "chunks").mkdir(parents=True, exist_ok=True)
+    return {**manifest, "uploadedChunks": []}
+
+
+def get_multipart_upload(user_id: str, upload_id: str) -> dict:
+    manifest = _read_multipart_manifest(upload_id)
+    if manifest.get("userId") != user_id:
+        raise HTTPException(status_code=404, detail="multipart upload not found")
+    return {**manifest, "uploadedChunks": _uploaded_chunk_indexes(upload_id)}
+
+
+async def save_multipart_chunk(user_id: str, upload_id: str, chunk_index: int, file: UploadFile) -> dict:
+    manifest = get_multipart_upload(user_id, upload_id)
+    total_chunks = int(manifest["totalChunks"])
+    if chunk_index < 0 or chunk_index >= total_chunks:
+        raise HTTPException(status_code=400, detail="invalid chunk index")
+    chunk_size = int(manifest["chunkSize"])
+    expected_size = chunk_size
+    if chunk_index == total_chunks - 1:
+        expected_size = int(manifest["sizeBytes"]) - chunk_size * (total_chunks - 1)
+    content = await file.read()
+    if len(content) != expected_size:
+        raise HTTPException(status_code=400, detail="chunk size mismatch")
+    chunks_dir = _multipart_dir(upload_id) / "chunks"
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+    part_path = chunks_dir / f"{chunk_index:06d}.part"
+    temp_path = part_path.with_suffix(".tmp")
+    temp_path.write_bytes(content)
+    temp_path.replace(part_path)
+    uploaded = _uploaded_chunk_indexes(upload_id)
+    return {
+        "uploadId": upload_id,
+        "chunkIndex": chunk_index,
+        "uploadedChunks": uploaded,
+        "progressPercent": int(len(uploaded) / total_chunks * 100),
+    }
+
+
+def complete_multipart_upload(db: Session, user_id: str, upload_id: str) -> Asset:
+    manifest = get_multipart_upload(user_id, upload_id)
+    total_chunks = int(manifest["totalChunks"])
+    uploaded = set(_uploaded_chunk_indexes(upload_id))
+    missing = [index for index in range(total_chunks) if index not in uploaded]
+    if missing:
+        raise HTTPException(status_code=400, detail={"message": "missing chunks", "missingChunks": missing[:200]})
+    if db.get(Asset, manifest["assetId"]) is not None:
+        raise HTTPException(status_code=409, detail="asset already exists")
+
+    upload_dir = _multipart_dir(upload_id)
+    assembled_path = upload_dir / "assembled.bin"
+    with assembled_path.open("wb") as output_file:
+        for index in range(total_chunks):
+            output_file.write((upload_dir / "chunks" / f"{index:06d}.part").read_bytes())
+    size_bytes = assembled_path.stat().st_size
+    if size_bytes != int(manifest["sizeBytes"]):
+        raise HTTPException(status_code=400, detail="assembled file size mismatch")
+
+    stored = storage.save_file(str(manifest["storageKey"]), assembled_path)
+    asset = Asset(
+        id=str(manifest["assetId"]),
+        user_id=user_id,
+        kind=str(manifest["kind"]),
+        original_name=str(manifest["originalName"]),
+        mime_type=str(manifest["mimeType"]),
+        storage_key=stored.storage_key,
+        url=stored.public_url,
+        size_bytes=stored.size,
+        duration_seconds=int(manifest["durationSeconds"]),
+        expires_at=now() + timedelta(days=7),
+    )
+    db.add(asset)
+    db.commit()
+    db.refresh(asset)
+    shutil.rmtree(upload_dir, ignore_errors=True)
+    return asset
+
+
 def create_task(db: Session, user_id: str, tool_slug: str, input_asset_id: str, params: dict) -> Task:
     tool = get_tool(tool_slug)
     if tool is None or tool["status"] != "online":
@@ -273,6 +437,8 @@ def create_task(db: Session, user_id: str, tool_slug: str, input_asset_id: str, 
         frozen_credits=estimate,
         provider=tool["provider"],
         provider_job_id=f"mock_{uuid4()}",
+        progress_percent=0,
+        progress_stage="等待 worker 领取任务",
     )
     wallet.frozen_credits += estimate
     db.add(task)
@@ -280,6 +446,35 @@ def create_task(db: Session, user_id: str, tool_slug: str, input_asset_id: str, 
     db.commit()
     db.refresh(task)
     enqueue_provider_job(task.id)
+    return task
+
+
+def cancel_task(db: Session, user_id: str, task_id: str) -> Task:
+    task = db.execute(
+        select(Task).where(Task.id == task_id, Task.user_id == user_id).with_for_update()
+    ).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if task.status in {"succeeded", "failed", "cancelled"}:
+        raise HTTPException(status_code=409, detail="task is already finished")
+
+    wallet = get_wallet(db, user_id, lock=True)
+    tool = get_tool(task.tool_slug) or {"name": task.tool_slug}
+    task.status = "cancelled"
+    task.error_code = "USER_CANCELLED"
+    task.progress_percent = 0
+    task.progress_stage = "用户已取消，积分已释放"
+    task.completed_at = now()
+    wallet.frozen_credits = max(0, wallet.frozen_credits - task.frozen_credits)
+    add_ledger(db, user_id, "refund", 0, f"{tool['name']} 已取消，释放 {task.frozen_credits} 积分", task.id)
+
+    # 正在运行的视频 worker 会轮询这个标记，并把取消请求转发到远端 GPU Worker。
+    cancel_marker = settings.upload_path / f"{task.id}.cancel"
+    cancel_marker.parent.mkdir(parents=True, exist_ok=True)
+    cancel_marker.write_text("cancelled", encoding="utf-8")
+
+    db.commit()
+    db.refresh(task)
     return task
 
 
@@ -303,6 +498,8 @@ def provider_callback(
     output_size_bytes: int | None = None,
     charged_credits: int | None = None,
     error_code: str | None = None,
+    progress_percent: int | None = None,
+    progress_stage: str | None = None,
 ) -> tuple[bool, Task]:
     callback_id = callback_id or f"{provider_job_id}:{status}"
     if db.get(ProcessedCallback, callback_id) is not None:
@@ -317,8 +514,17 @@ def provider_callback(
     wallet = get_wallet(db, task.user_id, lock=True)
     tool = get_tool(task.tool_slug) or {"name": task.tool_slug}
 
-    if status == "processing" and task.status == "queued":
+    if progress_percent is not None:
+        task.progress_percent = max(0, min(100, progress_percent))
+    if progress_stage is not None:
+        task.progress_stage = progress_stage[:160]
+
+    if status == "processing" and task.status in {"queued", "processing"}:
         task.status = "processing"
+        if progress_percent is None and task.progress_percent < 5:
+            task.progress_percent = 5
+        if progress_stage is None and not task.progress_stage:
+            task.progress_stage = "worker 已领取，准备提交远端任务"
 
     if status == "succeeded" and task.status not in {"succeeded", "failed", "cancelled"}:
         charge = min(charged_credits or task.estimated_credits, task.frozen_credits)
@@ -340,6 +546,8 @@ def provider_callback(
             storage.write_text(output_asset.storage_key, f"任务 {task.id} 已完成\n")
         db.add(output_asset)
         task.status = "succeeded"
+        task.progress_percent = 100
+        task.progress_stage = "处理完成，结果已入库"
         task.output_asset_id = output_asset.id
         task.output_url = output_asset.url
         task.charged_credits = charge
@@ -351,6 +559,8 @@ def provider_callback(
     if status == "failed" and task.status not in {"succeeded", "failed", "cancelled"}:
         task.status = "failed"
         task.error_code = error_code or "PROVIDER_FAILED"
+        if progress_stage is None:
+            task.progress_stage = "处理失败，积分已释放"
         task.completed_at = now()
         wallet.frozen_credits = max(0, wallet.frozen_credits - task.frozen_credits)
         add_ledger(db, task.user_id, "refund", 0, f"{tool['name']} 失败，释放 {task.frozen_credits} 积分", task.id)

@@ -69,6 +69,12 @@ const billingRoute = createRoute({
 const adminRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/admin",
+  beforeLoad: async ({ context }) => {
+    const state = await context.queryClient.ensureQueryData({ queryKey: ["bootstrap"], queryFn: getBootstrap });
+    if (state.account.role !== "admin") {
+      throw redirect({ to: "/tools" });
+    }
+  },
   component: AdminPage,
 });
 

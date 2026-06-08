@@ -7,8 +7,16 @@ import type { BootstrapState } from "../types";
 
 function isActive(pathname: string, target: string) {
   if (target === "/tools") return pathname === "/tools" || pathname.startsWith("/tools/");
+  if (target === "/billing") return pathname === "/billing";
   return pathname === target;
 }
+
+const navItems = [
+  { to: "/tools", label: "工具广场", icon: "⌕" },
+  { to: "/tasks", label: "任务列表", icon: "☑" },
+  { to: "/billing", label: "充值消耗", icon: "¥" },
+  { to: "/admin", label: "后台管理", icon: "⚙", adminOnly: true },
+] as const;
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -20,39 +28,40 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     onSuccess: (payload) => queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state),
   });
 
+  if (pathname === "/login") {
+    return <div className="auth-root">{children}</div>;
+  }
+
   return (
     <>
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">NW</div>
+          <div className="brand-mark">片</div>
           <div>
-            <strong>牛蛙AI工作台</strong>
-            <span>AI视频创作必备助手</span>
+            <strong>片刻修AI</strong>
+            <span>AI视频创作必备</span>
           </div>
         </div>
         <nav className="nav">
-          <button>批处理工作台</button>
-          <Link className={isActive(pathname, "/tools") ? "active" : ""} to="/tools">
-            AI智能工具
-          </Link>
-          <Link className={isActive(pathname, "/tasks") ? "active" : ""} to="/tasks">
-            任务列表
-          </Link>
-          <Link className={isActive(pathname, "/admin") ? "active" : ""} to="/admin">
-            后台管理
-          </Link>
+          {navItems
+            .filter((item) => !("adminOnly" in item) || account.role === "admin")
+            .map((item) => (
+              <Link className={isActive(pathname, item.to) ? "active" : ""} key={item.to} to={item.to}>
+                <span aria-hidden="true">{item.icon}</span>
+                {item.label}
+              </Link>
+            ))}
         </nav>
         <div className="side-bottom">
-          <Link to="/billing">充值与消耗</Link>
-          <button>联系我们</button>
           <div className="login-box">
             <div className="avatar">人</div>
             <div>
               <strong>{account.name}</strong>
-              <span>可用 {formatCredits(account.availableCredits)}</span>
+              <span>{account.role || "user"} · 可用 {formatCredits(account.availableCredits)}</span>
             </div>
           </div>
           <button
+            className="logout-button"
             onClick={() => {
               clearAuthToken();
               location.assign("/login");
@@ -64,7 +73,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </aside>
       <main className="workspace">
         <header className="topbar">
-          <div className="crumb">AI智能工具台</div>
+          <div className="crumb">
+            <span>片刻修AI</span>
+            <strong>AI视频工具生产台</strong>
+          </div>
           <div className="account-pill">
             <span>余额 {formatCredits(account.credits)}</span>
             <span>冻结 {formatCredits(account.frozenCredits)}</span>

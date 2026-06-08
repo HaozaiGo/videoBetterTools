@@ -1,4 +1,4 @@
-import type { AdminSummary, AdminUser, Asset, AuthUser, BootstrapState, Task, ToolFormValues, UserCreateInput } from "../types";
+import type { AdminSummary, AdminUser, Asset, AuthUser, BootstrapState, Task, UserCreateInput } from "../types";
 
 const tokenKey = "model_plaza_auth_token";
 
@@ -38,21 +38,133 @@ export function getBootstrap() {
   return request<BootstrapState>("/api/bootstrap");
 }
 
-export function uploadAsset(input: { file: File; kind: "video" | "image"; durationSeconds?: number }) {
+export function uploadAsset(input: UploadAssetInput) {
   return uploadAssetWithStorage(input);
 }
 
-async function uploadAssetWithStorage(input: { file: File; kind: "video" | "image"; durationSeconds?: number }) {
+type UploadAssetInput = {
+  file: File;
+  kind: "video" | "image";
+  durationSeconds?: number;
+  onProgress?: (progress: { percent: number; uploadedBytes: number; totalBytes: number; stage: string }) => void;
+};
+
+const multipartThresholdBytes = 32 * 1024 * 1024;
+const multipartChunkSize = 8 * 1024 * 1024;
+
+type MultipartStatus = {
+  uploadId: string;
+  assetId: string;
+  chunkSize: number;
+  totalChunks: number;
+  uploadedChunks: number[];
+};
+
+function multipartStorageKey(input: UploadAssetInput) {
+  return `model-plaza-multipart:${input.kind}:${input.file.name}:${input.file.size}:${input.file.lastModified}`;
+}
+
+function uploadAssetViaBackend(input: { file: File; kind: "video" | "image"; durationSeconds?: number }) {
+  const body = new FormData();
+  body.append("file", input.file);
+  body.append("kind", input.kind);
+  body.append("durationSeconds", String(input.durationSeconds || 0));
+  return request<{ asset: Asset }>("/api/assets", {
+    method: "POST",
+    body,
+  });
+}
+
+async function uploadAssetWithMultipart(input: UploadAssetInput) {
+  const storageKey = multipartStorageKey(input);
+  let uploadId = localStorage.getItem(storageKey) || "";
+  let status: MultipartStatus | null = null;
+
+  if (uploadId) {
+    try {
+      status = await request<MultipartStatus>(`/api/assets/multipart/${uploadId}`);
+    } catch {
+      uploadId = "";
+      localStorage.removeItem(storageKey);
+    }
+  }
+
+  if (!uploadId || !status) {
+    status = await request<MultipartStatus>("/api/assets/multipart/init", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind: input.kind,
+        originalName: input.file.name,
+        mimeType: input.file.type || "application/octet-stream",
+        sizeBytes: input.file.size,
+        durationSeconds: input.durationSeconds || 0,
+        chunkSize: multipartChunkSize,
+      }),
+    });
+    uploadId = status.uploadId;
+    localStorage.setItem(storageKey, uploadId);
+  }
+
+  const uploaded = new Set(status.uploadedChunks || []);
+  const chunkSize = status.chunkSize || multipartChunkSize;
+  const totalChunks = status.totalChunks || Math.ceil(input.file.size / chunkSize);
+  for (let index = 0; index < totalChunks; index += 1) {
+    if (uploaded.has(index)) {
+      input.onProgress?.({
+        percent: Math.floor((uploaded.size / totalChunks) * 100),
+        uploadedBytes: Math.min(uploaded.size * chunkSize, input.file.size),
+        totalBytes: input.file.size,
+        stage: "断点续传中",
+      });
+      continue;
+    }
+    const start = index * chunkSize;
+    const end = Math.min(start + chunkSize, input.file.size);
+    const body = new FormData();
+    body.append("file", input.file.slice(start, end), input.file.name);
+    const result = await request<{ uploadedChunks: number[]; progressPercent: number }>(`/api/assets/multipart/${uploadId}/chunks/${index}`, {
+      method: "POST",
+      body,
+    });
+    uploaded.clear();
+    for (const chunkIndex of result.uploadedChunks || []) {
+      uploaded.add(chunkIndex);
+    }
+    input.onProgress?.({
+      percent: result.progressPercent,
+      uploadedBytes: Math.min(uploaded.size * chunkSize, input.file.size),
+      totalBytes: input.file.size,
+      stage: "上传分片",
+    });
+  }
+
+  const completed = await request<{ asset: Asset }>(`/api/assets/multipart/${uploadId}/complete`, { method: "POST" });
+  localStorage.removeItem(storageKey);
+  input.onProgress?.({ percent: 100, uploadedBytes: input.file.size, totalBytes: input.file.size, stage: "上传完成" });
+  return completed;
+}
+
+async function uploadAssetWithStorage(input: UploadAssetInput) {
+  if (input.file.size >= multipartThresholdBytes) {
+    return uploadAssetWithMultipart(input);
+  }
+
   const presign = await presignAsset(input.kind, input.durationSeconds || 0, input.file.name);
   if (presign.mode === "tos-put") {
     if (!presign.assetId || !presign.storageKey) {
       throw new Error("上传签名缺少资产信息");
     }
-    const uploadResponse = await fetch(presign.uploadUrl, {
-      method: presign.method,
-      headers: presign.headers || {},
-      body: input.file,
-    });
+    let uploadResponse: Response;
+    try {
+      uploadResponse = await fetch(presign.uploadUrl, {
+        method: presign.method,
+        headers: presign.headers || {},
+        body: input.file,
+      });
+    } catch {
+      return uploadAssetViaBackend(input);
+    }
     if (!uploadResponse.ok) {
       throw new Error("上传到火山存储失败");
     }
@@ -71,14 +183,7 @@ async function uploadAssetWithStorage(input: { file: File; kind: "video" | "imag
     });
   }
 
-  const body = new FormData();
-  body.append("file", input.file);
-  body.append("kind", input.kind);
-  body.append("durationSeconds", String(input.durationSeconds || 0));
-  return request<{ asset: Asset }>("/api/assets", {
-    method: "POST",
-    body,
-  });
+  return uploadAssetViaBackend(input);
 }
 
 export function presignAsset(kind: "video" | "image", durationSeconds = 0, originalName = "upload.bin") {
@@ -97,11 +202,17 @@ export function presignAsset(kind: "video" | "image", durationSeconds = 0, origi
   );
 }
 
-export function createTask(input: { toolSlug: string; inputAssetId: string; params: ToolFormValues }) {
+export function createTask(input: { toolSlug: string; inputAssetId: string; params: Record<string, unknown> }) {
   return request<{ task: Task; state: BootstrapState }>("/api/tasks", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
+  });
+}
+
+export function cancelTask(taskId: string) {
+  return request<{ task: Task; state: BootstrapState }>(`/api/tasks/${taskId}/cancel`, {
+    method: "POST",
   });
 }
 

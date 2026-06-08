@@ -29,8 +29,8 @@ export function LoginPage() {
   });
   const form = useForm({
     defaultValues: {
-      email: "demo@modelplaza.local",
-      password: "demo123456",
+      email: "",
+      password: "",
       name: "",
     },
     onSubmit: async ({ value }) => mutation.mutateAsync(value),
@@ -38,9 +38,29 @@ export function LoginPage() {
 
   return (
     <section className="login-page">
-      <div className="panel login-panel">
-        <h1>{mode === "login" ? "登录" : "注册账号"}</h1>
-        <p>{mode === "login" ? "使用账号进入工具工作台。" : "创建新用户后会自动登录。"}</p>
+      <div className="login-hero">
+        <div className="brand login-brand">
+          <div className="brand-mark">片</div>
+          <div>
+            <strong>片刻修AI</strong>
+            <span>视频去水印与画质修复工作台</span>
+          </div>
+        </div>
+        <h1>上传视频，一站式完成去字幕、去水印与高清修复</h1>
+        <p>素材上传处理、积分计费、任务回调和结果下载，都在片刻修AI高效完成。</p>
+        <div className="login-chips">
+          <span>视频去字幕</span>
+          <span>视频去水印</span>
+          <span>高清增强</span>
+          <span>任务进度追踪</span>
+        </div>
+      </div>
+      <div className="login-panel">
+        <div className="login-panel-head">
+          <span>AI VIDEO WORKBENCH</span>
+          <h2>{mode === "login" ? "登录片刻修AI" : "创建片刻修账号"}</h2>
+          <p>{mode === "login" ? "继续查看处理进度、积分余额和历史结果。" : "创建账号后即可提交视频处理任务。"}</p>
+        </div>
         {error ? <div className="notice">{error}</div> : null}
         <form
           className="login-form"
@@ -76,11 +96,11 @@ export function LoginPage() {
             )}
           </form.Field>
           <button className="primary wide" type="submit" disabled={mutation.isPending}>
-            {mutation.isPending ? "处理中..." : mode === "login" ? "登录" : "注册"}
+            {mutation.isPending ? "处理中..." : mode === "login" ? "进入工作台" : "创建账号"}
           </button>
         </form>
         <button className="link-button login-switch" onClick={() => setMode(mode === "login" ? "register" : "login")}>
-          {mode === "login" ? "没有账号？创建一个" : "已有账号？去登录"}
+          {mode === "login" ? "还没有账号？立即创建" : "已有账号？去登录"}
         </button>
       </div>
     </section>

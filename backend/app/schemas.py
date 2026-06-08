@@ -26,6 +26,15 @@ class TaskCreate(BaseModel):
     params: dict[str, Any] = {}
 
 
+class MultipartUploadInit(BaseModel):
+    kind: str = "video"
+    originalName: str = "upload.bin"
+    mimeType: str = "application/octet-stream"
+    sizeBytes: int
+    durationSeconds: int = 0
+    chunkSize: int = 8 * 1024 * 1024
+
+
 class AssetComplete(BaseModel):
     assetId: str
     kind: str = "video"
@@ -50,3 +59,5 @@ class ProviderCallback(BaseModel):
     outputSizeBytes: int | None = None
     chargedCredits: int | None = None
     errorCode: str | None = None
+    progressPercent: int | None = None
+    progressStage: str | None = None

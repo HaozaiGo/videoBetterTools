@@ -7,6 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://jason@127.0.0.1:5432/model_plaza"
     redis_url: str = "redis://127.0.0.1:6379/0"
+    task_job_timeout_seconds: int = 7200
     upload_dir: str = "../data/uploads"
     public_upload_prefix: str = "/uploads"
     demo_user_id: str = "demo-user"
@@ -15,6 +16,7 @@ class Settings(BaseSettings):
     auth_token_ttl_seconds: int = 7 * 24 * 60 * 60
     allow_demo_without_auth: bool = True
     propainter_command: str = ""
+    enhance_command: str = ""
     e2fgvi_command: str = ""
     storage_backend: str = "local"
     volcengine_openapi_ak: str = ""

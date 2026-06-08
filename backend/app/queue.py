@@ -13,4 +13,4 @@ def task_queue() -> Queue:
 
 
 def enqueue_provider_job(task_id: str) -> None:
-    task_queue().enqueue("app.worker.process_provider_job", task_id, job_timeout=600, result_ttl=3600)
+    task_queue().enqueue("app.worker.process_provider_job", task_id, job_timeout=settings.task_job_timeout_seconds, result_ttl=3600)

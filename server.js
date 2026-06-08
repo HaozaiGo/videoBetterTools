@@ -422,5 +422,5 @@ createServer(async (req, res) => {
     sendError(res, 500, error.message);
   }
 }).listen(port, "0.0.0.0", () => {
-  console.log(`Model Plaza is running at http://localhost:${port}`);
+  console.log(`片刻修AI is running at http://localhost:${port}`);
 });

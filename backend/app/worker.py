@@ -7,6 +7,7 @@ from app.database import SessionLocal
 from app.models import Asset, Task
 from app.queue import redis_connection, task_queue
 from app.services import provider_callback
+from app.video.enhance import process_video_enhance
 from app.video.watermark import VideoProcessingError, process_subtitle_removal, process_watermark_removal
 
 logger = logging.getLogger("model_plaza.worker")
@@ -20,9 +21,9 @@ def process_provider_job(task_id: str) -> None:
         provider_job_id = task.provider_job_id
         provider_callback(db, provider_job_id, "processing", callback_id=f"{provider_job_id}:processing")
 
-    # 视频去水印/去字幕已经具备本地处理能力，单独走真实 mask 修复管线；其他工具仍保留模拟供应商结果。
-    if task.tool_slug in {"remove-watermark", "remove-subtitle"}:
-        _process_masked_video_task(task_id)
+    # 已接入真实视频处理能力的工具单独走 GPU/本地处理管线；其他工具仍保留模拟供应商结果。
+    if task.tool_slug in {"remove-watermark", "remove-subtitle", "enhance"}:
+        _process_real_video_task(task_id)
         return
 
     time.sleep(8)
@@ -39,7 +40,7 @@ def process_provider_job(task_id: str) -> None:
         )
 
 
-def _process_masked_video_task(task_id: str) -> None:
+def _process_real_video_task(task_id: str) -> None:
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         if task is None or task.status in {"succeeded", "failed", "cancelled"}:
@@ -56,22 +57,25 @@ def _process_masked_video_task(task_id: str) -> None:
             return
         provider_job_id = task.provider_job_id
         params = dict(task.params or {})
+        params["providerJobId"] = provider_job_id
         input_storage_key = input_asset.storage_key
         tool_slug = task.tool_slug
 
     # 耗时视频处理放在数据库会话之外，避免长时间占用连接和行锁。
     try:
-        if tool_slug == "remove-subtitle":
+        if tool_slug == "enhance":
+            result = process_video_enhance(input_storage_key, task_id, params)
+        elif tool_slug == "remove-subtitle":
             result = process_subtitle_removal(input_storage_key, task_id, params)
         else:
             result = process_watermark_removal(input_storage_key, task_id, params)
     except VideoProcessingError as exc:
         logger.warning("Video processing failed for task %s: %s", task_id, exc)
-        _fail_provider_job(provider_job_id, "VIDEO_PROCESSING_FAILED")
+        _fail_provider_job(provider_job_id, "VIDEO_PROCESSING_FAILED", str(exc))
         return
-    except Exception:
+    except Exception as exc:
         logger.exception("Unexpected video processing error for task %s", task_id)
-        _fail_provider_job(provider_job_id, "VIDEO_PROCESSING_FAILED")
+        _fail_provider_job(provider_job_id, "VIDEO_PROCESSING_FAILED", str(exc))
         return
 
     with SessionLocal() as db:
@@ -91,7 +95,7 @@ def _process_masked_video_task(task_id: str) -> None:
         )
 
 
-def _fail_provider_job(provider_job_id: str, error_code: str) -> None:
+def _fail_provider_job(provider_job_id: str, error_code: str, progress_stage: str = "") -> None:
     with SessionLocal() as db:
         provider_callback(
             db,
@@ -99,6 +103,7 @@ def _fail_provider_job(provider_job_id: str, error_code: str) -> None:
             "failed",
             callback_id=f"{provider_job_id}:failed",
             error_code=error_code,
+            progress_stage=progress_stage[:160] if progress_stage else None,
         )
 
 
