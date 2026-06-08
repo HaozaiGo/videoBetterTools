@@ -95,7 +95,7 @@ jobs:
           WEB_PORT=8003
           TASK_JOB_TIMEOUT_SECONDS=7200
           MODEL_PLAZA_GPU_API_URL=http://32.196.46.122:18080
-          MODEL_PLAZA_GPU_API_KEY=
+          MODEL_PLAZA_GPU_API_KEY=model-plaza-dev-gpu-key
           STORAGE_BACKEND=local
           EOF
           fi

@@ -19,7 +19,6 @@ export const rootRoute = createRootRouteWithContext<RouterContext>()({
       <Outlet />
     </AppShell>
   ),
-  loader: ({ context }) => context.queryClient.ensureQueryData({ queryKey: ["bootstrap"], queryFn: getBootstrap }),
 });
 
 const indexRoute = createRoute({

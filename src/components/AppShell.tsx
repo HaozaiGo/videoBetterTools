@@ -20,6 +20,15 @@ const navItems = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+
+  if (pathname === "/login") {
+    return <div className="auth-root">{children}</div>;
+  }
+
+  return <WorkspaceShell pathname={pathname}>{children}</WorkspaceShell>;
+}
+
+function WorkspaceShell({ children, pathname }: { children: React.ReactNode; pathname: string }) {
   const queryClient = useQueryClient();
   const { data } = useSuspenseQuery({ queryKey: ["bootstrap"], queryFn: getBootstrap });
   const account = data.account;
@@ -27,10 +36,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     mutationFn: recharge,
     onSuccess: (payload) => queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state),
   });
-
-  if (pathname === "/login") {
-    return <div className="auth-root">{children}</div>;
-  }
 
   return (
     <>
