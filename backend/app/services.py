@@ -523,7 +523,9 @@ def provider_callback(
         task.status = "processing"
         if progress_percent is None and task.progress_percent < 5:
             task.progress_percent = 5
-        if progress_stage is None and not task.progress_stage:
+        if progress_stage is None and (
+            not task.progress_stage or task.progress_stage == "等待 worker 领取任务"
+        ):
             task.progress_stage = "worker 已领取，准备提交远端任务"
 
     if status == "succeeded" and task.status not in {"succeeded", "failed", "cancelled"}:

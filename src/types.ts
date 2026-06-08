@@ -147,6 +147,8 @@ export type ToolFormValues = {
   mode: "manual" | "auto";
   regions: WatermarkRegion[];
   keepAudio: boolean;
+  targetLanguage: "en";
+  subtitlePlacement: "bottom" | "middle-lower" | "top";
   enhanceMode: "quality" | "natural";
   modelAdapter: "opencv-inpaint" | "ffmpeg-delogo" | "propainter" | "e2fgvi";
   inpaintMethod: "telea" | "ns";

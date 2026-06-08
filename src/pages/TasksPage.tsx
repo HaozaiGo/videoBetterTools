@@ -12,6 +12,7 @@ function remoteStage(task: Task) {
     enhance: "远端 GPU 超分",
     "remove-watermark": "远端 GPU 修复",
     "remove-subtitle": "远端 GPU 修复",
+    translate: "视频翻译",
   };
   const runner = gpuToolLabels[task.toolSlug] || "供应商处理";
 
@@ -39,6 +40,8 @@ function paramSummary(task: Task) {
   const items = [
     typeof params.resolution === "string" ? `清晰度 ${params.resolution}` : "",
     typeof params.enhanceMode === "string" ? `模式 ${params.enhanceMode === "natural" ? "自然增强" : "高质量超分"}` : "",
+    typeof params.targetLanguage === "string" ? `目标语言 ${params.targetLanguage === "en" ? "英文" : params.targetLanguage}` : "",
+    typeof params.subtitlePlacement === "string" ? `字幕位置 ${params.subtitlePlacement === "top" ? "顶部" : params.subtitlePlacement === "middle-lower" ? "中下" : "底部"}` : "",
     typeof params.priority === "string" ? `优先级 ${params.priority === "express" ? "加急" : "标准"}` : "",
     typeof params.keepAudio === "boolean" ? `音频 ${params.keepAudio ? "保留" : "不保留"}` : "",
   ].filter(Boolean);

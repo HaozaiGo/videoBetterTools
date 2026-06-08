@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     allow_demo_without_auth: bool = True
     propainter_command: str = ""
     enhance_command: str = ""
+    translate_command: str = ""
     e2fgvi_command: str = ""
     storage_backend: str = "local"
     volcengine_openapi_ak: str = ""

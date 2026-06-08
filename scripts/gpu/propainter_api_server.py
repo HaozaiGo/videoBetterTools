@@ -33,6 +33,7 @@ JOBS_ROOT = Path(os.environ.get("MODEL_PLAZA_GPU_JOBS_ROOT", str(ROOT / "work" /
 LOGS_ROOT = Path(os.environ.get("MODEL_PLAZA_GPU_LOGS_ROOT", str(ROOT / "logs"))).resolve()
 PROPAINTER_RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_PROPAINTER_RUNNER", str(ROOT / "scripts" / "propainter_runner.py"))).resolve()
 ENHANCE_RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_ENHANCE_RUNNER", str(ROOT / "scripts" / "video_enhance_runner.py"))).resolve()
+TRANSLATE_RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_TRANSLATE_RUNNER", str(ROOT / "scripts" / "video_translate_runner.py"))).resolve()
 PYTHON_PATH = os.environ.get("PROPAINTER_PYTHON", "/data1/conda/miniconda3/envs/video-inpaint/bin/python")
 API_KEY = os.environ.get("MODEL_PLAZA_GPU_API_KEY", "model-plaza-dev-gpu-key")
 MAX_WORKERS = max(1, int(os.environ.get("MODEL_PLAZA_GPU_MAX_WORKERS", "1")))
@@ -225,6 +226,8 @@ def _runner_for_job_type(job_type: str) -> Path:
         return PROPAINTER_RUNNER_PATH
     if job_type == "enhance":
         return ENHANCE_RUNNER_PATH
+    if job_type == "translate":
+        return TRANSLATE_RUNNER_PATH
     raise RuntimeError(f"Unsupported job type: {job_type}")
 
 
@@ -249,13 +252,13 @@ def _run_model_job(job_id: str) -> None:
         str(input_path),
         "--output",
         str(output_path),
-        "--regions",
-        str(regions_path),
         "--params",
         str(params_path),
         "--workdir",
         str(work_dir),
     ]
+    if job_type in {"propainter", "enhance"}:
+        command[6:6] = ["--regions", str(regions_path)]
     LOGS_ROOT.mkdir(parents=True, exist_ok=True)
     try:
         with log_path.open("w", encoding="utf-8") as log_file:
@@ -402,7 +405,7 @@ async def create_job(
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="regions/params must be valid JSON") from exc
     job_type = job_type.lower().strip()
-    if job_type not in {"propainter", "enhance"}:
+    if job_type not in {"propainter", "enhance", "translate"}:
         raise HTTPException(status_code=400, detail="unsupported job type")
     if not isinstance(regions_json, list):
         raise HTTPException(status_code=400, detail="regions must be a JSON array")

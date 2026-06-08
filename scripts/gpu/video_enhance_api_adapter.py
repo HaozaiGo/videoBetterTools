@@ -123,8 +123,9 @@ def _submit_job(
     result_storage_key: str = "",
     result_url: str = "",
 ) -> str:
+    job_type = os.environ.get("MODEL_PLAZA_GPU_JOB_TYPE", "enhance").strip() or "enhance"
     fields = {
-        "job_type": "enhance",
+        "job_type": job_type,
         "regions": "[]",
         "params": params_path.read_text(encoding="utf-8"),
     }
@@ -150,26 +151,27 @@ def _submit_job(
 
 
 def _poll_job(job_id: str) -> dict:
+    job_label = os.environ.get("MODEL_PLAZA_GPU_JOB_LABEL", "enhance").strip() or "enhance"
     interval = max(1, int(os.environ.get("MODEL_PLAZA_GPU_POLL_INTERVAL", "5")))
     timeout = max(interval, int(os.environ.get("MODEL_PLAZA_GPU_POLL_TIMEOUT", "7200")))
     deadline = time.time() + timeout
     while time.time() < deadline:
         if _cancel_requested():
             _cancel_job(job_id)
-            raise GpuJobCancelled(f"GPU enhance job cancelled: {job_id}")
+            raise GpuJobCancelled(f"GPU {job_label} job cancelled: {job_id}")
         request = urllib.request.Request(_api_url(f"/jobs/{job_id}"), headers=_headers(), method="GET")
         status = _request_json(request, timeout=30)
         state = status.get("status")
         _sync_progress(job_id, status)
-        print(f"GPU enhance job {job_id}: {state}", flush=True)
+        print(f"GPU {job_label} job {job_id}: {state}", flush=True)
         if state == "succeeded":
             return status
         if state == "cancelled":
-            raise GpuJobCancelled(f"GPU enhance job cancelled: {job_id}")
+            raise GpuJobCancelled(f"GPU {job_label} job cancelled: {job_id}")
         if state == "failed":
-            raise GpuApiError(f"GPU enhance job failed: {status.get('error') or 'unknown error'}")
+            raise GpuApiError(f"GPU {job_label} job failed: {status.get('error') or 'unknown error'}")
         time.sleep(interval)
-    raise GpuApiError(f"GPU enhance job timed out after {timeout}s: {job_id}")
+    raise GpuApiError(f"GPU {job_label} job timed out after {timeout}s: {job_id}")
 
 
 def _download_result(job_id: str, output_path: Path) -> None:
@@ -227,10 +229,10 @@ def main() -> None:
     )
     status = _poll_job(job_id)
     if _write_result_meta(status, meta_path):
-        print(f"GPU enhance result metadata written to {meta_path}", flush=True)
+        print(f"GPU result metadata written to {meta_path}", flush=True)
     else:
         _download_result(job_id, output_path)
-        print(f"Downloaded GPU enhance result to {output_path}", flush=True)
+        print(f"Downloaded GPU result to {output_path}", flush=True)
 
 
 if __name__ == "__main__":

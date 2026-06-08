@@ -19,6 +19,8 @@ const defaultValues: ToolFormValues = {
   mode: "manual",
   regions: [],
   keepAudio: true,
+  targetLanguage: "en",
+  subtitlePlacement: "bottom",
   enhanceMode: "quality",
   modelAdapter: "propainter",
   inpaintMethod: "telea",
@@ -66,8 +68,9 @@ export function ToolPage() {
   const isWatermarkTool = tool?.slug === "remove-watermark";
   const isSubtitleTool = tool?.slug === "remove-subtitle";
   const isEnhanceTool = tool?.slug === "enhance";
+  const isTranslateTool = tool?.slug === "translate";
   const isMaskVideoTool = isWatermarkTool || isSubtitleTool;
-  const showVideoPreview = Boolean(videoPreviewUrl && (isMaskVideoTool || isEnhanceTool));
+  const showVideoPreview = Boolean(videoPreviewUrl && (isMaskVideoTool || isEnhanceTool || isTranslateTool));
   const regionNoun = isSubtitleTool ? "字幕" : "水印";
 
   const createTaskMutation = useMutation({
@@ -94,6 +97,14 @@ export function ToolPage() {
               keepAudio: values.keepAudio,
               priority: values.priority,
             }
+          : isTranslateTool
+            ? {
+                duration: values.duration,
+                targetLanguage: values.targetLanguage,
+                subtitlePlacement: values.subtitlePlacement,
+                keepAudio: values.keepAudio,
+                priority: values.priority,
+              }
           : taskValues;
       const upload = await uploadAsset({
         file,
@@ -260,7 +271,7 @@ export function ToolPage() {
       </Link>
       {notice ? <div className="notice">{notice}</div> : null}
       <form
-        className={`tool-detail${isEnhanceTool ? " enhance-detail" : ""}${isMaskVideoTool ? " mask-detail" : ""}`}
+        className={`tool-detail${isEnhanceTool ? " enhance-detail" : ""}${isMaskVideoTool ? " mask-detail" : ""}${isTranslateTool ? " translate-detail" : ""}`}
         onSubmit={(event) => {
           event.preventDefault();
           if (isMaskVideoTool && regions.length === 0) {
@@ -281,6 +292,7 @@ export function ToolPage() {
                 <span>{tool.status === "online" ? "已上线" : "即将上线"}</span>
                 {isEnhanceTool ? <span>远端 GPU 超分</span> : null}
                 {isMaskVideoTool ? <span>区域框选修复</span> : null}
+                {isTranslateTool ? <span>英文硬字幕</span> : null}
               </div>
             </div>
           </div>
@@ -403,6 +415,40 @@ export function ToolPage() {
                       <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["enhanceMode"])}>
                         <option value="quality">高质量超分</option>
                         <option value="natural">自然增强</option>
+                      </select>
+                    </label>
+                  )}
+                </form.Field>
+                <form.Field name="keepAudio">
+                  {(field) => (
+                    <label className="checkbox-field">
+                      <input type="checkbox" checked={field.state.value} onChange={(event) => field.handleChange(event.target.checked)} />
+                      保留原音频
+                    </label>
+                  )}
+                </form.Field>
+              </>
+            ) : null}
+            {isTranslateTool ? (
+              <>
+                <form.Field name="targetLanguage">
+                  {(field) => (
+                    <label>
+                      目标语言
+                      <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["targetLanguage"])}>
+                        <option value="en">英文</option>
+                      </select>
+                    </label>
+                  )}
+                </form.Field>
+                <form.Field name="subtitlePlacement">
+                  {(field) => (
+                    <label>
+                      字幕位置
+                      <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["subtitlePlacement"])}>
+                        <option value="bottom">底部</option>
+                        <option value="middle-lower">中下</option>
+                        <option value="top">顶部</option>
                       </select>
                     </label>
                   )}

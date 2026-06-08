@@ -82,10 +82,10 @@ TOOLS = [
         "category": "video",
         "categoryName": "视频工具",
         "name": "视频翻译",
-        "summary": "一键翻译或多国语音并配音，让你的视频全球发布。",
+        "summary": "上传中文视频，自动翻译成英文并写入字幕，输出可直接发布的 MP4。",
         "route": "/tools/video/translate",
         "icon": "translate",
-        "status": "coming",
+        "status": "online",
         "provider": "mock-video-provider",
         "pricing": {
             "mode": "duration",
@@ -95,7 +95,7 @@ TOOLS = [
             "resolutionMultiplier": {"720p": 1, "1080p": 1, "2K": 1, "4K": 1},
             "priorityMultiplier": {"standard": 1, "express": 1.35},
         },
-        "inputs": ["duration", "priority", "languageCount"],
+        "inputs": ["duration", "targetLanguage", "subtitlePlacement", "keepAudio", "priority"],
     },
     {
         "slug": "image-cleanup",

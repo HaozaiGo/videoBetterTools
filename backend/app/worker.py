@@ -1,13 +1,15 @@
 import logging
+import os
 import time
 
-from rq import Worker
+from rq import SimpleWorker, Worker
 
 from app.database import SessionLocal
 from app.models import Asset, Task
 from app.queue import redis_connection, task_queue
 from app.services import provider_callback
 from app.video.enhance import process_video_enhance
+from app.video.translate import process_video_translate
 from app.video.watermark import VideoProcessingError, process_subtitle_removal, process_watermark_removal
 
 logger = logging.getLogger("model_plaza.worker")
@@ -22,7 +24,7 @@ def process_provider_job(task_id: str) -> None:
         provider_callback(db, provider_job_id, "processing", callback_id=f"{provider_job_id}:processing")
 
     # 已接入真实视频处理能力的工具单独走 GPU/本地处理管线；其他工具仍保留模拟供应商结果。
-    if task.tool_slug in {"remove-watermark", "remove-subtitle", "enhance"}:
+    if task.tool_slug in {"remove-watermark", "remove-subtitle", "enhance", "translate"}:
         _process_real_video_task(task_id)
         return
 
@@ -65,6 +67,8 @@ def _process_real_video_task(task_id: str) -> None:
     try:
         if tool_slug == "enhance":
             result = process_video_enhance(input_storage_key, task_id, params)
+        elif tool_slug == "translate":
+            result = process_video_translate(input_storage_key, task_id, params)
         elif tool_slug == "remove-subtitle":
             result = process_subtitle_removal(input_storage_key, task_id, params)
         else:
@@ -108,7 +112,8 @@ def _fail_provider_job(provider_job_id: str, error_code: str, progress_stage: st
 
 
 def run_worker() -> None:
-    worker = Worker([task_queue()], connection=redis_connection())
+    worker_class = SimpleWorker if os.environ.get("MODEL_PLAZA_WORKER_MODE") == "simple" else Worker
+    worker = worker_class([task_queue()], connection=redis_connection())
     worker.work()
 
 
