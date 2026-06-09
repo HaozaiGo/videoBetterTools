@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 
 const frontendPort = process.env.FRONTEND_PORT ?? "5175";
+const workerReplicas = Math.max(1, Number.parseInt(process.env.WORKER_REPLICAS ?? "4", 10) || 4);
 
 const backendEnv = {
   ...process.env,
@@ -15,7 +16,9 @@ const backendEnv = {
 
 const processes = [
   spawn("uv", ["--directory", "backend", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8010", "--reload", "--reload-dir", "app"], { stdio: "inherit", env: backendEnv }),
-  spawn("uv", ["--directory", "backend", "run", "python", "-m", "app.worker"], { stdio: "inherit", env: backendEnv }),
+  ...Array.from({ length: workerReplicas }, () =>
+    spawn("uv", ["--directory", "backend", "run", "python", "-m", "app.worker"], { stdio: "inherit", env: backendEnv })
+  ),
   spawn("npx", ["vite", "--host", "0.0.0.0", "--port", frontendPort], { stdio: "inherit" }),
 ];
 

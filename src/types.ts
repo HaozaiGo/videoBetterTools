@@ -108,6 +108,7 @@ export type Task = {
   createdAt: number;
   completedAt: number | null;
   outputUrl: string;
+  previewUrl: string;
 };
 
 export type LedgerEntry = {

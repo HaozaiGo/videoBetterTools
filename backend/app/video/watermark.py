@@ -341,20 +341,6 @@ def process_with_opencv_inpaint(input_path: Path, output_path: Path, params: dic
     temp_video_path.unlink(missing_ok=True)
 
 
-def _result_upload_target(output_key: str) -> dict[str, Any] | None:
-    if not storage.is_remote:
-        return None
-    presign = storage.presign_upload(kind="result", duration_seconds=0, storage_key=output_key)
-    if presign.get("mode") != "tos-put":
-        return None
-    return {
-        "upload_url": presign["uploadUrl"],
-        "headers": presign.get("headers") or {},
-        "storage_key": output_key,
-        "url": storage.public_url(output_key),
-    }
-
-
 def process_with_external_model(
     input_path: Path,
     output_path: Path,
@@ -454,13 +440,12 @@ def process_masked_video_removal(input_storage_key: str, task_id: str, params: d
     output_key = _output_key(task_id, suffix)
     output_path = settings.upload_path / output_key
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    result_upload = _result_upload_target(output_key) if adapter in {"propainter", "e2fgvi"} else None
     _, remote_result = process_with_model_adapter(
         input_path,
         output_path,
         params,
         input_url=input_url if _is_http_url(input_url) else None,
-        result_upload=result_upload,
+        result_upload=None,
     )
     if remote_result:
         return {

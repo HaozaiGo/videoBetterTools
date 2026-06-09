@@ -137,7 +137,9 @@ PRODUCTION_ENV     可选，生产环境变量，参考 deploy/production.env.ex
 
 服务器已有 Caddy 占用 `80/443` 时，项目默认暴露在 `WEB_PORT=8003`，再由现有网关或安全组决定是否对外开放。
 
-平台 worker 默认 `WORKER_REPLICAS=3`，GPU 服务当前 `MODEL_PLAZA_GPU_MAX_WORKERS=2`；也就是平台可以同时领取并提交多个任务，GPU 侧最多同时执行 2 个模型任务。ProPainter 并发仍需持续观察显存。
+平台 worker 默认 `WORKER_REPLICAS=4`，GPU 服务当前按 `MODEL_PLAZA_GPU_DEVICE_IDS=3,4` 和 `MODEL_PLAZA_GPU_WORKERS_PER_DEVICE=2` 分配，也就是 GPU3/GPU4 各最多同时处理 2 个模型任务，平台侧最多同时提交 4 个远端视频任务。GPU 服务设置 `MODEL_PLAZA_GPU_UPLOAD_RESULTS=0` 后只生成结果，平台 worker 通过 GPU API 拉取 `output.mp4` 再上传对象存储，避免 GPU 侧被结果上传链路占住。ProPainter 并发仍需持续观察显存。
+
+GPU 结果清理默认开启：成功任务保留 24 小时，失败/取消任务保留 48 小时；`runner-work` 中间目录默认 1 小时后清理，`api-jobs` 所在磁盘超过 80% 时会从最老的终态任务开始清到 70%。可通过 `MODEL_PLAZA_GPU_CLEANUP_*` 环境变量调整，也可调用 `POST /maintenance/cleanup` 手动触发一次。
 
 测试：
 

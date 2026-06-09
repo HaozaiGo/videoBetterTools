@@ -2,6 +2,7 @@ import logging
 
 from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
@@ -20,6 +21,7 @@ from app.services import (
     create_presigned_asset_upload,
     create_user,
     create_task,
+    get_task_preview_path,
     get_multipart_upload,
     provider_callback,
     recharge_wallet,
@@ -187,6 +189,12 @@ def create_task_endpoint(payload: TaskCreate, db: Session = Depends(get_db), use
 def cancel_task_endpoint(task_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
     task = cancel_task(db, user.id, task_id)
     return {"task": task_to_dict(task), "state": serialize_bootstrap(db, user.id)}
+
+
+@app.get("/api/tasks/{task_id}/preview-result")
+def preview_task_result(task_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    preview_path = get_task_preview_path(db, user.id, task_id)
+    return FileResponse(preview_path, media_type="video/mp4", filename=preview_path.name)
 
 
 @app.post("/api/provider/callback")

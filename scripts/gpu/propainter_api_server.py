@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from multiprocessing import get_context
 from pathlib import Path
+from queue import Queue
 from typing import Annotated
 from urllib.parse import quote
 
@@ -36,13 +37,62 @@ ENHANCE_RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_ENHANCE_RUNNER", str(ROOT
 TRANSLATE_RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_TRANSLATE_RUNNER", str(ROOT / "scripts" / "video_translate_runner.py"))).resolve()
 PYTHON_PATH = os.environ.get("PROPAINTER_PYTHON", "/data1/conda/miniconda3/envs/video-inpaint/bin/python")
 API_KEY = os.environ.get("MODEL_PLAZA_GPU_API_KEY", "model-plaza-dev-gpu-key")
-MAX_WORKERS = max(1, int(os.environ.get("MODEL_PLAZA_GPU_MAX_WORKERS", "1")))
+UPLOAD_RESULTS = os.environ.get("MODEL_PLAZA_GPU_UPLOAD_RESULTS", "0").lower() not in {"0", "false", "no"}
+TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+CLEANUP_ENABLED = os.environ.get("MODEL_PLAZA_GPU_CLEANUP_ENABLED", "1").lower() not in {"0", "false", "no"}
+CLEANUP_INTERVAL_SECONDS = max(60, _env_int("MODEL_PLAZA_GPU_CLEANUP_INTERVAL_SECONDS", 60 * 60))
+CLEANUP_SUCCESS_TTL_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_CLEANUP_SUCCESS_TTL_SECONDS", 24 * 60 * 60))
+CLEANUP_FAILED_TTL_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_CLEANUP_FAILED_TTL_SECONDS", 48 * 60 * 60))
+CLEANUP_RUNNER_WORK_TTL_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_CLEANUP_RUNNER_WORK_TTL_SECONDS", 60 * 60))
+CLEANUP_DISK_HIGH_WATERMARK_PERCENT = max(1, min(100, _env_int("MODEL_PLAZA_GPU_CLEANUP_DISK_HIGH_WATERMARK_PERCENT", 80)))
+CLEANUP_DISK_LOW_WATERMARK_PERCENT = max(1, min(CLEANUP_DISK_HIGH_WATERMARK_PERCENT, _env_int("MODEL_PLAZA_GPU_CLEANUP_DISK_LOW_WATERMARK_PERCENT", 70)))
+CLEANUP_DISK_MIN_AGE_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_CLEANUP_DISK_MIN_AGE_SECONDS", 60 * 60))
+
+
+def _csv_values(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+GPU_DEVICE_IDS = _csv_values(
+    os.environ.get("MODEL_PLAZA_GPU_DEVICE_IDS")
+    or os.environ.get("CUDA_VISIBLE_DEVICES")
+    or "0"
+)
+GPU_WORKERS_PER_DEVICE = max(1, int(os.environ.get("MODEL_PLAZA_GPU_WORKERS_PER_DEVICE", "1")))
+GPU_SLOT_CAPACITY = max(1, len(GPU_DEVICE_IDS) * GPU_WORKERS_PER_DEVICE)
+MAX_WORKERS = max(1, int(os.environ.get("MODEL_PLAZA_GPU_MAX_WORKERS", str(GPU_SLOT_CAPACITY))))
 
 app = FastAPI(title="片刻修AI GPU Worker")
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+gpu_slots: Queue[str] = Queue(maxsize=GPU_SLOT_CAPACITY)
+for _slot_index in range(GPU_WORKERS_PER_DEVICE):
+    for _gpu_device_id in GPU_DEVICE_IDS:
+        gpu_slots.put(_gpu_device_id)
 running_processes: dict[str, subprocess.Popen] = {}
+running_gpu_devices: dict[str, str] = {}
 running_processes_lock = threading.Lock()
 recover_lock = threading.Lock()
+cleanup_lock = threading.Lock()
+
+
+def _acquire_gpu_slot(job_id: str) -> str:
+    gpu_device = gpu_slots.get()
+    _write_status(job_id, assigned_gpu=gpu_device)
+    return gpu_device
+
+
+def _release_gpu_slot(gpu_device: str | None) -> None:
+    if gpu_device:
+        gpu_slots.put(gpu_device)
 
 
 def _check_auth(api_key: str | None) -> None:
@@ -62,6 +112,10 @@ def _status_path(job_id: str) -> Path:
 
 def _progress_path(job_id: str) -> Path:
     return _job_dir(job_id) / "progress.json"
+
+
+def _input_url_path(job_id: str) -> Path:
+    return _job_dir(job_id) / "input-url.json"
 
 
 def _write_status(job_id: str, **updates) -> dict:
@@ -156,12 +210,14 @@ def _upload_result_to_presigned_url(job_id: str, output_path: Path) -> dict | No
     headers = dict(config.get("headers") or {})
     headers.setdefault("Content-Type", "video/mp4")
     headers["Content-Length"] = str(output_path.stat().st_size)
+    connect_timeout = int(os.environ.get("MODEL_PLAZA_GPU_RESULT_UPLOAD_CONNECT_TIMEOUT", "20"))
+    read_timeout = int(os.environ.get("MODEL_PLAZA_GPU_RESULT_UPLOAD_READ_TIMEOUT", "180"))
     with output_path.open("rb") as file:
         response = requests.put(
             upload_url,
             data=file,
             headers=headers,
-            timeout=int(os.environ.get("MODEL_PLAZA_GPU_RESULT_UPLOAD_TIMEOUT", "600")),
+            timeout=(connect_timeout, read_timeout),
         )
     if response.status_code >= 400:
         raise RuntimeError(f"presigned upload failed with HTTP {response.status_code}")
@@ -177,19 +233,20 @@ def _upload_result_to_presigned_url(job_id: str, output_path: Path) -> dict | No
 def _upload_result(job_id: str, output_path: Path) -> dict:
     """Upload directly to TOS when configured, with backend presigned PUT as compatibility fallback."""
     upload_errors: list[str] = []
+    if _result_upload_config(job_id):
+        try:
+            result_updates = _upload_result_to_presigned_url(job_id, output_path)
+            if result_updates:
+                return result_updates
+        except Exception as exc:
+            upload_errors.append(f"presigned upload failed: {exc}")
+
     try:
         result_updates = _upload_result_to_tos(job_id, output_path)
         if result_updates:
             return result_updates
     except Exception as exc:
         upload_errors.append(f"tos upload failed: {exc}")
-
-    try:
-        result_updates = _upload_result_to_presigned_url(job_id, output_path)
-        if result_updates:
-            return result_updates
-    except Exception as exc:
-        upload_errors.append(f"presigned upload failed: {exc}")
 
     if upload_errors:
         raise RuntimeError("; ".join(upload_errors))
@@ -244,38 +301,78 @@ def _run_model_job(job_id: str) -> None:
     params_path = job_dir / "params.json"
     work_dir = job_dir / "runner-work"
     log_path = LOGS_ROOT / f"{job_type}-api-{job_id}.log"
+    assigned_gpu: str | None = None
 
-    _write_status(job_id, status="processing", started_at=time.time(), log_path=str(log_path), progress_percent=8, progress_stage="远端 GPU 已领取任务")
-    command = [
-        PYTHON_PATH,
-        str(_runner_for_job_type(job_type)),
-        "--input",
-        str(input_path),
-        "--output",
-        str(output_path),
-        "--params",
-        str(params_path),
-        "--workdir",
-        str(work_dir),
-    ]
-    if job_type in {"propainter", "enhance"}:
-        command[6:6] = ["--regions", str(regions_path)]
-    LOGS_ROOT.mkdir(parents=True, exist_ok=True)
     try:
+        if not input_path.exists():
+            input_url_path = _input_url_path(job_id)
+            if not input_url_path.exists():
+                raise RuntimeError("job has no input.mp4 or input_url")
+            input_payload = json.loads(input_url_path.read_text(encoding="utf-8"))
+            input_url = str(input_payload.get("input_url") or "")
+            _write_status(job_id, progress_percent=3, progress_stage="远端正在下载输入视频")
+            _download_input_url(input_url, input_path)
+            _write_status(job_id, progress_percent=5, progress_stage="远端输入视频下载完成")
+
+        assigned_gpu = _acquire_gpu_slot(job_id)
+        if _read_status(job_id).get("status") == "cancelled":
+            return
+
+        _write_status(
+            job_id,
+            status="processing",
+            started_at=time.time(),
+            log_path=str(log_path),
+            assigned_gpu=assigned_gpu,
+            progress_percent=8,
+            progress_stage=f"远端 GPU {assigned_gpu} 已领取任务",
+        )
+        command = [
+            PYTHON_PATH,
+            str(_runner_for_job_type(job_type)),
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--params",
+            str(params_path),
+            "--workdir",
+            str(work_dir),
+        ]
+        if job_type in {"propainter", "enhance"}:
+            command[6:6] = ["--regions", str(regions_path)]
+        LOGS_ROOT.mkdir(parents=True, exist_ok=True)
         with log_path.open("w", encoding="utf-8") as log_file:
-            env = {**os.environ, "MODEL_PLAZA_PROGRESS_FILE": str(_progress_path(job_id))}
+            env = {
+                **os.environ,
+                "CUDA_VISIBLE_DEVICES": assigned_gpu,
+                "MODEL_PLAZA_ASSIGNED_GPU": assigned_gpu,
+                "MODEL_PLAZA_PROGRESS_FILE": str(_progress_path(job_id)),
+            }
             process = subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT, text=True, env=env)
             with running_processes_lock:
                 running_processes[job_id] = process
+                running_gpu_devices[job_id] = assigned_gpu
             return_code = process.wait()
             with running_processes_lock:
                 running_processes.pop(job_id, None)
+                running_gpu_devices.pop(job_id, None)
             if _read_status(job_id).get("status") == "cancelled":
                 return
             if return_code != 0:
                 raise subprocess.CalledProcessError(return_code, command)
         if not output_path.exists():
             raise RuntimeError("runner completed but output.mp4 was not created")
+        if not UPLOAD_RESULTS:
+            _write_status(
+                job_id,
+                status="succeeded",
+                completed_at=time.time(),
+                result_path=str(output_path),
+                progress_percent=100,
+                progress_stage="远端处理完成，等待平台拉取结果",
+            )
+            return
         _write_status(job_id, status="uploading", upload_started_at=time.time())
         result_updates = _upload_result_with_deadline(job_id, output_path)
         _write_status(
@@ -290,9 +387,12 @@ def _run_model_job(job_id: str) -> None:
     except Exception as exc:
         with running_processes_lock:
             running_processes.pop(job_id, None)
+            running_gpu_devices.pop(job_id, None)
         if _read_status(job_id).get("status") == "cancelled":
             return
         _write_status(job_id, status="failed", completed_at=time.time(), error=str(exc), log_path=str(log_path))
+    finally:
+        _release_gpu_slot(assigned_gpu)
 
 
 def _job_age_seconds(status: dict) -> float:
@@ -302,8 +402,143 @@ def _job_age_seconds(status: dict) -> float:
     return max(0, time.time() - timestamp)
 
 
+def _job_completed_age_seconds(status: dict) -> float:
+    timestamp = float(status.get("completed_at") or status.get("updated_at") or status.get("created_at") or 0)
+    if timestamp <= 0:
+        return 0
+    return max(0, time.time() - timestamp)
+
+
+def _terminal_ttl_seconds(status: str) -> int:
+    if status == "succeeded":
+        return CLEANUP_SUCCESS_TTL_SECONDS
+    return CLEANUP_FAILED_TTL_SECONDS
+
+
+def _job_directory_size(path: Path) -> int:
+    total = 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file() or item.is_symlink():
+                total += item.stat().st_size
+        except FileNotFoundError:
+            continue
+    return total
+
+
+def _terminal_jobs() -> list[tuple[float, str, Path, dict]]:
+    jobs: list[tuple[float, str, Path, dict]] = []
+    if not JOBS_ROOT.exists():
+        return jobs
+    for status_path in sorted(JOBS_ROOT.glob("*/status.json")):
+        job_dir = status_path.parent
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        state = str(status.get("status") or "")
+        if state not in TERMINAL_STATUSES:
+            continue
+        jobs.append((_job_completed_age_seconds(status), state, job_dir, status))
+    return jobs
+
+
+def _cleanup_runner_work(job_dir: Path, age_seconds: float) -> tuple[int, int]:
+    if CLEANUP_RUNNER_WORK_TTL_SECONDS <= 0 or age_seconds < CLEANUP_RUNNER_WORK_TTL_SECONDS:
+        return 0, 0
+    runner_work = job_dir / "runner-work"
+    if not runner_work.exists():
+        return 0, 0
+    bytes_removed = _job_directory_size(runner_work)
+    shutil.rmtree(runner_work, ignore_errors=True)
+    return 1, bytes_removed
+
+
+def _cleanup_expired_terminal_jobs(now: float) -> tuple[int, int, int, int]:
+    jobs_removed = 0
+    runner_work_removed = 0
+    bytes_removed = 0
+    runner_work_bytes_removed = 0
+    for age_seconds, state, job_dir, _status in _terminal_jobs():
+        ttl_seconds = _terminal_ttl_seconds(state)
+        if ttl_seconds > 0 and age_seconds >= ttl_seconds:
+            bytes_removed += _job_directory_size(job_dir)
+            shutil.rmtree(job_dir, ignore_errors=True)
+            jobs_removed += 1
+            continue
+        removed_count, removed_bytes = _cleanup_runner_work(job_dir, age_seconds)
+        runner_work_removed += removed_count
+        runner_work_bytes_removed += removed_bytes
+    return jobs_removed, bytes_removed, runner_work_removed, runner_work_bytes_removed
+
+
+def _disk_usage_percent() -> float:
+    usage = shutil.disk_usage(JOBS_ROOT if JOBS_ROOT.exists() else ROOT)
+    if usage.total <= 0:
+        return 0
+    return (usage.used / usage.total) * 100
+
+
+def _cleanup_for_disk_pressure() -> tuple[int, int]:
+    if _disk_usage_percent() < CLEANUP_DISK_HIGH_WATERMARK_PERCENT:
+        return 0, 0
+    jobs_removed = 0
+    bytes_removed = 0
+    for age_seconds, _state, job_dir, _status in sorted(_terminal_jobs(), key=lambda item: item[0], reverse=True):
+        if age_seconds < CLEANUP_DISK_MIN_AGE_SECONDS:
+            continue
+        bytes_removed += _job_directory_size(job_dir)
+        shutil.rmtree(job_dir, ignore_errors=True)
+        jobs_removed += 1
+        if _disk_usage_percent() <= CLEANUP_DISK_LOW_WATERMARK_PERCENT:
+            break
+    return jobs_removed, bytes_removed
+
+
+def _cleanup_once() -> dict:
+    if not CLEANUP_ENABLED or not JOBS_ROOT.exists():
+        return {"enabled": CLEANUP_ENABLED, "skipped": True}
+    with cleanup_lock:
+        started_at = time.time()
+        expired_jobs, expired_bytes, runner_work_dirs, runner_work_bytes = _cleanup_expired_terminal_jobs(started_at)
+        pressure_jobs, pressure_bytes = _cleanup_for_disk_pressure()
+        return {
+            "enabled": True,
+            "expired_jobs_removed": expired_jobs,
+            "expired_bytes_removed": expired_bytes,
+            "runner_work_dirs_removed": runner_work_dirs,
+            "runner_work_bytes_removed": runner_work_bytes,
+            "pressure_jobs_removed": pressure_jobs,
+            "pressure_bytes_removed": pressure_bytes,
+            "disk_used_percent": round(_disk_usage_percent(), 2),
+            "duration_seconds": round(time.time() - started_at, 3),
+        }
+
+
+def _cleanup_loop() -> None:
+    while True:
+        try:
+            result = _cleanup_once()
+            if not result.get("skipped"):
+                print(f"GPU cleanup: {json.dumps(result, ensure_ascii=False)}", flush=True)
+        except Exception as exc:
+            print(f"GPU cleanup failed: {exc}", flush=True)
+        time.sleep(CLEANUP_INTERVAL_SECONDS)
+
+
 def _recover_finished_job(job_id: str, output_path: Path) -> None:
     try:
+        if not UPLOAD_RESULTS:
+            _write_status(
+                job_id,
+                status="succeeded",
+                completed_at=time.time(),
+                result_path=str(output_path),
+                error="",
+                progress_percent=100,
+                progress_stage="远端处理完成，等待平台拉取结果",
+            )
+            return
         _write_status(job_id, status="uploading", upload_started_at=time.time(), result_path=str(output_path), error="")
         result_updates = _upload_result_with_deadline(job_id, output_path)
         _write_status(
@@ -379,11 +614,36 @@ def _download_input_url(input_url: str, output_path: Path) -> None:
 def recover_incomplete_jobs_on_startup() -> None:
     # 启动恢复可能包含大文件补传，不能阻塞 /health 和新任务提交。
     threading.Thread(target=_recover_stale_jobs, name="recover-stale-gpu-jobs", daemon=True).start()
+    threading.Thread(target=_cleanup_loop, name="cleanup-gpu-jobs", daemon=True).start()
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True, "max_workers": MAX_WORKERS}
+    running_by_gpu = {gpu_device: 0 for gpu_device in GPU_DEVICE_IDS}
+    with running_processes_lock:
+        for gpu_device in running_gpu_devices.values():
+            running_by_gpu[gpu_device] = running_by_gpu.get(gpu_device, 0) + 1
+    return {
+        "ok": True,
+        "max_workers": MAX_WORKERS,
+        "gpu_devices": GPU_DEVICE_IDS,
+        "workers_per_gpu": GPU_WORKERS_PER_DEVICE,
+        "slot_capacity": GPU_SLOT_CAPACITY,
+        "upload_results": UPLOAD_RESULTS,
+        "cleanup_enabled": CLEANUP_ENABLED,
+        "cleanup_success_ttl_seconds": CLEANUP_SUCCESS_TTL_SECONDS,
+        "cleanup_failed_ttl_seconds": CLEANUP_FAILED_TTL_SECONDS,
+        "cleanup_runner_work_ttl_seconds": CLEANUP_RUNNER_WORK_TTL_SECONDS,
+        "cleanup_disk_high_watermark_percent": CLEANUP_DISK_HIGH_WATERMARK_PERCENT,
+        "cleanup_disk_low_watermark_percent": CLEANUP_DISK_LOW_WATERMARK_PERCENT,
+        "running_by_gpu": running_by_gpu,
+    }
+
+
+@app.post("/maintenance/cleanup")
+def run_cleanup(x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None) -> dict:
+    _check_auth(x_api_key)
+    return _cleanup_once()
 
 
 @app.post("/jobs", status_code=202)
@@ -422,7 +682,7 @@ async def create_job(
     job_dir.mkdir(parents=True, exist_ok=True)
     input_path = job_dir / "input.mp4"
     if input_url:
-        _download_input_url(input_url, input_path)
+        _input_url_path(job_id).write_text(json.dumps({"input_url": input_url}, ensure_ascii=False), encoding="utf-8")
     elif input_file:
         input_path.write_bytes(await input_file.read())
     else:

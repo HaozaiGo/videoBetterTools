@@ -119,6 +119,7 @@ def asset_to_dict(asset: Asset) -> dict:
 
 
 def task_to_dict(task: Task) -> dict:
+    preview_path = task_preview_path(task)
     return {
         "id": task.id,
         "userId": task.user_id,
@@ -138,7 +139,33 @@ def task_to_dict(task: Task) -> dict:
         "createdAt": serialize_datetime(task.created_at),
         "completedAt": serialize_datetime(task.completed_at),
         "outputUrl": task.output_url,
+        "previewUrl": f"/api/tasks/{task.id}/preview-result" if preview_path.exists() else "",
     }
+
+
+def task_result_output_key(task: Task) -> str:
+    suffix_by_tool = {
+        "remove-watermark": "watermark-removed",
+        "remove-subtitle": "subtitle-removed",
+        "enhance": "enhanced",
+        "translate": "translated",
+    }
+    suffix = suffix_by_tool.get(task.tool_slug, "result")
+    return f"{task.id}-{suffix}.mp4"
+
+
+def task_preview_path(task: Task) -> Path:
+    return settings.upload_path / task_result_output_key(task)
+
+
+def get_task_preview_path(db: Session, user_id: str, task_id: str) -> Path:
+    task = db.execute(select(Task).where(Task.id == task_id, Task.user_id == user_id)).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    preview_path = task_preview_path(task)
+    if not preview_path.exists() or not preview_path.is_file():
+        raise HTTPException(status_code=404, detail="preview result not ready")
+    return preview_path
 
 
 def ledger_to_dict(entry: WalletLedger) -> dict:

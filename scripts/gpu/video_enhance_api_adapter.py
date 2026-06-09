@@ -231,7 +231,10 @@ def main() -> None:
     if _write_result_meta(status, meta_path):
         print(f"GPU result metadata written to {meta_path}", flush=True)
     else:
+        _sync_progress(job_id, {"status": "processing", "progress_percent": 96, "progress_stage": "平台正在拉取远端结果"})
         _download_result(job_id, output_path)
+        _sync_progress(job_id, {"status": "processing", "progress_percent": 97, "progress_stage": "结果已拉取，可预览"})
+        _sync_progress(job_id, {"status": "processing", "progress_percent": 98, "progress_stage": "平台正在上传对象存储"})
         print(f"Downloaded GPU result to {output_path}", flush=True)
 
 

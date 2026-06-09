@@ -38,6 +38,28 @@ export function getBootstrap() {
   return request<BootstrapState>("/api/bootstrap");
 }
 
+export async function openAuthenticatedFile(path: string) {
+  const previewWindow = window.open("about:blank", "_blank");
+  const headers = new Headers();
+  const token = getAuthToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  const response = await fetch(path, { headers });
+  if (!response.ok) {
+    previewWindow?.close();
+    throw new Error("临时结果尚未准备好");
+  }
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  if (previewWindow) {
+    previewWindow.location.href = objectUrl;
+  } else {
+    window.open(objectUrl, "_blank");
+  }
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+}
+
 export function uploadAsset(input: UploadAssetInput) {
   return uploadAssetWithStorage(input);
 }
