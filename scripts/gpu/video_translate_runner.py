@@ -160,6 +160,7 @@ def _subtitle_layout(video_width: int, video_height: int) -> dict[str, int]:
         "outline": max(2, round(font_size * 0.08)),
         "shadow": max(1, round(font_size * 0.04)),
         "margin_v": max(34, round(video_height * 0.052)),
+        "bottom_margin_v": max(48, round(video_height * 0.078)),
         "margin_l": max(36, round(video_width * 0.025)),
     }
 
@@ -177,7 +178,7 @@ def _ass_alignment(placement: str, layout: dict[str, int]) -> tuple[int, int, in
         return 8, layout["margin_v"], layout["margin_l"]
     if placement == "middle-lower":
         return 5, layout["margin_v"], layout["margin_l"]
-    return 2, layout["margin_v"], layout["margin_l"]
+    return 2, layout["bottom_margin_v"], layout["margin_l"]
 
 
 def _fallback_segments(duration: float) -> list[dict[str, Any]]:
@@ -353,7 +354,7 @@ def _draw_subtitle_frame(frame, text: str, placement: str):
     elif placement == "middle-lower":
         y = int(height * 0.68)
     else:
-        y = height - layout["margin_v"] - block_height + line_height
+        y = height - layout["bottom_margin_v"] - block_height + line_height
     for index, line in enumerate(lines):
         size, _ = cv2.getTextSize(line, font, scale, thickness)
         x = max(layout["margin_l"], (width - size[0]) // 2)
