@@ -763,6 +763,14 @@ a {
   gap: 6px;
 }
 
+.batch-file-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-left: auto;
+}
+
 .set-region-button {
   min-height: 34px;
   border: 1px solid var(--line);
@@ -775,9 +783,31 @@ a {
   white-space: nowrap;
 }
 
+.remove-file-button {
+  min-height: 34px;
+  border: 1px solid rgba(239, 68, 68, 0.22);
+  border-radius: 8px;
+  background: #fff7f7;
+  color: var(--danger);
+  padding: 0 11px;
+  font-size: 12px;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
 .set-region-button:hover {
   border-color: rgba(49, 92, 255, 0.42);
   color: var(--accent);
+}
+
+.remove-file-button:hover {
+  border-color: rgba(239, 68, 68, 0.42);
+  background: #ffecec;
+}
+
+.remove-file-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .form-grid {
@@ -1570,7 +1600,20 @@ th {
     width: 100%;
   }
 
+  .batch-file-actions {
+    justify-content: stretch;
+    width: 100%;
+  }
+
+  .batch-file-actions > button {
+    flex: 1;
+  }
+
   .set-region-button {
+    width: 100%;
+  }
+
+  .remove-file-button {
     width: 100%;
   }
 }

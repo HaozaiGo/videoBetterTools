@@ -149,6 +149,55 @@ export function ToolPage() {
     setBatchItems((items) => items.map((item) => (item.id === id ? { ...item, ...patch } : item)));
   };
 
+  const removeBatchFile = (removeIndex: number) => {
+    if (createTaskMutation.isPending) {
+      setNotice("任务提交中，当前文件不能移除。");
+      return;
+    }
+    const removedFile = files[removeIndex];
+    if (!removedFile) return;
+    const nextFiles = files.filter((_, index) => index !== removeIndex);
+    const nextRegionsByFileId: Record<string, WatermarkRegion[]> = {};
+    const nextDurations: Record<string, number> = {};
+    const nextBatchItems = nextFiles.map((item, index) => {
+      const oldIndex = index >= removeIndex ? index + 1 : index;
+      const oldId = fileBatchId(item, oldIndex);
+      const nextId = fileBatchId(item, index);
+      const existingItem = batchItems.find((batchItem) => batchItem.id === oldId);
+      if (regionsByFileId[oldId]) {
+        nextRegionsByFileId[nextId] = regionsByFileId[oldId];
+      }
+      if (fileDurations[oldId]) {
+        nextDurations[nextId] = fileDurations[oldId];
+      }
+      return {
+        id: nextId,
+        name: item.name,
+        size: item.size,
+        status: existingItem?.status || "pending",
+        stage: existingItem?.stage || "等待提交",
+        percent: existingItem?.percent || 0,
+        taskId: existingItem?.taskId,
+        error: existingItem?.error,
+      };
+    });
+
+    setFiles(nextFiles);
+    setBatchItems(nextBatchItems);
+    setRegionsByFileId(nextRegionsByFileId);
+    setFileDurations(nextDurations);
+    setDraftRegion(null);
+    setIsSelectingRegion(false);
+    setSubmitProgress(null);
+    setActiveFileIndex((currentIndex) => {
+      if (!nextFiles.length) return 0;
+      if (currentIndex === removeIndex) return Math.min(removeIndex, nextFiles.length - 1);
+      if (currentIndex > removeIndex) return currentIndex - 1;
+      return currentIndex;
+    });
+    setNotice(nextFiles.length ? `已移除 ${removedFile.name}。` : "已清空待处理文件。");
+  };
+
   const setSelectedFiles = (nextFiles: File[], options: { append?: boolean } = {}) => {
     if (!nextFiles.length) return;
     const mergedFiles = options.append ? [...files, ...nextFiles] : nextFiles;
@@ -568,21 +617,32 @@ export function ToolPage() {
                           <span style={{ width: `${item.percent}%` }} />
                         </div>
                       </div>
-                      {isMaskVideoTool ? (
+                      <div className="batch-file-actions">
                         <button
-                          className="set-region-button"
+                          className="remove-file-button"
                           type="button"
                           disabled={createTaskMutation.isPending}
-                          onClick={() => {
-                            setActiveFileIndex(index);
-                            setDraftRegion(null);
-                            setIsSelectingRegion(false);
-                            setNotice(itemRegions.length ? `正在预览第 ${index + 1} 个视频，可重新框选${regionNoun}。` : `正在预览第 ${index + 1} 个视频，请框选${regionNoun}区域。`);
-                          }}
+                          onClick={() => removeBatchFile(index)}
+                          aria-label={`移除 ${item.name}`}
                         >
-                          {itemRegions.length ? "重设选区" : "设置选区"}
+                          移除
                         </button>
-                      ) : null}
+                        {isMaskVideoTool ? (
+                          <button
+                            className="set-region-button"
+                            type="button"
+                            disabled={createTaskMutation.isPending}
+                            onClick={() => {
+                              setActiveFileIndex(index);
+                              setDraftRegion(null);
+                              setIsSelectingRegion(false);
+                              setNotice(itemRegions.length ? `正在预览第 ${index + 1} 个视频，可重新框选${regionNoun}。` : `正在预览第 ${index + 1} 个视频，请框选${regionNoun}区域。`);
+                            }}
+                          >
+                            {itemRegions.length ? "重设选区" : "设置选区"}
+                          </button>
+                        ) : null}
+                      </div>
                     </li>
                   );
                 })}
