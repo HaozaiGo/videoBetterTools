@@ -108,6 +108,31 @@ def _probe_duration(input_path: Path) -> float:
         return 30.0
 
 
+def _probe_video_size(input_path: Path) -> tuple[int, int]:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+            str(input_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        width, height = [int(item) for item in result.stdout.strip().split("x", 1)]
+    except ValueError:
+        return 1920, 1080
+    return max(1, width), max(1, height)
+
+
 def _ass_time(seconds: float) -> str:
     seconds = max(0, seconds)
     centiseconds = int(round(seconds * 100))
@@ -121,20 +146,38 @@ def _ass_time(seconds: float) -> str:
 
 
 def _escape_ass_text(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\n", "\\N")
+    return value.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\n", " ")
 
 
-def _wrap_subtitle(value: str, width: int = 42) -> str:
-    lines = textwrap.wrap(value.strip(), width=width, break_long_words=False, break_on_hyphens=False)
-    return "\\N".join(lines[:2]) if lines else ""
+def _subtitle_layout(video_width: int, video_height: int) -> dict[str, int]:
+    short_side = min(video_width, video_height)
+    scale = max(0.62, min(1.0, short_side / 1080))
+    font_size = max(26, min(44, round(44 * scale)))
+    max_chars = max(24, min(46, round(video_width / max(font_size * 0.82, 1))))
+    return {
+        "font_size": font_size,
+        "max_chars": max_chars,
+        "outline": max(2, round(font_size * 0.08)),
+        "shadow": max(1, round(font_size * 0.04)),
+        "margin_v": max(34, round(video_height * 0.052)),
+        "margin_l": max(36, round(video_width * 0.025)),
+    }
 
 
-def _ass_alignment(placement: str) -> tuple[int, int, int]:
+def _wrap_subtitle_lines(value: str, width: int, max_lines: int = 3) -> list[str]:
+    normalized = re.sub(r"\s+", " ", value.strip())
+    if not normalized:
+        return []
+    lines = textwrap.wrap(normalized, width=width, break_long_words=False, break_on_hyphens=False)
+    return lines[:max_lines]
+
+
+def _ass_alignment(placement: str, layout: dict[str, int]) -> tuple[int, int, int]:
     if placement == "top":
-        return 8, 48, 48
+        return 8, layout["margin_v"], layout["margin_l"]
     if placement == "middle-lower":
-        return 5, 48, 48
-    return 2, 48, 56
+        return 5, layout["margin_v"], layout["margin_l"]
+    return 2, layout["margin_v"], layout["margin_l"]
 
 
 def _fallback_segments(duration: float) -> list[dict[str, Any]]:
@@ -225,27 +268,29 @@ def _transcribe_segments(input_path: Path, target_language: str) -> list[dict[st
     return translated
 
 
-def _write_ass(path: Path, segments: list[dict[str, Any]], placement: str) -> None:
-    alignment, margin_v, margin_l = _ass_alignment(placement)
+def _write_ass(path: Path, segments: list[dict[str, Any]], placement: str, video_width: int, video_height: int) -> None:
+    layout = _subtitle_layout(video_width, video_height)
+    alignment, margin_v, margin_l = _ass_alignment(placement, layout)
     style = (
-        "Style: Default,Arial,44,&H00FFFFFF,&H000000FF,&H00000000,&H99000000,"
-        "1,0,0,0,100,100,0,0,1,3,1,"
+        f"Style: Default,Arial,{layout['font_size']},&H00FFFFFF,&H000000FF,&H00000000,&H99000000,"
+        f"1,0,0,0,100,100,0,0,1,{layout['outline']},{layout['shadow']},"
         f"{alignment},{margin_l},{margin_l},{margin_v},1"
     )
     events = []
     for segment in segments:
         start = float(segment.get("start") or 0)
         end = max(start + 0.8, float(segment.get("end") or start + 2.5))
-        text = _escape_ass_text(_wrap_subtitle(str(segment.get("text") or "")))
-        if text:
+        lines = [_escape_ass_text(line) for line in _wrap_subtitle_lines(str(segment.get("text") or ""), layout["max_chars"])]
+        if lines:
+            text = "\\N".join(lines)
             events.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{text}")
     content = "\n".join(
         [
             "[Script Info]",
             "ScriptType: v4.00+",
             "ScaledBorderAndShadow: yes",
-            "PlayResX: 1920",
-            "PlayResY: 1080",
+            f"PlayResX: {video_width}",
+            f"PlayResY: {video_height}",
             "",
             "[V4+ Styles]",
             "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
@@ -290,20 +335,28 @@ def _draw_subtitle_frame(frame, text: str, placement: str):
         return frame
     height, width = frame.shape[:2]
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = max(0.65, min(1.35, width / 1280))
-    thickness = max(2, round(width / 640))
-    lines = textwrap.wrap(text.strip(), width=38, break_long_words=False, break_on_hyphens=False)[:2]
-    line_height = int(38 * scale)
+    layout = _subtitle_layout(width, height)
+    lines = _wrap_subtitle_lines(text, layout["max_chars"], max_lines=3)
+    if not lines:
+        return frame
+    scale = max(0.55, min(1.25, layout["font_size"] / 34))
+    thickness = max(2, round(layout["font_size"] / 18))
+    while scale > 0.5:
+        widest = max(cv2.getTextSize(line, font, scale, thickness)[0][0] for line in lines)
+        if widest <= width - layout["margin_l"] * 2:
+            break
+        scale -= 0.05
+    line_height = int(layout["font_size"] * 1.18)
     block_height = line_height * len(lines)
     if placement == "top":
-        y = int(height * 0.12)
+        y = layout["margin_v"] + line_height
     elif placement == "middle-lower":
         y = int(height * 0.68)
     else:
-        y = height - int(height * 0.11) - block_height
+        y = height - layout["margin_v"] - block_height + line_height
     for index, line in enumerate(lines):
         size, _ = cv2.getTextSize(line, font, scale, thickness)
-        x = max(24, (width - size[0]) // 2)
+        x = max(layout["margin_l"], (width - size[0]) // 2)
         baseline = y + index * line_height
         cv2.putText(frame, line, (x, baseline), font, scale, (0, 0, 0), thickness + 4, cv2.LINE_AA)
         cv2.putText(frame, line, (x, baseline), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
@@ -431,6 +484,7 @@ def main() -> None:
 
     _write_progress(15, "读取视频信息")
     duration = _probe_duration(input_path)
+    video_width, video_height = _probe_video_size(input_path)
     _write_progress(30, "识别语音并翻译英文字幕")
     segments = _transcribe_segments(input_path, target_language)
     if not segments:
@@ -444,7 +498,7 @@ def main() -> None:
 
     _write_progress(70, "生成字幕文件")
     ass_path = workdir / "translated.ass"
-    _write_ass(ass_path, segments, placement)
+    _write_ass(ass_path, segments, placement, video_width, video_height)
     ass_path.with_suffix(".segments.json").write_text(
         json.dumps({"_placement": placement, "items": segments}, ensure_ascii=False, indent=2),
         encoding="utf-8",
