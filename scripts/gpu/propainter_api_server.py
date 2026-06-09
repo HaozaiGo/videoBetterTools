@@ -84,6 +84,103 @@ recover_lock = threading.Lock()
 cleanup_lock = threading.Lock()
 
 
+def _run_command(command: list[str], timeout: int = 5) -> str:
+    result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=timeout)
+    return result.stdout.strip()
+
+
+def _parse_gpu_csv(output: str) -> list[dict]:
+    rows: list[dict] = []
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(lines) <= 1:
+        return rows
+    headers = [header.strip() for header in lines[0].split(",")]
+    for line in lines[1:]:
+        values = [value.strip() for value in line.split(",")]
+        row = dict(zip(headers, values))
+        rows.append(
+            {
+                "index": row.get("index", ""),
+                "name": row.get("name", ""),
+                "utilizationGpuPercent": _number_from_smi_value(row.get("utilization.gpu [%]", "")),
+                "utilizationMemoryPercent": _number_from_smi_value(row.get("utilization.memory [%]", "")),
+                "memoryUsedMiB": _number_from_smi_value(row.get("memory.used [MiB]", "")),
+                "memoryTotalMiB": _number_from_smi_value(row.get("memory.total [MiB]", "")),
+                "temperatureGpu": _number_from_smi_value(row.get("temperature.gpu", "")),
+                "powerDrawW": _number_from_smi_value(row.get("power.draw [W]", "")),
+            }
+        )
+    return rows
+
+
+def _number_from_smi_value(value: str) -> float:
+    cleaned = value.replace("%", "").replace("MiB", "").replace("W", "").strip()
+    try:
+        parsed = float(cleaned)
+    except ValueError:
+        return 0
+    return int(parsed) if parsed.is_integer() else parsed
+
+
+def _running_jobs_snapshot() -> list[dict]:
+    jobs: list[dict] = []
+    now = time.time()
+    if not JOBS_ROOT.exists():
+        return jobs
+    for status_path in sorted(JOBS_ROOT.glob("*/status.json")):
+        job_id = status_path.parent.name
+        try:
+            status = _read_status(job_id)
+        except Exception:
+            continue
+        if status.get("status") not in {"queued", "processing", "uploading"}:
+            continue
+        started_at = float(status.get("started_at") or status.get("created_at") or now)
+        jobs.append(
+            {
+                "id": job_id,
+                "status": status.get("status", ""),
+                "jobType": status.get("job_type", ""),
+                "assignedGpu": status.get("assigned_gpu", ""),
+                "progressPercent": int(status.get("progress_percent") or 0),
+                "progressStage": status.get("progress_stage", ""),
+                "runningSeconds": max(0, int(now - started_at)),
+                "logPath": status.get("log_path", ""),
+            }
+        )
+    return jobs
+
+
+def _gpu_metrics() -> dict:
+    running_by_gpu = {gpu_device: 0 for gpu_device in GPU_DEVICE_IDS}
+    with running_processes_lock:
+        for gpu_device in running_gpu_devices.values():
+            running_by_gpu[gpu_device] = running_by_gpu.get(gpu_device, 0) + 1
+    query_output = _run_command(
+        [
+            "nvidia-smi",
+            f"--id={','.join(GPU_DEVICE_IDS)}",
+            "--query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw",
+            "--format=csv",
+        ],
+        timeout=5,
+    )
+    gpus = _parse_gpu_csv(query_output)
+    for gpu in gpus:
+        gpu["workerSlotsUsed"] = running_by_gpu.get(str(gpu["index"]), 0)
+        gpu["workerSlotsTotal"] = GPU_WORKERS_PER_DEVICE
+    return {
+        "ok": True,
+        "timestamp": time.time(),
+        "gpuDevices": GPU_DEVICE_IDS,
+        "workersPerGpu": GPU_WORKERS_PER_DEVICE,
+        "slotCapacity": GPU_SLOT_CAPACITY,
+        "runningByGpu": running_by_gpu,
+        "gpus": gpus,
+        "runningJobs": _running_jobs_snapshot(),
+    }
+
+
 def _acquire_gpu_slot(job_id: str) -> str:
     gpu_device = gpu_slots.get()
     _write_status(job_id, assigned_gpu=gpu_device)
@@ -638,6 +735,12 @@ def health() -> dict:
         "cleanup_disk_low_watermark_percent": CLEANUP_DISK_LOW_WATERMARK_PERCENT,
         "running_by_gpu": running_by_gpu,
     }
+
+
+@app.get("/metrics")
+def metrics(x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None) -> dict:
+    _check_auth(x_api_key)
+    return _gpu_metrics()
 
 
 @app.post("/maintenance/cleanup")

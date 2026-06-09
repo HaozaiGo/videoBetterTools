@@ -64,6 +64,42 @@ export type AdminUser = {
   createdAt: number;
 };
 
+export type GpuDeviceMetric = {
+  index: string;
+  name: string;
+  utilizationGpuPercent: number;
+  utilizationMemoryPercent: number;
+  memoryUsedMiB: number;
+  memoryTotalMiB: number;
+  temperatureGpu: number;
+  powerDrawW: number;
+  workerSlotsUsed: number;
+  workerSlotsTotal: number;
+};
+
+export type GpuRunningJob = {
+  id: string;
+  status: string;
+  jobType: string;
+  assignedGpu: string;
+  progressPercent: number;
+  progressStage: string;
+  runningSeconds: number;
+  logPath: string;
+};
+
+export type GpuMetrics = {
+  ok: boolean;
+  timestamp: number;
+  error?: string;
+  gpuDevices: string[];
+  workersPerGpu: number;
+  slotCapacity: number;
+  runningByGpu: Record<string, number>;
+  gpus: GpuDeviceMetric[];
+  runningJobs: GpuRunningJob[];
+};
+
 export type AuthUser = {
   id: string;
   email: string;

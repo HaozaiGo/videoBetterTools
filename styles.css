@@ -659,6 +659,127 @@ a {
   pointer-events: none;
 }
 
+.batch-file-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 12px;
+}
+
+.batch-file-list-head,
+.batch-file-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.batch-file-list-head {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.batch-file-list-head span {
+  color: var(--muted);
+}
+
+.batch-file-list-head > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.append-file-button {
+  min-height: 34px;
+  border: 1px solid rgba(49, 92, 255, 0.26);
+  border-radius: 8px;
+  background: var(--soft);
+  color: var(--accent);
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.append-file-button:hover {
+  border-color: rgba(49, 92, 255, 0.48);
+  background: #e6edff;
+}
+
+.batch-file-list ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.batch-file-item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 10px 12px;
+}
+
+.batch-file-item.active {
+  border-color: rgba(49, 92, 255, 0.52);
+  box-shadow: 0 0 0 3px rgba(49, 92, 255, 0.1);
+}
+
+.batch-file-item > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.batch-file-item strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-file-item span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.batch-file-item.created .batch-file-progress > span {
+  color: var(--good);
+}
+
+.batch-file-item.failed .batch-file-progress > span {
+  color: var(--danger);
+}
+
+.batch-file-progress {
+  display: grid;
+  width: min(260px, 42%);
+  gap: 6px;
+}
+
+.set-region-button {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  color: var(--text);
+  padding: 0 11px;
+  font-size: 12px;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
+.set-region-button:hover {
+  border-color: rgba(49, 92, 255, 0.42);
+  color: var(--accent);
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(180px, 1fr));
@@ -911,6 +1032,77 @@ dd {
 .admin-stats .admin-gpu-status strong {
   color: var(--good);
   font-size: 18px;
+}
+
+.gpu-monitor {
+  display: grid;
+  gap: 18px;
+}
+
+.gpu-monitor-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.gpu-monitor-row {
+  display: grid;
+  grid-template-columns: minmax(170px, 1.4fr) minmax(120px, 1fr) minmax(170px, 1.2fr) minmax(80px, 0.6fr) minmax(120px, 0.8fr);
+  align-items: center;
+  gap: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.gpu-monitor-row strong,
+.gpu-job-row strong {
+  display: block;
+}
+
+.gpu-monitor-row span,
+.gpu-job-row span,
+.gpu-job-row em {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.gpu-meter {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(49, 92, 255, 0.12);
+  margin-top: 7px;
+}
+
+.gpu-meter span {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.gpu-meter.memory span {
+  background: var(--good);
+}
+
+.gpu-job-list {
+  display: grid;
+  gap: 10px;
+}
+
+.gpu-job-list h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.gpu-job-row {
+  display: grid;
+  grid-template-columns: minmax(190px, 1.4fr) 70px 70px 80px minmax(180px, 1fr);
+  align-items: center;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
 }
 
 .table-panel {
@@ -1185,6 +1377,28 @@ th {
   align-self: end;
 }
 
+.admin-task-monitor {
+  display: grid;
+  height: 600px;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.admin-task-monitor-table {
+  min-height: 0;
+  overflow: auto;
+}
+
+.admin-task-monitor-table table {
+  min-width: 520px;
+}
+
+.admin-task-monitor-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+}
+
 .login-page {
   display: grid;
   min-height: 100vh;
@@ -1284,6 +1498,11 @@ th {
     grid-template-columns: 1fr;
   }
 
+  .gpu-monitor-row,
+  .gpu-job-row {
+    grid-template-columns: repeat(2, minmax(160px, 1fr));
+  }
+
   .quote-panel {
     position: static;
   }
@@ -1341,6 +1560,19 @@ th {
   .ledger-panel {
     height: 360px;
   }
+
+  .batch-file-item {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .batch-file-progress {
+    width: 100%;
+  }
+
+  .set-region-button {
+    width: 100%;
+  }
 }
 
 @media (max-width: 620px) {
@@ -1358,6 +1590,11 @@ th {
   }
 
   .admin-create-user {
+    grid-template-columns: 1fr;
+  }
+
+  .gpu-monitor-row,
+  .gpu-job-row {
     grid-template-columns: 1fr;
   }
 }

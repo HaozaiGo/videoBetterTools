@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from app.admin import admin_ledger, admin_summary, admin_tasks, admin_users
+from app.admin import admin_gpu_metrics, admin_ledger, admin_summary, admin_tasks, admin_users
 from app.auth import admin_user, create_token, current_user, find_user_by_email, verify_password
 from app.config import settings
 from app.database import get_db
@@ -247,6 +247,11 @@ def admin_recharge_user_endpoint(user_id: str, payload: UserRecharge, db: Sessio
 @app.get("/api/admin/tasks")
 def admin_tasks_endpoint(db: Session = Depends(get_db), _admin: User = Depends(admin_user)) -> list[dict]:
     return admin_tasks(db)
+
+
+@app.get("/api/admin/gpu")
+def admin_gpu_endpoint(_admin: User = Depends(admin_user)) -> dict:
+    return admin_gpu_metrics()
 
 
 @app.get("/api/admin/ledger")

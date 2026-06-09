@@ -93,7 +93,7 @@ jobs:
           AUTH_SECRET=$auth_secret
           ALLOW_DEMO_WITHOUT_AUTH=false
           WEB_PORT=8003
-          WORKER_REPLICAS=4
+          WORKER_REPLICAS=8
           TASK_JOB_TIMEOUT_SECONDS=7200
           MODEL_PLAZA_GPU_API_URL=http://32.196.46.122:18080
           MODEL_PLAZA_GPU_API_KEY=model-plaza-dev-gpu-key

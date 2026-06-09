@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     enhance_command: str = ""
     translate_command: str = ""
     e2fgvi_command: str = ""
+    model_plaza_gpu_api_url: str = ""
+    model_plaza_gpu_api_key: str = ""
     storage_backend: str = "local"
     volcengine_openapi_ak: str = ""
     volcengine_openapi_sk: str = ""

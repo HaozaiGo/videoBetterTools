@@ -7,23 +7,6 @@ import type { BootstrapState, Task } from "../types";
 
 const columnHelper = createColumnHelper<Task>();
 
-function remoteStage(task: Task) {
-  const gpuToolLabels: Record<string, string> = {
-    enhance: "远端 GPU 超分",
-    "remove-watermark": "远端 GPU 修复",
-    "remove-subtitle": "远端 GPU 修复",
-    translate: "视频翻译",
-  };
-  const runner = gpuToolLabels[task.toolSlug] || "供应商处理";
-
-  if (task.progressStage) return `${runner}：${task.progressStage}`;
-  if (task.status === "queued") return `${runner}：等待 worker 领取任务`;
-  if (task.status === "processing") return `${runner}：已提交，正在处理视频`;
-  if (task.status === "succeeded") return `${runner}：结果已回传，扣费完成`;
-  if (task.status === "failed") return `${runner}：处理失败，冻结积分已释放`;
-  return `${runner}：任务已取消`;
-}
-
 function failureReason(task: Task) {
   if (task.status !== "failed") return "";
   const reasons: Record<string, string> = {
@@ -46,6 +29,15 @@ function paramSummary(task: Task) {
     typeof params.keepAudio === "boolean" ? `音频 ${params.keepAudio ? "保留" : "不保留"}` : "",
   ].filter(Boolean);
   return items.length ? items.join(" / ") : "无额外参数";
+}
+
+function taskProgressLabel(task: Task, percent: number) {
+  if (task.status === "queued") return "等待处理";
+  if (task.status === "processing") {
+    if (percent >= 95) return "收尾中";
+    return "处理中";
+  }
+  return "";
 }
 
 export function TasksPage() {
@@ -104,7 +96,7 @@ export function TasksPage() {
               <div className="task-progress" aria-label={`任务进度 ${progress.percent}%`}>
                 <div className="task-progress-head">
                   <span>{progress.percent}%</span>
-                  {progress.stage ? <em>{progress.stage}</em> : null}
+                  <em>{taskProgressLabel(task, progress.percent)}</em>
                 </div>
                 <div className="task-progress-track">
                   <span style={{ width: `${progress.percent}%` }} />
@@ -176,7 +168,7 @@ export function TasksPage() {
       <div className="page-head">
         <div>
           <h1>任务列表</h1>
-          <p>查看远端处理阶段、总进度、失败原因和结果下载。</p>
+          <p>查看任务进度、失败原因和结果下载。</p>
         </div>
         <button className="ghost compact" onClick={() => queryClient.invalidateQueries({ queryKey: ["bootstrap"] })}>
           刷新
@@ -223,10 +215,6 @@ export function TasksPage() {
                       <tr className="task-detail-row">
                         <td colSpan={columns.length}>
                           <div className="task-detail-card">
-                            <div>
-                              <span>远端处理阶段</span>
-                              <strong>{remoteStage(task)}</strong>
-                            </div>
                             <div>
                               <span>任务参数</span>
                               <strong>{paramSummary(task)}</strong>

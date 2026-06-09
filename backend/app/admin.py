@@ -1,6 +1,13 @@
+import json
+import time
+import urllib.error
+import urllib.request
+from urllib.parse import urljoin
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models import Asset, Task, User, Wallet, WalletLedger
 from app.services import ledger_to_dict, task_to_dict
 
@@ -45,3 +52,42 @@ def admin_tasks(db: Session) -> list[dict]:
 def admin_ledger(db: Session) -> list[dict]:
     ledger = db.execute(select(WalletLedger).order_by(WalletLedger.created_at.desc()).limit(200)).scalars()
     return [ledger_to_dict(entry) for entry in ledger]
+
+
+def admin_gpu_metrics() -> dict:
+    base_url = settings.model_plaza_gpu_api_url.rstrip("/")
+    if not base_url:
+        return {
+            "ok": False,
+            "timestamp": time.time(),
+            "error": "GPU API 未配置",
+            "gpus": [],
+            "runningJobs": [],
+        }
+    headers = {}
+    if settings.model_plaza_gpu_api_key:
+        headers["X-API-Key"] = settings.model_plaza_gpu_api_key
+    request = urllib.request.Request(urljoin(f"{base_url}/", "metrics"), headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=6) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return {
+            "ok": False,
+            "timestamp": time.time(),
+            "error": f"GPU API HTTP {exc.code}",
+            "gpus": [],
+            "runningJobs": [],
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "timestamp": time.time(),
+            "error": f"GPU API 请求失败：{exc}",
+            "gpus": [],
+            "runningJobs": [],
+        }
+    payload.setdefault("ok", True)
+    payload.setdefault("gpus", [])
+    payload.setdefault("runningJobs", [])
+    return payload

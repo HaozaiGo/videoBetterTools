@@ -69,21 +69,67 @@ type SubmitProgress = {
   totalBytes: number;
 };
 
+type BatchUploadItem = {
+  id: string;
+  name: string;
+  size: number;
+  status: "pending" | "uploading" | "creating" | "created" | "failed";
+  stage: string;
+  percent: number;
+  taskId?: string;
+  error?: string;
+};
+
+function fileBatchId(file: File, index: number) {
+  return `${file.name}-${file.size}-${file.lastModified}-${index}`;
+}
+
+function readVideoDuration(file: File) {
+  return new Promise<number | null>((resolve) => {
+    if (!file.type.startsWith("video/")) {
+      resolve(null);
+      return;
+    }
+    const video = document.createElement("video");
+    const url = URL.createObjectURL(file);
+    const cleanup = () => {
+      URL.revokeObjectURL(url);
+      video.removeAttribute("src");
+      video.load();
+    };
+    video.preload = "metadata";
+    video.onloadedmetadata = () => {
+      const seconds = video.duration;
+      cleanup();
+      resolve(seconds && Number.isFinite(seconds) ? Math.max(1, Math.ceil(seconds)) : null);
+    };
+    video.onerror = () => {
+      cleanup();
+      resolve(null);
+    };
+    video.src = url;
+  });
+}
+
 export function ToolPage() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const queryClient = useQueryClient();
   const { data } = useSuspenseQuery({ queryKey: ["bootstrap"], queryFn: getBootstrap });
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
+  const [fileDurations, setFileDurations] = useState<Record<string, number>>({});
+  const [batchItems, setBatchItems] = useState<BatchUploadItem[]>([]);
+  const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [notice, setNotice] = useState("");
   const [submitProgress, setSubmitProgress] = useState<SubmitProgress | null>(null);
   const [videoPreviewUrl, setVideoPreviewUrl] = useState("");
-  const [regions, setRegions] = useState<WatermarkRegion[]>([]);
+  const [regionsByFileId, setRegionsByFileId] = useState<Record<string, WatermarkRegion[]>>({});
   const [draftRegion, setDraftRegion] = useState<WatermarkRegion | null>(null);
   const [isSelectingRegion, setIsSelectingRegion] = useState(false);
   const [mediaBox, setMediaBox] = useState<MediaBox | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
+  const appendInputRef = useRef<HTMLInputElement | null>(null);
   const tool = data.tools.find((item) => item.route === pathname);
   const isWatermarkTool = tool?.slug === "remove-watermark";
   const isSubtitleTool = tool?.slug === "remove-subtitle";
@@ -92,60 +138,141 @@ export function ToolPage() {
   const isMaskVideoTool = isWatermarkTool || isSubtitleTool;
   const showVideoPreview = Boolean(videoPreviewUrl && (isMaskVideoTool || isEnhanceTool || isTranslateTool));
   const regionNoun = isSubtitleTool ? "字幕" : "水印";
+  const selectedFile = files[activeFileIndex] || files[0] || null;
+  const selectedFileId = selectedFile ? fileBatchId(selectedFile, files[activeFileIndex] ? activeFileIndex : 0) : "";
+  const regions = selectedFileId ? regionsByFileId[selectedFileId] || [] : [];
+  const selectedFileCount = files.length;
+  const selectedFilesSize = useMemo(() => files.reduce((total, item) => total + item.size, 0), [files]);
+  const isBatchUpload = selectedFileCount > 1;
+
+  const updateBatchItem = (id: string, patch: Partial<BatchUploadItem>) => {
+    setBatchItems((items) => items.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+  };
+
+  const setSelectedFiles = (nextFiles: File[], options: { append?: boolean } = {}) => {
+    if (!nextFiles.length) return;
+    const mergedFiles = options.append ? [...files, ...nextFiles] : nextFiles;
+    if (!mergedFiles.length) return;
+    setFiles(mergedFiles);
+    setFileDurations({});
+    if (!options.append) {
+      setActiveFileIndex(0);
+    }
+    setBatchItems(
+      mergedFiles.map((item, index) => ({
+        id: fileBatchId(item, index),
+        name: item.name,
+        size: item.size,
+        status: "pending",
+        stage: "等待提交",
+        percent: 0,
+      })),
+    );
+    if (!options.append) {
+      setRegionsByFileId({});
+      setDraftRegion(null);
+      setIsSelectingRegion(false);
+    }
+    setSubmitProgress(null);
+    setNotice(options.append ? `已追加 ${nextFiles.length} 个处理文件。` : "");
+  };
 
   const createTaskMutation = useMutation({
     mutationFn: async (values: ToolFormValues) => {
       if (!tool) throw new Error("工具不存在");
-      if (!file) throw new Error("请先选择一个文件");
+      if (!files.length) throw new Error("请先选择一个文件");
       setNotice("");
-      setSubmitProgress({ stage: "准备上传", percent: 0, uploadedBytes: 0, totalBytes: file.size });
-      const taskValues = {
-        ...values,
-        resolution: tool.inputs.includes("resolution") ? values.resolution : "",
-      };
-      const params = isMaskVideoTool
-        ? {
-            ...taskValues,
-            mode: "manual" as const,
-            regions,
-            removalTarget: isSubtitleTool ? "subtitle" : "watermark",
-            maskStrategy: values.maskStrategy,
-          }
-        : isEnhanceTool
+      const buildParams = (duration: number, fileRegions: WatermarkRegion[]) => {
+        const taskValues = {
+          ...values,
+          duration,
+          resolution: tool.inputs.includes("resolution") ? values.resolution : "",
+        };
+        return isMaskVideoTool
           ? {
-              duration: values.duration,
-              resolution: values.resolution,
-              enhanceMode: values.enhanceMode,
-              keepAudio: values.keepAudio,
-              priority: values.priority,
+              ...taskValues,
+              mode: "manual" as const,
+              regions: fileRegions,
+              removalTarget: isSubtitleTool ? "subtitle" : "watermark",
+              maskStrategy: values.maskStrategy,
             }
-          : isTranslateTool
+          : isEnhanceTool
             ? {
-                duration: values.duration,
-                targetLanguage: values.targetLanguage,
-                subtitlePlacement: values.subtitlePlacement,
+                duration,
+                resolution: values.resolution,
+                enhanceMode: values.enhanceMode,
                 keepAudio: values.keepAudio,
                 priority: values.priority,
               }
-          : taskValues;
-      const upload = await uploadAsset({
-        file,
-        kind: tool.pricing.mode === "image" ? "image" : "video",
-        durationSeconds: values.duration,
-        onProgress: ({ percent, stage, uploadedBytes, totalBytes }) => {
-          setSubmitProgress({ percent, stage, uploadedBytes, totalBytes });
-        },
-      });
-      setSubmitProgress({ stage: "创建任务", percent: 100, uploadedBytes: file.size, totalBytes: file.size });
-      return createTask({ toolSlug: tool.slug, inputAssetId: upload.asset.id, params });
+            : isTranslateTool
+              ? {
+                  duration,
+                  targetLanguage: values.targetLanguage,
+                  subtitlePlacement: values.subtitlePlacement,
+                  keepAudio: values.keepAudio,
+                  priority: values.priority,
+                }
+              : taskValues;
+      };
+      let latestState: BootstrapState | null = null;
+      let createdCount = 0;
+      let failedCount = 0;
+
+      for (const [index, currentFile] of files.entries()) {
+        const itemId = fileBatchId(currentFile, index);
+        const duration = fileDurations[itemId] || values.duration;
+        const fileRegions = regionsByFileId[itemId] || [];
+        try {
+          updateBatchItem(itemId, { status: "uploading", stage: "上传视频", percent: 0, error: "" });
+          setSubmitProgress({ stage: `上传第 ${index + 1}/${files.length} 个文件`, percent: 0, uploadedBytes: 0, totalBytes: currentFile.size });
+          const upload = await uploadAsset({
+            file: currentFile,
+            kind: tool.pricing.mode === "image" ? "image" : "video",
+            durationSeconds: duration,
+            onProgress: ({ percent, stage, uploadedBytes, totalBytes }) => {
+              updateBatchItem(itemId, { percent, stage });
+              setSubmitProgress({
+                percent,
+                stage: files.length > 1 ? `${stage}（${index + 1}/${files.length}）` : stage,
+                uploadedBytes,
+                totalBytes,
+              });
+            },
+          });
+          updateBatchItem(itemId, { status: "creating", stage: "创建任务", percent: 100 });
+          setSubmitProgress({ stage: `创建第 ${index + 1}/${files.length} 个任务`, percent: 100, uploadedBytes: currentFile.size, totalBytes: currentFile.size });
+          const payload = await createTask({ toolSlug: tool.slug, inputAssetId: upload.asset.id, params: buildParams(duration, fileRegions) });
+          latestState = payload.state;
+          createdCount += 1;
+          updateBatchItem(itemId, { status: "created", stage: "任务已创建", percent: 100, taskId: payload.task.id });
+          queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state);
+        } catch (error) {
+          failedCount += 1;
+          updateBatchItem(itemId, {
+            status: "failed",
+            stage: "创建失败",
+            error: error instanceof Error ? error.message : "任务创建失败",
+          });
+        }
+      }
+
+      if (!createdCount) {
+        throw new Error("批量任务创建失败，请查看文件列表中的失败原因。");
+      }
+
+      return { state: latestState, createdCount, failedCount };
     },
     onSuccess: (payload) => {
-      queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state);
-      setFile(null);
-      setRegions([]);
+      if (payload.state) {
+        queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state);
+      }
+      setFiles([]);
+      setFileDurations({});
+      setActiveFileIndex(0);
+      setRegionsByFileId({});
       setDraftRegion(null);
       setSubmitProgress(null);
-      setNotice("任务已创建，积分已冻结。");
+      setNotice(payload.failedCount ? `已创建 ${payload.createdCount} 个任务，${payload.failedCount} 个文件失败。` : `已创建 ${payload.createdCount} 个任务，积分已冻结。`);
     },
     onError: (error) => {
       setSubmitProgress(null);
@@ -169,22 +296,47 @@ export function ToolPage() {
   const estimate = useMemo(() => (tool ? estimateCredits(tool, values) : 0), [tool, values]);
 
   useEffect(() => {
+    let cancelled = false;
+    setFileDurations({});
+    if (!files.length || tool?.pricing.mode === "image") {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    Promise.all(
+      files.map(async (item, index) => {
+        const duration = await readVideoDuration(item);
+        return [fileBatchId(item, index), duration] as const;
+      }),
+    ).then((entries) => {
+      if (cancelled) return;
+      const nextDurations = Object.fromEntries(entries.filter((entry): entry is readonly [string, number] => Boolean(entry[1])));
+      setFileDurations(nextDurations);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [files, tool?.pricing.mode]);
+
+  useEffect(() => {
     if (isMaskVideoTool && !isTextMaskAdapter && values.maskStrategy !== "rectangle") {
       form.setFieldValue("maskStrategy", "rectangle");
     }
   }, [form, isMaskVideoTool, isTextMaskAdapter, values.maskStrategy]);
 
   useEffect(() => {
-    if (!file || !file.type.startsWith("video/")) {
+    if (!selectedFile || !selectedFile.type.startsWith("video/")) {
       setVideoPreviewUrl("");
       setMediaBox(null);
       return;
     }
     // 本地预览只在浏览器内生成临时 URL，不提前上传；提交任务时再走后端资产接口。
-    const url = URL.createObjectURL(file);
+    const url = URL.createObjectURL(selectedFile);
     setVideoPreviewUrl(url);
     return () => URL.revokeObjectURL(url);
-  }, [file]);
+  }, [selectedFile]);
 
   const updateMediaBox = () => {
     const video = videoRef.current;
@@ -270,10 +422,10 @@ export function ToolPage() {
       setNotice(`框选区域太小，请覆盖完整${regionNoun}。`);
       return;
     }
-    // MVP 先保留一个水印矩形；重新拖拽会覆盖旧区域，交互更直接。
-    setRegions([nextRegion]);
+    // 每个视频独立保存一个框选区域，批量任务提交时会按文件分别传给后端。
+    setRegionsByFileId((items) => ({ ...items, [selectedFileId]: [nextRegion] }));
     setIsSelectingRegion(false);
-    setNotice(`已框选${regionNoun}区域，可重新拖拽覆盖。`);
+    setNotice(`已为当前视频框选${regionNoun}区域，可切换其他视频继续设置。`);
   };
 
   if (!tool || tool.status === "disabled") {
@@ -290,14 +442,24 @@ export function ToolPage() {
 
   const available = data.account.availableCredits;
   const accept = tool.pricing.mode === "image" ? "image/*" : "video/*";
+  const totalEstimate = selectedFileCount
+    ? files.reduce((total, item, index) => {
+        const duration = fileDurations[fileBatchId(item, index)] || values.duration;
+        return total + estimateCredits(tool, { ...values, duration });
+      }, 0)
+    : estimate;
   const submitButtonLabel =
-    available < estimate
+    !selectedFileCount
+      ? "先选择文件"
+      : available < totalEstimate
       ? "余额不足"
       : createTaskMutation.isPending && submitProgress?.stage === "创建任务"
         ? "正在创建任务..."
         : createTaskMutation.isPending && submitProgress
           ? `${submitProgress.stage} ${submitProgress.percent}%`
-          : "上传并创建任务";
+          : isBatchUpload
+            ? `批量创建 ${selectedFileCount} 个任务`
+            : "上传并创建任务";
 
   return (
     <div className="tool-page">
@@ -309,6 +471,16 @@ export function ToolPage() {
         className={`tool-detail${isEnhanceTool ? " enhance-detail" : ""}${isMaskVideoTool ? " mask-detail" : ""}${isTranslateTool ? " translate-detail" : ""}`}
         onSubmit={(event) => {
           event.preventDefault();
+          if (isMaskVideoTool) {
+            const firstMissingIndex = files.findIndex((item, index) => !(regionsByFileId[fileBatchId(item, index)] || []).length);
+            if (firstMissingIndex >= 0) {
+              setActiveFileIndex(firstMissingIndex);
+              setNotice(`请先为第 ${firstMissingIndex + 1} 个视频框选${regionNoun}区域。`);
+              setDraftRegion(null);
+              setIsSelectingRegion(true);
+              return;
+            }
+          }
           if (isMaskVideoTool && regions.length === 0) {
             setNotice(`请先在视频预览中框选${regionNoun}区域。`);
             return;
@@ -328,6 +500,7 @@ export function ToolPage() {
                 {isEnhanceTool ? <span>远端 GPU 超分</span> : null}
                 {isMaskVideoTool ? <span>区域框选修复</span> : null}
                 {isTranslateTool ? <span>英文硬字幕</span> : null}
+                {tool.pricing.mode !== "image" ? <span>支持批处理</span> : null}
               </div>
             </div>
           </div>
@@ -336,19 +509,86 @@ export function ToolPage() {
               className="file-input"
               type="file"
               accept={accept}
+              multiple={tool.pricing.mode !== "image"}
               onChange={(event) => {
-                setFile(event.target.files?.[0] || null);
-                setRegions([]);
-                setDraftRegion(null);
-                setIsSelectingRegion(false);
-                setSubmitProgress(null);
-                setNotice("");
+                const nextFiles = Array.from(event.target.files || []);
+                setSelectedFiles(nextFiles);
+                event.currentTarget.value = "";
               }}
             />
             <div className="upload-visual">+</div>
-            <strong>{file ? file.name : tool.pricing.mode === "image" ? "选择图片文件" : "选择视频文件"}</strong>
-            <span>{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB，创建任务时会上传到后端。` : "超过 32MB 自动使用分片与断点续传。"}</span>
+            <strong>
+              {selectedFileCount ? (isBatchUpload ? `已选择 ${selectedFileCount} 个文件` : selectedFile?.name) : tool.pricing.mode === "image" ? "选择图片文件" : "选择视频文件"}
+            </strong>
+            <span>{selectedFileCount ? (isBatchUpload ? `合计 ${formatBytes(selectedFilesSize)}，可逐个视频设置选区。` : `${formatBytes(selectedFile?.size || 0)}，创建任务时会上传到后端。`) : "超过 32MB 自动使用分片与断点续传。"}</span>
           </label>
+          {batchItems.length ? (
+            <div className="batch-file-list" aria-label="批量文件列表">
+              <div className="batch-file-list-head">
+                <strong>{isBatchUpload ? "批量文件" : "待处理文件"}</strong>
+                <div>
+                  <span>{formatBytes(selectedFilesSize || batchItems.reduce((total, item) => total + item.size, 0))}</span>
+                  {tool.pricing.mode !== "image" ? (
+                    <>
+                      <input
+                        ref={appendInputRef}
+                        className="file-input"
+                        type="file"
+                        accept={accept}
+                        multiple
+                        onChange={(event) => {
+                          const nextFiles = Array.from(event.target.files || []);
+                          setSelectedFiles(nextFiles, { append: true });
+                          event.currentTarget.value = "";
+                        }}
+                      />
+                      <button className="append-file-button" type="button" disabled={createTaskMutation.isPending} onClick={() => appendInputRef.current?.click()}>
+                        追加处理文件
+                      </button>
+                    </>
+                  ) : null}
+                </div>
+              </div>
+              <ul>
+                {batchItems.map((item, index) => {
+                  const itemRegions = regionsByFileId[item.id] || [];
+                  const isActiveFile = index === activeFileIndex;
+                  return (
+                    <li className={`batch-file-item ${item.status}${isActiveFile ? " active" : ""}`} key={item.id}>
+                      <div>
+                        <strong>{item.name}</strong>
+                        <span>
+                          {formatBytes(item.size)}
+                          {isMaskVideoTool ? ` / ${itemRegions.length ? "已框选" : "待框选"}` : ""}
+                        </span>
+                      </div>
+                      <div className="batch-file-progress">
+                        <span>{item.error || item.stage}</span>
+                        <div className="submit-progress-track">
+                          <span style={{ width: `${item.percent}%` }} />
+                        </div>
+                      </div>
+                      {isMaskVideoTool ? (
+                        <button
+                          className="set-region-button"
+                          type="button"
+                          disabled={createTaskMutation.isPending}
+                          onClick={() => {
+                            setActiveFileIndex(index);
+                            setDraftRegion(null);
+                            setIsSelectingRegion(false);
+                            setNotice(itemRegions.length ? `正在预览第 ${index + 1} 个视频，可重新框选${regionNoun}。` : `正在预览第 ${index + 1} 个视频，请框选${regionNoun}区域。`);
+                          }}
+                        >
+                          {itemRegions.length ? "重设选区" : "设置选区"}
+                        </button>
+                      ) : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ) : null}
           {showVideoPreview ? (
             <section className="video-region-editor" aria-label={isMaskVideoTool ? `${regionNoun}区域框选` : "视频预览"}>
               <div className="video-preview-wrap">
@@ -383,7 +623,7 @@ export function ToolPage() {
               </div>
               {isMaskVideoTool ? (
                 <div className="region-help">
-                  <span>{isSelectingRegion ? `在画面上拖拽框选${regionNoun}区域` : regions.length ? `已选择 1 个${regionNoun}区域` : `可先播放预览，再框选${regionNoun}区域`}</span>
+                  <span>{isSelectingRegion ? `在第 ${activeFileIndex + 1} 个视频上拖拽框选${regionNoun}区域` : regions.length ? `第 ${activeFileIndex + 1} 个视频已选择 1 个${regionNoun}区域` : `可先播放预览，再为第 ${activeFileIndex + 1} 个视频框选${regionNoun}区域`}</span>
                   <button
                     className="link-button"
                     type="button"
@@ -394,12 +634,28 @@ export function ToolPage() {
                   >
                     {isSelectingRegion ? "取消框选" : `框选${regionNoun}`}
                   </button>
+                  {regions.length && isBatchUpload ? (
+                    <button
+                      className="link-button"
+                      type="button"
+                      onClick={() => {
+                        setRegionsByFileId(Object.fromEntries(files.map((item, index) => [fileBatchId(item, index), regions])));
+                        setNotice(`已把当前${regionNoun}选区复制到全部视频。`);
+                      }}
+                    >
+                      复制到全部
+                    </button>
+                  ) : null}
                   {regions.length ? (
                     <button
                       className="link-button"
                       type="button"
                       onClick={() => {
-                        setRegions([]);
+                        setRegionsByFileId((items) => {
+                          const nextItems = { ...items };
+                          delete nextItems[selectedFileId];
+                          return nextItems;
+                        });
                         setNotice("");
                         setIsSelectingRegion(false);
                       }}
@@ -655,8 +911,14 @@ export function ToolPage() {
         <aside className="quote-panel">
           <span className="quote-kicker">任务结算</span>
           <h2>费用预估</h2>
-          <div className="quote-number">{formatCredits(estimate)}</div>
+          <div className="quote-number">{formatCredits(totalEstimate)}</div>
           <dl>
+            {isBatchUpload ? (
+              <div>
+                <dt>本次数量</dt>
+                <dd>{selectedFileCount} 个文件</dd>
+              </div>
+            ) : null}
             <div>
               <dt>计费方式</dt>
               <dd>{tool.pricing.mode === "image" ? "按图片数量" : `按 ${tool.pricing.unitSeconds} 秒阶梯`}</dd>
@@ -670,7 +932,7 @@ export function ToolPage() {
               <dd>{formatCredits(available)}</dd>
             </div>
           </dl>
-          <button className="primary wide" type="submit" disabled={available < estimate || createTaskMutation.isPending}>
+          <button className="primary wide" type="submit" disabled={!selectedFileCount || available < totalEstimate || createTaskMutation.isPending}>
             {submitButtonLabel}
           </button>
           {createTaskMutation.isPending && submitProgress ? (

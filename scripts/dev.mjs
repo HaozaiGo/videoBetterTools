@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 
 const frontendPort = process.env.FRONTEND_PORT ?? "5175";
-const workerReplicas = Math.max(1, Number.parseInt(process.env.WORKER_REPLICAS ?? "4", 10) || 4);
+const workerReplicas = Math.max(1, Number.parseInt(process.env.WORKER_REPLICAS ?? "8", 10) || 8);
 
 const backendEnv = {
   ...process.env,

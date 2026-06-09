@@ -1,4 +1,4 @@
-import type { AdminSummary, AdminUser, Asset, AuthUser, BootstrapState, Task, UserCreateInput } from "../types";
+import type { AdminSummary, AdminUser, Asset, AuthUser, BootstrapState, GpuMetrics, Task, UserCreateInput } from "../types";
 
 const tokenKey = "model_plaza_auth_token";
 
@@ -407,6 +407,10 @@ export function getAdminUsers() {
 
 export function getAdminTasks() {
   return request<Task[]>("/api/admin/tasks");
+}
+
+export function getAdminGpuMetrics() {
+  return request<GpuMetrics>("/api/admin/gpu");
 }
 
 export function createAdminUser(input: UserCreateInput) {
