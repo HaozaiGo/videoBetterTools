@@ -4,17 +4,15 @@ on:
   push:
     branches:
       - main
+      - release/2026-06
   workflow_dispatch:
 
 concurrency:
-  group: production-deploy
+  group: production-deploy-${{ github.ref_name }}
   cancel-in-progress: true
 
 env:
-  DEPLOY_HOST: 35.220.200.97
-  DEPLOY_USER: huangguojie
   DEPLOY_PORT: "22"
-  DEPLOY_DIR: /opt/videoBetterTools
 
 jobs:
   deploy:
@@ -37,10 +35,39 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Configure deployment target
+        run: |
+          case "$GITHUB_REF_NAME" in
+            main)
+              {
+                echo "DEPLOY_HOST=35.220.200.97"
+                echo "DEPLOY_USER=huangguojie"
+                echo "DEPLOY_DIR=/opt/videoBetterTools"
+              } >> "$GITHUB_ENV"
+              ;;
+            release/2026-06)
+              {
+                echo "DEPLOY_HOST=101.96.226.213"
+                echo "DEPLOY_USER=root"
+                echo "DEPLOY_DIR=/opt/modelPlaza"
+              } >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "Unsupported deployment branch: $GITHUB_REF_NAME" >&2
+              exit 1
+              ;;
+          esac
+
       - name: Prepare SSH key
         env:
-          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          MAIN_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          RELEASE_SSH_PRIVATE_KEY: ${{ secrets.RELEASE_DEPLOY_SSH_KEY }}
         run: |
+          if [ "$GITHUB_REF_NAME" = "main" ]; then
+            SSH_PRIVATE_KEY="$MAIN_SSH_PRIVATE_KEY"
+          else
+            SSH_PRIVATE_KEY="$RELEASE_SSH_PRIVATE_KEY"
+          fi
           test -n "$SSH_PRIVATE_KEY"
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
@@ -63,14 +90,24 @@ jobs:
 
       - name: Upload archive
         run: |
-          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "sudo mkdir -p '$DEPLOY_DIR/releases' '$DEPLOY_DIR/shared' && sudo chown -R '$DEPLOY_USER':'$DEPLOY_USER' '$DEPLOY_DIR'"
+          if [ "$DEPLOY_USER" = "root" ]; then
+            prepare_remote="mkdir -p '$DEPLOY_DIR/releases' '$DEPLOY_DIR/shared'"
+          else
+            prepare_remote="sudo mkdir -p '$DEPLOY_DIR/releases' '$DEPLOY_DIR/shared' && sudo chown -R '$DEPLOY_USER':'$DEPLOY_USER' '$DEPLOY_DIR'"
+          fi
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$prepare_remote"
           scp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" /tmp/model-plaza-release.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/release.tar.gz"
 
       - name: Deploy with Docker Compose
         env:
-          PRODUCTION_ENV: ${{ secrets.PRODUCTION_ENV }}
+          MAIN_PRODUCTION_ENV: ${{ secrets.PRODUCTION_ENV }}
+          RELEASE_PRODUCTION_ENV: ${{ secrets.RELEASE_PRODUCTION_ENV }}
         run: |
+          if [ "$GITHUB_REF_NAME" = "main" ]; then
+            PRODUCTION_ENV="$MAIN_PRODUCTION_ENV"
+          else
+            PRODUCTION_ENV="$RELEASE_PRODUCTION_ENV"
+          fi
           production_env_b64="$(printf '%s' "${PRODUCTION_ENV:-}" | base64 -w 0)"
           ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_DIR='$DEPLOY_DIR' GITHUB_SHA='$GITHUB_SHA' PRODUCTION_ENV_B64='$production_env_b64' bash -s" <<'REMOTE'
           set -euo pipefail

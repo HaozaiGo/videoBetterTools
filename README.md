@@ -120,20 +120,23 @@ docker compose up --build
 
 ## GitHub Actions 部署
 
-推送 `main` 分支会触发 `.github/workflows/deploy.yml`，构建前端后通过 SSH 部署到：
+推送以下分支会触发 `.github/workflows/deploy.yml`，构建前端后通过 SSH 部署：
 
 ```text
-huangguojie@35.220.200.97:/opt/videoBetterTools
+main            -> huangguojie@35.220.200.97:/opt/videoBetterTools
+release/2026-06 -> root@101.96.226.213:/opt/modelPlaza
 ```
 
 需要在 GitHub 仓库的 `Settings -> Secrets and variables -> Actions` 配置：
 
 ```text
-DEPLOY_SSH_KEY     SSH 私钥内容，对应服务器登录 key
-PRODUCTION_ENV     可选，生产环境变量，参考 deploy/production.env.example
+DEPLOY_SSH_KEY          main 部署用 SSH 私钥内容
+PRODUCTION_ENV          main 可选生产环境变量，参考 deploy/production.env.example
+RELEASE_DEPLOY_SSH_KEY  release/2026-06 部署用 SSH 私钥内容，即本地 ~/.ssh/jkexiu.pem 的文件内容
+RELEASE_PRODUCTION_ENV  release/2026-06 可选生产环境变量，参考 deploy/production.env.example
 ```
 
-远端会使用 `docker-compose.prod.yml` 启动 `web/api/worker/postgres/redis`。首次部署如果没有提供 `PRODUCTION_ENV`，脚本会在服务器自动生成 `/opt/videoBetterTools/shared/.env` 的基础配置，后续可直接在服务器或 GitHub Secret 中替换正式密钥。
+远端会使用 `docker-compose.prod.yml` 启动 `web/api/worker/postgres/redis`。首次部署如果没有提供对应的环境变量 Secret，脚本会在服务器自动生成 `shared/.env` 的基础配置，后续可直接在服务器或 GitHub Secret 中替换正式密钥。
 
 服务器已有 Caddy 占用 `80/443` 时，项目默认暴露在 `WEB_PORT=8003`，再由现有网关或安全组决定是否对外开放。
 
