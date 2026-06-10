@@ -1,10 +1,12 @@
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+ARG UV_BASE_IMAGE=ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+FROM ${UV_BASE_IMAGE}
 
 WORKDIR /app/backend
 
 ARG APT_MIRROR=http://deb.debian.org/debian
 ARG APT_SECURITY_MIRROR=http://deb.debian.org/debian-security
 ARG PYPI_INDEX_URL=https://pypi.org/simple
+ARG UV_SYNC_ARGS=--frozen
 
 RUN printf 'deb %s bookworm main\n' "$APT_MIRROR" > /etc/apt/sources.list \
     && printf 'deb %s bookworm-updates main\n' "$APT_MIRROR" >> /etc/apt/sources.list \
@@ -15,7 +17,7 @@ RUN printf 'deb %s bookworm main\n' "$APT_MIRROR" > /etc/apt/sources.list \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/pyproject.toml backend/uv.lock ./
-RUN uv sync --frozen --default-index "$PYPI_INDEX_URL"
+RUN uv sync $UV_SYNC_ARGS --default-index "$PYPI_INDEX_URL"
 
 COPY backend/alembic.ini ./alembic.ini
 COPY backend/alembic ./alembic

@@ -43,7 +43,7 @@ jobs:
                 echo "DEPLOY_HOST=35.220.200.97"
                 echo "DEPLOY_USER=huangguojie"
                 echo "DEPLOY_DIR=/opt/videoBetterTools"
-                echo "DEPLOY_USE_PREBUILT_IMAGES=0"
+                echo "DEPLOY_BUILD_MIRRORS=0"
               } >> "$GITHUB_ENV"
               ;;
             release/2026-06)
@@ -51,7 +51,7 @@ jobs:
                 echo "DEPLOY_HOST=101.96.226.213"
                 echo "DEPLOY_USER=root"
                 echo "DEPLOY_DIR=/opt/modelPlaza"
-                echo "DEPLOY_USE_PREBUILT_IMAGES=1"
+                echo "DEPLOY_BUILD_MIRRORS=1"
               } >> "$GITHUB_ENV"
               ;;
             *)
@@ -112,20 +112,6 @@ jobs:
           docker compose version
           REMOTE
 
-      - name: Build release Docker images
-        if: github.ref_name == 'release/2026-06'
-        run: |
-          docker build -f backend/Dockerfile.prod -t "model-plaza-api:$GITHUB_SHA" .
-          docker build -f Dockerfile.web -t "model-plaza-web:$GITHUB_SHA" .
-          docker pull postgres:16
-          docker pull redis:7
-          docker save \
-            "model-plaza-api:$GITHUB_SHA" \
-            "model-plaza-web:$GITHUB_SHA" \
-            postgres:16 \
-            redis:7 \
-            | gzip -1 > /tmp/model-plaza-images.tar.gz
-
       - name: Create source archive
         run: |
           tar \
@@ -149,38 +135,6 @@ jobs:
           fi
           ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$prepare_remote"
           scp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" /tmp/model-plaza-release.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/release.tar.gz"
-          if [ "${DEPLOY_USE_PREBUILT_IMAGES:-0}" = "1" ]; then
-            split_dir=/tmp/model-plaza-image-parts
-            rm -rf "$split_dir"
-            mkdir -p "$split_dir"
-            split -b 32m -d -a 4 /tmp/model-plaza-images.tar.gz "$split_dir/images.tar.gz.part-"
-
-            ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-              "rm -rf '$DEPLOY_DIR/image-parts' && mkdir -p '$DEPLOY_DIR/image-parts'"
-
-            for part in "$split_dir"/*; do
-              part_name="$(basename "$part")"
-              for attempt in 1 2 3; do
-                if timeout 300 scp \
-                  -o ServerAliveInterval=15 \
-                  -o ServerAliveCountMax=4 \
-                  -o ConnectTimeout=20 \
-                  -i ~/.ssh/deploy_key \
-                  -P "$DEPLOY_PORT" \
-                  "$part" "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/image-parts/$part_name"; then
-                  break
-                fi
-                if [ "$attempt" = "3" ]; then
-                  echo "Failed to upload $part_name after $attempt attempts" >&2
-                  exit 1
-                fi
-                sleep 5
-              done
-            done
-
-            ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-              "cat '$DEPLOY_DIR'/image-parts/images.tar.gz.part-* > '$DEPLOY_DIR/images.tar.gz' && rm -rf '$DEPLOY_DIR/image-parts'"
-          fi
 
       - name: Deploy with Docker Compose
         env:
@@ -193,7 +147,7 @@ jobs:
             PRODUCTION_ENV="$RELEASE_PRODUCTION_ENV"
           fi
           production_env_b64="$(printf '%s' "${PRODUCTION_ENV:-}" | base64 -w 0)"
-          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_DIR='$DEPLOY_DIR' GITHUB_SHA='$GITHUB_SHA' PRODUCTION_ENV_B64='$production_env_b64' DEPLOY_USE_PREBUILT_IMAGES='${DEPLOY_USE_PREBUILT_IMAGES:-0}' bash -s" <<'REMOTE'
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_DIR='$DEPLOY_DIR' GITHUB_SHA='$GITHUB_SHA' PRODUCTION_ENV_B64='$production_env_b64' DEPLOY_BUILD_MIRRORS='${DEPLOY_BUILD_MIRRORS:-0}' bash -s" <<'REMOTE'
           set -euo pipefail
 
           release_dir="$DEPLOY_DIR/releases/$GITHUB_SHA"
@@ -201,12 +155,6 @@ jobs:
 
           mkdir -p "$release_dir" "$DEPLOY_DIR/shared"
           tar -xzf "$DEPLOY_DIR/release.tar.gz" -C "$release_dir"
-
-          compose_build_flag="--build"
-          if [ "${DEPLOY_USE_PREBUILT_IMAGES:-0}" = "1" ]; then
-            gzip -dc "$DEPLOY_DIR/images.tar.gz" | docker load
-            compose_build_flag="--no-build"
-          fi
 
           if [ -n "${PRODUCTION_ENV_B64:-}" ]; then
             printf '%s' "$PRODUCTION_ENV_B64" | base64 -d > "$shared_env"
@@ -237,17 +185,37 @@ jobs:
             fi
           fi
 
+          if [ "${DEPLOY_BUILD_MIRRORS:-0}" = "1" ]; then
+            ensure_env() {
+              key="$1"
+              value="$2"
+              if grep -q "^${key}=" "$shared_env"; then
+                sed -i "s|^${key}=.*|${key}=${value}|" "$shared_env"
+              else
+                printf '\n%s=%s\n' "$key" "$value" >> "$shared_env"
+              fi
+            }
+
+            ensure_env APT_MIRROR http://mirrors.ivolces.com/debian
+            ensure_env APT_SECURITY_MIRROR http://mirrors.ivolces.com/debian-security
+            ensure_env PYPI_INDEX_URL https://mirrors.aliyun.com/pypi/simple
+            ensure_env UV_SYNC_ARGS "--upgrade"
+            ensure_env UV_BASE_IMAGE ghcr.nju.edu.cn/astral-sh/uv:python3.12-bookworm-slim
+            ensure_env NPM_REGISTRY https://registry.npmmirror.com
+          fi
+
           ln -sfn "$shared_env" "$release_dir/.env"
           cd "$release_dir"
 
           worker_replicas="$(grep -E '^WORKER_REPLICAS=' .env | tail -n 1 | cut -d= -f2- || true)"
           worker_replicas="${worker_replicas:-3}"
-          APP_VERSION="$GITHUB_SHA" docker compose -f docker-compose.prod.yml up -d "$compose_build_flag" --remove-orphans --scale "worker=$worker_replicas"
+          APP_VERSION="$GITHUB_SHA" docker compose -f docker-compose.prod.yml up -d --build --remove-orphans --scale "worker=$worker_replicas"
           docker compose -f docker-compose.prod.yml ps
 
           ln -sfn "$release_dir" "$DEPLOY_DIR/current"
           rm -f "$DEPLOY_DIR/release.tar.gz"
           rm -f "$DEPLOY_DIR/images.tar.gz"
+          rm -rf "$DEPLOY_DIR/image-parts"
           find "$DEPLOY_DIR/releases" -mindepth 1 -maxdepth 1 -type d | sort | head -n -5 | xargs -r rm -rf
           docker image prune -f
           REMOTE
