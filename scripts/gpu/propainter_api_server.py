@@ -330,6 +330,13 @@ def _upload_result_to_presigned_url(job_id: str, output_path: Path) -> dict | No
 def _upload_result(job_id: str, output_path: Path) -> dict:
     """Upload directly to TOS when configured, with backend presigned PUT as compatibility fallback."""
     upload_errors: list[str] = []
+    try:
+        result_updates = _upload_result_to_tos(job_id, output_path)
+        if result_updates:
+            return result_updates
+    except Exception as exc:
+        upload_errors.append(f"tos upload failed: {exc}")
+
     if _result_upload_config(job_id):
         try:
             result_updates = _upload_result_to_presigned_url(job_id, output_path)
@@ -337,13 +344,6 @@ def _upload_result(job_id: str, output_path: Path) -> dict:
                 return result_updates
         except Exception as exc:
             upload_errors.append(f"presigned upload failed: {exc}")
-
-    try:
-        result_updates = _upload_result_to_tos(job_id, output_path)
-        if result_updates:
-            return result_updates
-    except Exception as exc:
-        upload_errors.append(f"tos upload failed: {exc}")
 
     if upload_errors:
         raise RuntimeError("; ".join(upload_errors))
