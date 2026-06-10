@@ -124,7 +124,7 @@ jobs:
             "model-plaza-web:$GITHUB_SHA" \
             postgres:16 \
             redis:7 \
-            | gzip > /tmp/model-plaza-images.tar.gz
+            | gzip -1 > /tmp/model-plaza-images.tar.gz
 
       - name: Create source archive
         run: |
@@ -150,7 +150,36 @@ jobs:
           ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$prepare_remote"
           scp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" /tmp/model-plaza-release.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/release.tar.gz"
           if [ "${DEPLOY_USE_PREBUILT_IMAGES:-0}" = "1" ]; then
-            scp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" /tmp/model-plaza-images.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/images.tar.gz"
+            split_dir=/tmp/model-plaza-image-parts
+            rm -rf "$split_dir"
+            mkdir -p "$split_dir"
+            split -b 32m -d -a 4 /tmp/model-plaza-images.tar.gz "$split_dir/images.tar.gz.part-"
+
+            ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+              "rm -rf '$DEPLOY_DIR/image-parts' && mkdir -p '$DEPLOY_DIR/image-parts'"
+
+            for part in "$split_dir"/*; do
+              part_name="$(basename "$part")"
+              for attempt in 1 2 3; do
+                if timeout 300 scp \
+                  -o ServerAliveInterval=15 \
+                  -o ServerAliveCountMax=4 \
+                  -o ConnectTimeout=20 \
+                  -i ~/.ssh/deploy_key \
+                  -P "$DEPLOY_PORT" \
+                  "$part" "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/image-parts/$part_name"; then
+                  break
+                fi
+                if [ "$attempt" = "3" ]; then
+                  echo "Failed to upload $part_name after $attempt attempts" >&2
+                  exit 1
+                fi
+                sleep 5
+              done
+            done
+
+            ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+              "cat '$DEPLOY_DIR'/image-parts/images.tar.gz.part-* > '$DEPLOY_DIR/images.tar.gz' && rm -rf '$DEPLOY_DIR/image-parts'"
           fi
 
       - name: Deploy with Docker Compose
