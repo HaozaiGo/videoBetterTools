@@ -23,6 +23,7 @@ services:
       - redis-data:/data
 
   api:
+    image: model-plaza-api:${APP_VERSION:-latest}
     build:
       context: .
       dockerfile: backend/Dockerfile.prod
@@ -50,6 +51,7 @@ services:
         condition: service_started
 
   worker:
+    image: model-plaza-api:${APP_VERSION:-latest}
     build:
       context: .
       dockerfile: backend/Dockerfile.prod
@@ -76,6 +78,7 @@ services:
         condition: service_started
 
   web:
+    image: model-plaza-web:${APP_VERSION:-latest}
     build:
       context: .
       dockerfile: Dockerfile.web

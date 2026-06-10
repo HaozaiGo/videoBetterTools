@@ -2,12 +2,20 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 WORKDIR /app/backend
 
-RUN apt-get update \
+ARG APT_MIRROR=http://mirrors.ivolces.com/debian
+ARG APT_SECURITY_MIRROR=http://mirrors.ivolces.com/debian-security
+ARG PYPI_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
+RUN printf 'deb %s bookworm main\n' "$APT_MIRROR" > /etc/apt/sources.list \
+    && printf 'deb %s bookworm-updates main\n' "$APT_MIRROR" >> /etc/apt/sources.list \
+    && printf 'deb %s bookworm-security main\n' "$APT_SECURITY_MIRROR" >> /etc/apt/sources.list \
+    && rm -f /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/pyproject.toml backend/uv.lock ./
-RUN uv sync --frozen
+RUN uv sync --frozen --default-index "$PYPI_INDEX_URL"
 
 COPY backend/alembic.ini ./alembic.ini
 COPY backend/alembic ./alembic
