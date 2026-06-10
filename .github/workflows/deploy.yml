@@ -74,6 +74,30 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -p "$DEPLOY_PORT" "$DEPLOY_HOST" >> ~/.ssh/known_hosts
 
+      - name: Ensure Docker on release host
+        if: github.ref_name == 'release/2026-06'
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+
+          if ! command -v docker >/dev/null 2>&1; then
+            if ! command -v apt-get >/dev/null 2>&1; then
+              echo "Docker is not installed, and automatic installation currently supports only apt-based Linux hosts." >&2
+              exit 1
+            fi
+
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2
+          fi
+
+          if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable --now docker
+          fi
+
+          docker --version
+          docker compose version
+          REMOTE
+
       - name: Create source archive
         run: |
           tar \
