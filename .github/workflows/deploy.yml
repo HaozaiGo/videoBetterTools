@@ -44,6 +44,7 @@ jobs:
                 echo "DEPLOY_USER=huangguojie"
                 echo "DEPLOY_DIR=/opt/videoBetterTools"
                 echo "DEPLOY_BUILD_MIRRORS=0"
+                echo "DEPLOY_WEB_PORT=8003"
               } >> "$GITHUB_ENV"
               ;;
             release/2026-06)
@@ -52,6 +53,7 @@ jobs:
                 echo "DEPLOY_USER=root"
                 echo "DEPLOY_DIR=/opt/modelPlaza"
                 echo "DEPLOY_BUILD_MIRRORS=1"
+                echo "DEPLOY_WEB_PORT=80"
               } >> "$GITHUB_ENV"
               ;;
             *)
@@ -147,7 +149,7 @@ jobs:
             PRODUCTION_ENV="$RELEASE_PRODUCTION_ENV"
           fi
           production_env_b64="$(printf '%s' "${PRODUCTION_ENV:-}" | base64 -w 0)"
-          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_DIR='$DEPLOY_DIR' GITHUB_SHA='$GITHUB_SHA' PRODUCTION_ENV_B64='$production_env_b64' DEPLOY_BUILD_MIRRORS='${DEPLOY_BUILD_MIRRORS:-0}' bash -s" <<'REMOTE'
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_DIR='$DEPLOY_DIR' GITHUB_SHA='$GITHUB_SHA' PRODUCTION_ENV_B64='$production_env_b64' DEPLOY_BUILD_MIRRORS='${DEPLOY_BUILD_MIRRORS:-0}' DEPLOY_WEB_PORT='${DEPLOY_WEB_PORT:-8003}' bash -s" <<'REMOTE'
           set -euo pipefail
 
           release_dir="$DEPLOY_DIR/releases/$GITHUB_SHA"
@@ -167,7 +169,7 @@ jobs:
           POSTGRES_PASSWORD=$postgres_password
           AUTH_SECRET=$auth_secret
           ALLOW_DEMO_WITHOUT_AUTH=false
-          WEB_PORT=8003
+          WEB_PORT=$DEPLOY_WEB_PORT
           WORKER_REPLICAS=8
           TASK_JOB_TIMEOUT_SECONDS=7200
           MODEL_PLAZA_GPU_API_URL=http://32.196.46.122:18080
@@ -179,9 +181,9 @@ jobs:
 
           if [ -z "${PRODUCTION_ENV_B64:-}" ]; then
             if grep -Eq '^WEB_PORT=(80|18081)$' "$shared_env"; then
-              sed -i 's/^WEB_PORT=.*/WEB_PORT=8003/' "$shared_env"
+              sed -i "s/^WEB_PORT=.*/WEB_PORT=$DEPLOY_WEB_PORT/" "$shared_env"
             elif ! grep -q '^WEB_PORT=' "$shared_env"; then
-              printf '\nWEB_PORT=8003\n' >> "$shared_env"
+              printf '\nWEB_PORT=%s\n' "$DEPLOY_WEB_PORT" >> "$shared_env"
             fi
           fi
 
@@ -202,6 +204,7 @@ jobs:
             ensure_env UV_SYNC_ARGS "--upgrade"
             ensure_env UV_BASE_IMAGE ghcr.nju.edu.cn/astral-sh/uv:python3.12-bookworm-slim
             ensure_env NPM_REGISTRY https://registry.npmmirror.com
+            ensure_env WEB_PORT "$DEPLOY_WEB_PORT"
           fi
 
           ln -sfn "$shared_env" "$release_dir/.env"
