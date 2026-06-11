@@ -4,6 +4,7 @@ import { useForm, useStore } from "@tanstack/react-form";
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { createTask, getBootstrap, uploadAsset } from "../api/client";
 import { formatCredits } from "../lib/format";
+import { translateTargetLanguages } from "../lib/translate-languages";
 import { ToolIcon } from "../lib/tool-icons";
 import type { BootstrapState, ToolFormValues, WatermarkRegion } from "../types";
 import { estimateCredits } from "../tool-config.js";
@@ -548,7 +549,7 @@ export function ToolPage() {
                 <span>{tool.status === "online" ? "已上线" : "即将上线"}</span>
                 {isEnhanceTool ? <span>远端 GPU 超分</span> : null}
                 {isMaskVideoTool ? <span>区域框选修复</span> : null}
-                {isTranslateTool ? <span>英文硬字幕</span> : null}
+                {isTranslateTool ? <span>多语言硬字幕</span> : null}
                 {tool.pricing.mode !== "image" ? <span>支持批处理</span> : null}
               </div>
             </div>
@@ -788,7 +789,11 @@ export function ToolPage() {
                     <label>
                       目标语言
                       <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["targetLanguage"])}>
-                        <option value="en">英文</option>
+                        {translateTargetLanguages.map((language) => (
+                          <option key={language.value} value={language.value}>
+                            {language.label}
+                          </option>
+                        ))}
                       </select>
                     </label>
                   )}

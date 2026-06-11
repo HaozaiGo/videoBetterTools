@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import textwrap
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -203,13 +204,39 @@ def _translate_text(text: str, target_language: str) -> str:
     api_key = os.environ.get("MODEL_PLAZA_TRANSLATE_API_KEY", "").strip()
     if not endpoint:
         return text
+    language_names = {
+        "en": "English",
+        "eng": "English",
+        "english": "English",
+        "ja": "Japanese",
+        "jp": "Japanese",
+        "japanese": "Japanese",
+        "ko": "Korean",
+        "kr": "Korean",
+        "korean": "Korean",
+        "es": "Spanish",
+        "fr": "French",
+        "de": "German",
+        "pt": "Portuguese",
+        "ru": "Russian",
+        "it": "Italian",
+        "vi": "Vietnamese",
+        "th": "Thai",
+        "id": "Indonesian",
+        "ar": "Arabic",
+        "hi": "Hindi",
+    }
+    target_name = language_names.get(target_language.lower(), target_language)
     payload = json.dumps(
         {
             "model": os.environ.get("MODEL_PLAZA_TRANSLATE_MODEL", "gpt-4.1-mini"),
             "messages": [
                 {
                     "role": "system",
-                    "content": f"Translate subtitles into {target_language}. Keep the meaning natural and concise. Return translation only.",
+                    "content": (
+                        f"Translate the subtitle line into {target_name}. Keep it natural, concise, and suitable "
+                        "for video subtitles. Preserve names, numbers, and units. Return only the translated subtitle text."
+                    ),
                 },
                 {"role": "user", "content": text},
             ],
@@ -225,8 +252,12 @@ def _translate_text(text: str, target_language: str) -> str:
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=int(os.environ.get("MODEL_PLAZA_TRANSLATE_TIMEOUT", "60"))) as response:
-        body = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=int(os.environ.get("MODEL_PLAZA_TRANSLATE_TIMEOUT", "60"))) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"subtitle translation API failed with HTTP {exc.code}: {error_body[:600]}") from exc
     return str(body["choices"][0]["message"]["content"]).strip()
 
 
