@@ -155,13 +155,15 @@ def _subtitle_layout(video_width: int, video_height: int) -> dict[str, int]:
     scale = max(0.62, min(1.0, short_side / 1080))
     font_size = max(26, min(44, round(44 * scale)))
     max_chars = max(24, min(46, round(video_width / max(font_size * 0.82, 1))))
+    # 竖屏短视频里，字幕贴底会被播放器控制条和画面边缘挤压；默认把底部字幕放到约 70%-75% 高度区域。
+    bottom_margin_ratio = float(os.environ.get("MODEL_PLAZA_SUBTITLE_BOTTOM_MARGIN_RATIO", "0.24"))
     return {
         "font_size": font_size,
         "max_chars": max_chars,
         "outline": max(2, round(font_size * 0.08)),
         "shadow": max(1, round(font_size * 0.04)),
         "margin_v": max(34, round(video_height * 0.052)),
-        "bottom_margin_v": max(48, round(video_height * 0.078)),
+        "bottom_margin_v": max(48, round(video_height * bottom_margin_ratio)),
         "margin_l": max(36, round(video_width * 0.025)),
     }
 
@@ -227,22 +229,19 @@ def _translate_text(text: str, target_language: str) -> str:
         "hi": "Hindi",
     }
     target_name = language_names.get(target_language.lower(), target_language)
-    payload = json.dumps(
-        {
-            "model": os.environ.get("MODEL_PLAZA_TRANSLATE_MODEL", "gpt-4.1-mini"),
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        f"Translate the subtitle line into {target_name}. Keep it natural, concise, and suitable "
-                        "for video subtitles. Preserve names, numbers, and units. Return only the translated subtitle text."
-                    ),
-                },
-                {"role": "user", "content": text},
-            ],
-            "temperature": 0.2,
-        }
-    ).encode("utf-8")
+    model_name = os.environ.get("MODEL_PLAZA_TRANSLATE_MODEL", "gpt-4.1-mini")
+    instruction = (
+        f"Translate the subtitle line into {target_name}. Keep it natural, concise, and suitable "
+        "for video subtitles. Preserve names, numbers, and units. Return only the translated subtitle text."
+    )
+    if model_name.startswith("qwen-mt-"):
+        messages = [{"role": "user", "content": f"{instruction}\n\n{text}"}]
+    else:
+        messages = [
+            {"role": "system", "content": instruction},
+            {"role": "user", "content": text},
+        ]
+    payload = json.dumps({"model": model_name, "messages": messages, "temperature": 0.2}).encode("utf-8")
     request = urllib.request.Request(
         endpoint,
         data=payload,

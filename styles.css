@@ -1169,6 +1169,18 @@ td strong,
   font-style: normal;
 }
 
+.task-file-name {
+  display: block;
+  max-width: 360px;
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 th {
   color: var(--muted);
   font-size: 13px;

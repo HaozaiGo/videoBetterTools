@@ -60,6 +60,21 @@ export async function openAuthenticatedFile(path: string) {
   setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
 }
 
+export async function openTaskResult(taskId: string) {
+  const previewWindow = window.open("about:blank", "_blank");
+  try {
+    const payload = await request<{ url: string }>(`/api/tasks/${taskId}/result-link`);
+    if (previewWindow) {
+      previewWindow.location.href = payload.url;
+    } else {
+      window.open(payload.url, "_blank");
+    }
+  } catch (error) {
+    previewWindow?.close();
+    throw error;
+  }
+}
+
 export function uploadAsset(input: UploadAssetInput) {
   return uploadAssetWithStorage(input);
 }

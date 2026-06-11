@@ -132,6 +132,7 @@ export type Task = {
   id: string;
   toolSlug: string;
   inputAssetId: string;
+  inputAssetName: string;
   outputAssetId: string | null;
   status: TaskStatus;
   params: Record<string, unknown>;

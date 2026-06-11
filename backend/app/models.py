@@ -74,6 +74,9 @@ class Task(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    input_asset: Mapped[Asset] = relationship(foreign_keys=[input_asset_id])
+    output_asset: Mapped[Asset | None] = relationship(foreign_keys=[output_asset_id])
+
 
 class WalletLedger(Base):
     __tablename__ = "wallet_ledger"
