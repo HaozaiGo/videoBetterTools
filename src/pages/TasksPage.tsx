@@ -3,6 +3,7 @@ import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "
 import { Fragment, useState } from "react";
 import { cancelTask, getBootstrap, openAuthenticatedFile } from "../api/client";
 import { formatCredits, formatDate, statusLabel, taskProgressDisplay } from "../lib/format";
+import { translateLanguageLabel } from "../lib/translate-languages";
 import type { BootstrapState, Task } from "../types";
 
 const columnHelper = createColumnHelper<Task>();
@@ -23,7 +24,7 @@ function paramSummary(task: Task) {
   const items = [
     typeof params.resolution === "string" ? `清晰度 ${params.resolution}` : "",
     typeof params.enhanceMode === "string" ? `模式 ${params.enhanceMode === "natural" ? "自然增强" : "高质量超分"}` : "",
-    typeof params.targetLanguage === "string" ? `目标语言 ${params.targetLanguage === "en" ? "英文" : params.targetLanguage}` : "",
+    typeof params.targetLanguage === "string" ? `目标语言 ${translateLanguageLabel(params.targetLanguage)}` : "",
     typeof params.subtitlePlacement === "string" ? `字幕位置 ${params.subtitlePlacement === "top" ? "顶部" : params.subtitlePlacement === "middle-lower" ? "中下" : "底部"}` : "",
     typeof params.priority === "string" ? `优先级 ${params.priority === "express" ? "加急" : "标准"}` : "",
     typeof params.keepAudio === "boolean" ? `音频 ${params.keepAudio ? "保留" : "不保留"}` : "",
