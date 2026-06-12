@@ -123,7 +123,7 @@ docker compose up --build
 推送 `main` 分支会触发 `.github/workflows/deploy.yml`，构建前端后通过 SSH 部署到：
 
 ```text
-huangguojie@35.220.200.97:/opt/videoBetterTools
+huangguojie@35.241.99.69:/opt/videoBetterTools
 ```
 
 需要在 GitHub 仓库的 `Settings -> Secrets and variables -> Actions` 配置：

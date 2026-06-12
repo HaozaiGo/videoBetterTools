@@ -4,14 +4,25 @@ on:
   push:
     branches:
       - main
+      - release/**
   workflow_dispatch:
+    inputs:
+      target:
+        description: Deploy target
+        required: true
+        type: choice
+        default: production
+        options:
+          - production
+          - release
 
 concurrency:
-  group: production-deploy
+  group: deploy-${{ github.event.inputs.target || github.ref_name }}
   cancel-in-progress: true
 
 env:
-  DEPLOY_HOST: 35.220.200.97
+  PRODUCTION_DEPLOY_HOST: 35.241.99.69
+  RELEASE_DEPLOY_HOST: 101.96.226.213
   DEPLOY_USER: huangguojie
   DEPLOY_PORT: "22"
   DEPLOY_DIR: /opt/videoBetterTools
@@ -37,13 +48,44 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Resolve deploy target
+        env:
+          WORKFLOW_TARGET: ${{ github.event.inputs.target || '' }}
+        run: |
+          target="${WORKFLOW_TARGET:-production}"
+          if [ "$GITHUB_REF_NAME" != "main" ] && [[ "$GITHUB_REF_NAME" == release/* ]]; then
+            target="release"
+          fi
+
+          if [ "$target" = "release" ]; then
+            echo "DEPLOY_ENV=release" >> "$GITHUB_ENV"
+            echo "DEPLOY_HOST=$RELEASE_DEPLOY_HOST" >> "$GITHUB_ENV"
+          else
+            echo "DEPLOY_ENV=production" >> "$GITHUB_ENV"
+            echo "DEPLOY_HOST=$PRODUCTION_DEPLOY_HOST" >> "$GITHUB_ENV"
+          fi
+
+          echo "Deploy target: $target"
+
       - name: Prepare SSH key
         env:
-          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          RELEASE_DEPLOY_SSH_KEY: ${{ secrets.RELEASE_DEPLOY_SSH_KEY }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
-          test -n "$SSH_PRIVATE_KEY"
+          if [ "$DEPLOY_ENV" = "release" ]; then
+            private_key="${RELEASE_DEPLOY_SSH_KEY:-}"
+            missing_secret="RELEASE_DEPLOY_SSH_KEY"
+          else
+            private_key="${DEPLOY_SSH_KEY:-${SSH_PRIVATE_KEY:-}}"
+            missing_secret="DEPLOY_SSH_KEY"
+          fi
+          if [ -z "$private_key" ]; then
+            echo "Missing repository secret: set $missing_secret to the SSH private key used for $DEPLOY_ENV deploy."
+            exit 1
+          fi
           mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$private_key" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -p "$DEPLOY_PORT" "$DEPLOY_HOST" >> ~/.ssh/known_hosts
 
