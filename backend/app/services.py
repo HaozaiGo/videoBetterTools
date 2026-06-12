@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import shutil
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import HTTPException, UploadFile
@@ -182,13 +183,14 @@ def get_task_result_access(db: Session, user_id: str, task_id: str) -> dict:
     task = db.execute(select(Task).where(Task.id == task_id, Task.user_id == user_id)).scalar_one_or_none()
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
+    filename = task_result_download_name(task)
     preview_path = task_preview_path(task)
     if preview_path.exists() and preview_path.is_file():
-        return {"mode": "file", "path": preview_path}
+        return {"mode": "file", "path": preview_path, "filename": filename}
     if task.output_asset_id:
         output_asset = db.get(Asset, task.output_asset_id)
         if output_asset is not None and output_asset.storage_key:
-            return {"mode": "redirect", "url": storage.presign_download(output_asset.storage_key, task_result_download_name(task))}
+            return {"mode": "redirect", "url": storage.presign_download(output_asset.storage_key, filename), "filename": filename}
     raise HTTPException(status_code=404, detail="preview result not ready")
 
 
@@ -196,13 +198,13 @@ def get_task_result_url(db: Session, user_id: str, task_id: str) -> str:
     task = db.execute(select(Task).where(Task.id == task_id, Task.user_id == user_id)).scalar_one_or_none()
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
+    preview_path = task_preview_path(task)
+    if preview_path.exists() and preview_path.is_file():
+        return f"/api/tasks/{task.id}/result/{quote(task_result_download_name(task))}"
     if task.output_asset_id:
         output_asset = db.get(Asset, task.output_asset_id)
         if output_asset is not None and output_asset.storage_key:
-            return storage.presign_download(output_asset.storage_key, task_result_download_name(task))
-    preview_path = task_preview_path(task)
-    if preview_path.exists() and preview_path.is_file():
-        return storage.public_url(task_result_output_key(task))
+            return f"/api/tasks/{task.id}/result/{quote(task_result_download_name(task))}"
     raise HTTPException(status_code=404, detail="result not ready")
 
 

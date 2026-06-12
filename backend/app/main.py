@@ -198,7 +198,15 @@ def preview_task_result(task_id: str, db: Session = Depends(get_db), user: User 
     if access["mode"] == "redirect":
         return RedirectResponse(str(access["url"]), status_code=302)
     preview_path = access["path"]
-    return FileResponse(preview_path, media_type="video/mp4", filename=preview_path.name)
+    return FileResponse(preview_path, media_type="video/mp4", filename=access["filename"], content_disposition_type="inline")
+
+
+@app.get("/api/tasks/{task_id}/result/{filename}")
+def task_result_file(task_id: str, filename: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    access = get_task_result_access(db, user.id, task_id)
+    if access["mode"] == "redirect":
+        return RedirectResponse(str(access["url"]), status_code=302)
+    return FileResponse(access["path"], media_type="video/mp4", filename=access["filename"], content_disposition_type="inline")
 
 
 @app.get("/api/tasks/{task_id}/result-link")
