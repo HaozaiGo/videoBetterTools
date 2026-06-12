@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient, useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import { Fragment, useState } from "react";
-import { cancelTask, getBootstrap, openAuthenticatedFile } from "../api/client";
+import { cancelTask, getBootstrap, openTaskResult } from "../api/client";
 import { formatCredits, formatDate, statusLabel, taskProgressDisplay } from "../lib/format";
 import { translateLanguageLabel } from "../lib/translate-languages";
 import type { BootstrapState, Task } from "../types";
@@ -79,6 +79,7 @@ export function TasksPage() {
         return (
           <>
             <strong>{tool?.name || row.original.toolSlug}</strong>
+            {row.original.inputAssetName ? <span className="task-file-name" title={row.original.inputAssetName}>{row.original.inputAssetName}</span> : null}
             <span className="subtle">{row.original.providerJobId}</span>
           </>
         );
@@ -126,17 +127,17 @@ export function TasksPage() {
       cell: ({ row }) => {
         const task = row.original;
         const canCancel = ["queued", "processing"].includes(task.status);
-        const canPreview = Boolean(task.previewUrl && !task.outputUrl);
+        const canPreview = Boolean(task.previewUrl);
         return (
           <div className="task-actions">
-            {task.outputUrl ? (
+            {canPreview ? (
+              <button className="link-button" type="button" onClick={() => openTaskResult(task.id).catch((error) => alert(error.message))}>
+                查看结果
+              </button>
+            ) : task.outputUrl ? (
               <a href={task.outputUrl} target="_blank" rel="noreferrer">
                 查看结果
               </a>
-            ) : canPreview ? (
-              <button className="link-button" type="button" onClick={() => openAuthenticatedFile(task.previewUrl).catch((error) => alert(error.message))}>
-                预览结果
-              </button>
             ) : (
               "等待结果"
             )}

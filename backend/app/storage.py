@@ -40,6 +40,9 @@ class LocalStorage:
     def public_url(self, storage_key: str) -> str:
         return f"{settings.public_upload_prefix}/{storage_key}"
 
+    def presign_download(self, storage_key: str) -> str:
+        return self.public_url(storage_key)
+
     def save_bytes(self, storage_key: str, content: bytes) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.local_path(storage_key)
@@ -119,10 +122,21 @@ class TosStorage(LocalStorage):
         if path.exists():
             return path
         path.parent.mkdir(parents=True, exist_ok=True)
-        with urllib.request.urlopen(self.public_url(storage_key), timeout=600) as response:
+        with urllib.request.urlopen(self.presign_download(storage_key), timeout=600) as response:
             with path.open("wb") as output_file:
                 shutil.copyfileobj(response, output_file)
         return path
+
+    def presign_download(self, storage_key: str) -> str:
+        from tos.enum import HttpMethodType
+
+        signed = self.client.pre_signed_url(
+            HttpMethodType.Http_Method_Get,
+            self.bucket,
+            storage_key.strip("/"),
+            expires=settings.volcengine_tos_presign_expires_seconds,
+        )
+        return signed.signed_url
 
     def presign_upload(self, kind: str = "video", duration_seconds: int = 0, storage_key: str | None = None) -> dict:
         if not storage_key:
