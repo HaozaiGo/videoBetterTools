@@ -8,7 +8,6 @@ import json
 import os
 import re
 import subprocess
-import textwrap
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -155,7 +154,7 @@ def _subtitle_layout(video_width: int, video_height: int) -> dict[str, int]:
     scale = max(0.62, min(1.0, short_side / 1080))
     font_scale = float(os.environ.get("MODEL_PLAZA_SUBTITLE_FONT_SCALE", "1.42"))
     font_size = max(40, min(62, round(44 * scale * font_scale)))
-    max_chars = max(24, min(46, round(video_width / max(font_size * 0.82, 1))))
+    max_chars = max(7, min(32, round(video_width * 0.84 / max(font_size, 1))))
     # 竖屏短视频里，字幕贴底会被播放器控制条和画面边缘挤压；默认把底部字幕放到约 70%-75% 高度区域。
     bottom_margin_ratio = float(os.environ.get("MODEL_PLAZA_SUBTITLE_BOTTOM_MARGIN_RATIO", "0.24"))
     return {
@@ -169,11 +168,34 @@ def _subtitle_layout(video_width: int, video_height: int) -> dict[str, int]:
     }
 
 
+def _subtitle_char_width(char: str) -> float:
+    if char.isspace():
+        return 0.34
+    if "\u2e80" <= char <= "\uffff":
+        return 1.0
+    return 0.56
+
+
 def _wrap_subtitle_lines(value: str, width: int, max_lines: int = 3) -> list[str]:
     normalized = re.sub(r"\s+", " ", value.strip())
     if not normalized:
         return []
-    lines = textwrap.wrap(normalized, width=width, break_long_words=False, break_on_hyphens=False)
+    lines: list[str] = []
+    current = ""
+    current_width = 0.0
+    for char in normalized:
+        char_width = _subtitle_char_width(char)
+        if current and current_width + char_width > width:
+            lines.append(current.rstrip())
+            current = "" if char.isspace() else char
+            current_width = 0.0 if char.isspace() else char_width
+            if len(lines) >= max_lines:
+                break
+            continue
+        current += char
+        current_width += char_width
+    if current.strip() and len(lines) < max_lines:
+        lines.append(current.rstrip())
     return lines[:max_lines]
 
 
