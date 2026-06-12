@@ -157,6 +157,13 @@ def task_result_output_key(task: Task) -> str:
     return f"{task.id}-{suffix}.mp4"
 
 
+def task_result_download_name(task: Task) -> str:
+    input_asset = getattr(task, "input_asset", None)
+    original_name = input_asset.original_name if input_asset else task.id
+    base_name = Path(original_name or task.id).stem or task.id
+    return safe_storage_name(f"{base_name}-{task.id[:8]}.mp4")
+
+
 def task_preview_path(task: Task) -> Path:
     return settings.upload_path / task_result_output_key(task)
 
@@ -181,7 +188,7 @@ def get_task_result_access(db: Session, user_id: str, task_id: str) -> dict:
     if task.output_asset_id:
         output_asset = db.get(Asset, task.output_asset_id)
         if output_asset is not None and output_asset.storage_key:
-            return {"mode": "redirect", "url": storage.presign_download(output_asset.storage_key)}
+            return {"mode": "redirect", "url": storage.presign_download(output_asset.storage_key, task_result_download_name(task))}
     raise HTTPException(status_code=404, detail="preview result not ready")
 
 
@@ -192,7 +199,7 @@ def get_task_result_url(db: Session, user_id: str, task_id: str) -> str:
     if task.output_asset_id:
         output_asset = db.get(Asset, task.output_asset_id)
         if output_asset is not None and output_asset.storage_key:
-            return storage.presign_download(output_asset.storage_key)
+            return storage.presign_download(output_asset.storage_key, task_result_download_name(task))
     preview_path = task_preview_path(task)
     if preview_path.exists() and preview_path.is_file():
         return storage.public_url(task_result_output_key(task))
