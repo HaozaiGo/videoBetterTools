@@ -1,3 +1,5 @@
+import type { TranslateTargetLanguage } from "./lib/translate-languages";
+
 export type ToolCategory = "video" | "image";
 export type ToolStatus = "online" | "coming" | "disabled";
 export type PricingMode = "duration" | "image";
@@ -130,6 +132,7 @@ export type Task = {
   id: string;
   toolSlug: string;
   inputAssetId: string;
+  inputAssetName: string;
   outputAssetId: string | null;
   status: TaskStatus;
   params: Record<string, unknown>;
@@ -184,7 +187,7 @@ export type ToolFormValues = {
   mode: "manual" | "auto";
   regions: WatermarkRegion[];
   keepAudio: boolean;
-  targetLanguage: "en";
+  targetLanguage: TranslateTargetLanguage;
   subtitlePlacement: "bottom" | "middle-lower" | "top";
   enhanceMode: "quality" | "natural";
   modelAdapter: "opencv-inpaint" | "ffmpeg-delogo" | "propainter" | "e2fgvi";

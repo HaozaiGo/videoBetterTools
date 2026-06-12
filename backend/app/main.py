@@ -2,7 +2,7 @@ import logging
 
 from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
@@ -21,7 +21,8 @@ from app.services import (
     create_presigned_asset_upload,
     create_user,
     create_task,
-    get_task_preview_path,
+    get_task_result_access,
+    get_task_result_url,
     get_multipart_upload,
     provider_callback,
     recharge_wallet,
@@ -193,8 +194,16 @@ def cancel_task_endpoint(task_id: str, db: Session = Depends(get_db), user: User
 
 @app.get("/api/tasks/{task_id}/preview-result")
 def preview_task_result(task_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    preview_path = get_task_preview_path(db, user.id, task_id)
+    access = get_task_result_access(db, user.id, task_id)
+    if access["mode"] == "redirect":
+        return RedirectResponse(str(access["url"]), status_code=302)
+    preview_path = access["path"]
     return FileResponse(preview_path, media_type="video/mp4", filename=preview_path.name)
+
+
+@app.get("/api/tasks/{task_id}/result-link")
+def task_result_link(task_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    return {"url": get_task_result_url(db, user.id, task_id)}
 
 
 @app.post("/api/provider/callback")

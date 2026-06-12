@@ -120,11 +120,14 @@ def asset_to_dict(asset: Asset) -> dict:
 
 def task_to_dict(task: Task) -> dict:
     preview_path = task_preview_path(task)
+    input_asset = getattr(task, "input_asset", None)
+    has_result_access = bool(preview_path.exists() or task.output_asset_id)
     return {
         "id": task.id,
         "userId": task.user_id,
         "toolSlug": task.tool_slug,
         "inputAssetId": task.input_asset_id,
+        "inputAssetName": input_asset.original_name if input_asset else "",
         "outputAssetId": task.output_asset_id,
         "status": task.status,
         "params": task.params,
@@ -139,7 +142,7 @@ def task_to_dict(task: Task) -> dict:
         "createdAt": serialize_datetime(task.created_at),
         "completedAt": serialize_datetime(task.completed_at),
         "outputUrl": task.output_url,
-        "previewUrl": f"/api/tasks/{task.id}/preview-result" if preview_path.exists() else "",
+        "previewUrl": f"/api/tasks/{task.id}/preview-result" if has_result_access else "",
     }
 
 
@@ -166,6 +169,34 @@ def get_task_preview_path(db: Session, user_id: str, task_id: str) -> Path:
     if not preview_path.exists() or not preview_path.is_file():
         raise HTTPException(status_code=404, detail="preview result not ready")
     return preview_path
+
+
+def get_task_result_access(db: Session, user_id: str, task_id: str) -> dict:
+    task = db.execute(select(Task).where(Task.id == task_id, Task.user_id == user_id)).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    preview_path = task_preview_path(task)
+    if preview_path.exists() and preview_path.is_file():
+        return {"mode": "file", "path": preview_path}
+    if task.output_asset_id:
+        output_asset = db.get(Asset, task.output_asset_id)
+        if output_asset is not None and output_asset.storage_key:
+            return {"mode": "redirect", "url": storage.presign_download(output_asset.storage_key)}
+    raise HTTPException(status_code=404, detail="preview result not ready")
+
+
+def get_task_result_url(db: Session, user_id: str, task_id: str) -> str:
+    task = db.execute(select(Task).where(Task.id == task_id, Task.user_id == user_id)).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if task.output_asset_id:
+        output_asset = db.get(Asset, task.output_asset_id)
+        if output_asset is not None and output_asset.storage_key:
+            return storage.presign_download(output_asset.storage_key)
+    preview_path = task_preview_path(task)
+    if preview_path.exists() and preview_path.is_file():
+        return storage.public_url(task_result_output_key(task))
+    raise HTTPException(status_code=404, detail="result not ready")
 
 
 def ledger_to_dict(entry: WalletLedger) -> dict:

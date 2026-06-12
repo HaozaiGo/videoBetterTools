@@ -420,7 +420,7 @@ def process_with_model_adapter(
 
 def process_masked_video_removal(input_storage_key: str, task_id: str, params: dict, suffix: str = "watermark-removed") -> dict:
     params = {**params, "taskId": task_id}
-    input_url = storage.public_url(input_storage_key)
+    input_url = storage.presign_download(input_storage_key)
     adapter = _adapter_name(params)
     input_path = storage.local_path(input_storage_key)
     if not input_path.exists():

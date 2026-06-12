@@ -82,7 +82,7 @@ export const tools = [
     category: "video",
     categoryName: "视频工具",
     name: "视频翻译",
-    summary: "上传中文视频，自动翻译成英文并写入字幕，输出可直接发布的 MP4。",
+    summary: "上传中文视频，自动翻译成多国语言并写入字幕，输出可直接发布的 MP4。",
     route: "/tools/video/translate",
     icon: "translate",
     status: "online",

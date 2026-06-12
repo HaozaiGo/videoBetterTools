@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import textwrap
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -152,15 +153,18 @@ def _escape_ass_text(value: str) -> str:
 def _subtitle_layout(video_width: int, video_height: int) -> dict[str, int]:
     short_side = min(video_width, video_height)
     scale = max(0.62, min(1.0, short_side / 1080))
-    font_size = max(26, min(44, round(44 * scale)))
+    font_scale = float(os.environ.get("MODEL_PLAZA_SUBTITLE_FONT_SCALE", "1.42"))
+    font_size = max(40, min(62, round(44 * scale * font_scale)))
     max_chars = max(24, min(46, round(video_width / max(font_size * 0.82, 1))))
+    # 竖屏短视频里，字幕贴底会被播放器控制条和画面边缘挤压；默认把底部字幕放到约 70%-75% 高度区域。
+    bottom_margin_ratio = float(os.environ.get("MODEL_PLAZA_SUBTITLE_BOTTOM_MARGIN_RATIO", "0.24"))
     return {
         "font_size": font_size,
         "max_chars": max_chars,
         "outline": max(2, round(font_size * 0.08)),
         "shadow": max(1, round(font_size * 0.04)),
         "margin_v": max(34, round(video_height * 0.052)),
-        "bottom_margin_v": max(48, round(video_height * 0.078)),
+        "bottom_margin_v": max(48, round(video_height * bottom_margin_ratio)),
         "margin_l": max(36, round(video_width * 0.025)),
     }
 
@@ -203,19 +207,42 @@ def _translate_text(text: str, target_language: str) -> str:
     api_key = os.environ.get("MODEL_PLAZA_TRANSLATE_API_KEY", "").strip()
     if not endpoint:
         return text
-    payload = json.dumps(
-        {
-            "model": os.environ.get("MODEL_PLAZA_TRANSLATE_MODEL", "gpt-4.1-mini"),
-            "messages": [
-                {
-                    "role": "system",
-                    "content": f"Translate subtitles into {target_language}. Keep the meaning natural and concise. Return translation only.",
-                },
-                {"role": "user", "content": text},
-            ],
-            "temperature": 0.2,
-        }
-    ).encode("utf-8")
+    language_names = {
+        "en": "English",
+        "eng": "English",
+        "english": "English",
+        "ja": "Japanese",
+        "jp": "Japanese",
+        "japanese": "Japanese",
+        "ko": "Korean",
+        "kr": "Korean",
+        "korean": "Korean",
+        "es": "Spanish",
+        "fr": "French",
+        "de": "German",
+        "pt": "Portuguese",
+        "ru": "Russian",
+        "it": "Italian",
+        "vi": "Vietnamese",
+        "th": "Thai",
+        "id": "Indonesian",
+        "ar": "Arabic",
+        "hi": "Hindi",
+    }
+    target_name = language_names.get(target_language.lower(), target_language)
+    model_name = os.environ.get("MODEL_PLAZA_TRANSLATE_MODEL", "gpt-4.1-mini")
+    instruction = (
+        f"Translate the subtitle line into {target_name}. Keep it natural, concise, and suitable "
+        "for video subtitles. Preserve names, numbers, and units. Return only the translated subtitle text."
+    )
+    if model_name.startswith("qwen-mt-"):
+        messages = [{"role": "user", "content": f"{instruction}\n\n{text}"}]
+    else:
+        messages = [
+            {"role": "system", "content": instruction},
+            {"role": "user", "content": text},
+        ]
+    payload = json.dumps({"model": model_name, "messages": messages, "temperature": 0.2}).encode("utf-8")
     request = urllib.request.Request(
         endpoint,
         data=payload,
@@ -225,8 +252,12 @@ def _translate_text(text: str, target_language: str) -> str:
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=int(os.environ.get("MODEL_PLAZA_TRANSLATE_TIMEOUT", "60"))) as response:
-        body = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=int(os.environ.get("MODEL_PLAZA_TRANSLATE_TIMEOUT", "60"))) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"subtitle translation API failed with HTTP {exc.code}: {error_body[:600]}") from exc
     return str(body["choices"][0]["message"]["content"]).strip()
 
 

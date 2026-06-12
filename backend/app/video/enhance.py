@@ -83,7 +83,7 @@ def _run_enhance_command(
 
 def process_video_enhance(input_storage_key: str, task_id: str, params: dict) -> dict:
     params = {**params, "taskId": task_id}
-    input_url = storage.public_url(input_storage_key)
+    input_url = storage.presign_download(input_storage_key)
     input_path = storage.local_path(input_storage_key)
     if not input_path.exists():
         if _is_http_url(input_url):

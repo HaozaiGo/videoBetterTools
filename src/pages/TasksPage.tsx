@@ -1,8 +1,9 @@
 import { useMutation, useQueryClient, useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import { Fragment, useState } from "react";
-import { cancelTask, getBootstrap, openAuthenticatedFile } from "../api/client";
+import { cancelTask, getBootstrap, openTaskResult } from "../api/client";
 import { formatCredits, formatDate, statusLabel, taskProgressDisplay } from "../lib/format";
+import { translateLanguageLabel } from "../lib/translate-languages";
 import type { BootstrapState, Task } from "../types";
 
 const columnHelper = createColumnHelper<Task>();
@@ -23,7 +24,7 @@ function paramSummary(task: Task) {
   const items = [
     typeof params.resolution === "string" ? `清晰度 ${params.resolution}` : "",
     typeof params.enhanceMode === "string" ? `模式 ${params.enhanceMode === "natural" ? "自然增强" : "高质量超分"}` : "",
-    typeof params.targetLanguage === "string" ? `目标语言 ${params.targetLanguage === "en" ? "英文" : params.targetLanguage}` : "",
+    typeof params.targetLanguage === "string" ? `目标语言 ${translateLanguageLabel(params.targetLanguage)}` : "",
     typeof params.subtitlePlacement === "string" ? `字幕位置 ${params.subtitlePlacement === "top" ? "顶部" : params.subtitlePlacement === "middle-lower" ? "中下" : "底部"}` : "",
     typeof params.priority === "string" ? `优先级 ${params.priority === "express" ? "加急" : "标准"}` : "",
     typeof params.keepAudio === "boolean" ? `音频 ${params.keepAudio ? "保留" : "不保留"}` : "",
@@ -78,6 +79,7 @@ export function TasksPage() {
         return (
           <>
             <strong>{tool?.name || row.original.toolSlug}</strong>
+            {row.original.inputAssetName ? <span className="task-file-name" title={row.original.inputAssetName}>{row.original.inputAssetName}</span> : null}
             <span className="subtle">{row.original.providerJobId}</span>
           </>
         );
@@ -125,17 +127,17 @@ export function TasksPage() {
       cell: ({ row }) => {
         const task = row.original;
         const canCancel = ["queued", "processing"].includes(task.status);
-        const canPreview = Boolean(task.previewUrl && !task.outputUrl);
+        const canPreview = Boolean(task.previewUrl);
         return (
           <div className="task-actions">
-            {task.outputUrl ? (
+            {canPreview ? (
+              <button className="link-button" type="button" onClick={() => openTaskResult(task.id).catch((error) => alert(error.message))}>
+                查看结果
+              </button>
+            ) : task.outputUrl ? (
               <a href={task.outputUrl} target="_blank" rel="noreferrer">
                 查看结果
               </a>
-            ) : canPreview ? (
-              <button className="link-button" type="button" onClick={() => openAuthenticatedFile(task.previewUrl).catch((error) => alert(error.message))}>
-                预览结果
-              </button>
             ) : (
               "等待结果"
             )}
