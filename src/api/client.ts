@@ -64,10 +64,15 @@ export async function openTaskResult(taskId: string) {
   const previewWindow = window.open("about:blank", "_blank");
   try {
     const payload = await request<{ url: string }>(`/api/tasks/${taskId}/result-link`);
+    const token = getAuthToken();
+    const resultUrl = new URL(payload.url, window.location.origin);
+    if (token && resultUrl.origin === window.location.origin && resultUrl.pathname.startsWith("/api/")) {
+      resultUrl.searchParams.set("access_token", token);
+    }
     if (previewWindow) {
-      previewWindow.location.href = payload.url;
+      previewWindow.location.href = resultUrl.href;
     } else {
-      window.open(payload.url, "_blank");
+      window.open(resultUrl.href, "_blank");
     }
   } catch (error) {
     previewWindow?.close();
