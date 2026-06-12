@@ -153,7 +153,8 @@ def _escape_ass_text(value: str) -> str:
 def _subtitle_layout(video_width: int, video_height: int) -> dict[str, int]:
     short_side = min(video_width, video_height)
     scale = max(0.62, min(1.0, short_side / 1080))
-    font_size = max(26, min(44, round(44 * scale)))
+    font_scale = float(os.environ.get("MODEL_PLAZA_SUBTITLE_FONT_SCALE", "1.42"))
+    font_size = max(40, min(62, round(44 * scale * font_scale)))
     max_chars = max(24, min(46, round(video_width / max(font_size * 0.82, 1))))
     # 竖屏短视频里，字幕贴底会被播放器控制条和画面边缘挤压；默认把底部字幕放到约 70%-75% 高度区域。
     bottom_margin_ratio = float(os.environ.get("MODEL_PLAZA_SUBTITLE_BOTTOM_MARGIN_RATIO", "0.24"))
