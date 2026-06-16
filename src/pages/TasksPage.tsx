@@ -1,12 +1,13 @@
 import { useMutation, useQueryClient, useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import { Fragment, useState } from "react";
-import { cancelTask, getBootstrap, openTaskResult } from "../api/client";
+import { cancelTask, getBootstrap, getTasksPage, openTaskResult } from "../api/client";
 import { formatCredits, formatDate, statusLabel, taskProgressDisplay } from "../lib/format";
 import { translateLanguageLabel } from "../lib/translate-languages";
 import type { BootstrapState, Task } from "../types";
 
 const columnHelper = createColumnHelper<Task>();
+const pageSize = 50;
 
 function failureReason(task: Task) {
   if (task.status !== "failed") return "";
@@ -45,18 +46,24 @@ export function TasksPage() {
   const queryClient = useQueryClient();
   const { data } = useSuspenseQuery({ queryKey: ["bootstrap"], queryFn: getBootstrap });
   const [expandedTaskIds, setExpandedTaskIds] = useState<Set<string>>(() => new Set());
-  useQuery({
-    queryKey: ["bootstrap"],
-    queryFn: getBootstrap,
+  const [currentPage, setCurrentPage] = useState(1);
+  const tasksQuery = useQuery({
+    queryKey: ["tasks", currentPage],
+    queryFn: () => getTasksPage(currentPage, pageSize),
+    initialData: currentPage === 1 ? { items: data.tasks, page: data.taskPage } : undefined,
     refetchInterval: (query) => {
       const state = query.state.data;
-      return state?.tasks.some((task) => ["queued", "processing"].includes(task.status)) ? 1600 : false;
+      return state?.items.some((task) => ["queued", "processing"].includes(task.status)) ? 1600 : false;
     },
   });
+  const taskPage = tasksQuery.data || { items: data.tasks, page: data.taskPage };
 
   const cancelMutation = useMutation({
     mutationFn: cancelTask,
-    onSuccess: (payload) => queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state),
+    onSuccess: (payload) => {
+      queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state);
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
   });
 
   const toggleTaskDetail = (taskId: string) => {
@@ -130,14 +137,14 @@ export function TasksPage() {
         const canPreview = Boolean(task.previewUrl);
         return (
           <div className="task-actions">
-            {canPreview ? (
-              <button className="link-button" type="button" onClick={() => openTaskResult(task.id).catch((error) => alert(error.message))}>
-                查看结果
-              </button>
-            ) : task.outputUrl ? (
+            {task.outputUrl ? (
               <a href={task.outputUrl} target="_blank" rel="noreferrer">
                 查看结果
               </a>
+            ) : canPreview ? (
+              <button className="link-button" type="button" onClick={() => openTaskResult(task.id).catch((error) => alert(error.message))}>
+                查看结果
+              </button>
             ) : (
               "等待结果"
             )}
@@ -157,13 +164,13 @@ export function TasksPage() {
   ];
 
   const table = useReactTable({
-    data: data.tasks,
+    data: taskPage.items,
     columns,
     getCoreRowModel: getCoreRowModel(),
   });
-  const processingCount = data.tasks.filter((task) => ["queued", "processing"].includes(task.status)).length;
-  const succeededCount = data.tasks.filter((task) => task.status === "succeeded").length;
-  const failedCount = data.tasks.filter((task) => task.status === "failed").length;
+  const processingCount = taskPage.items.filter((task) => ["queued", "processing"].includes(task.status)).length;
+  const succeededCount = taskPage.items.filter((task) => task.status === "succeeded").length;
+  const failedCount = taskPage.items.filter((task) => task.status === "failed").length;
 
   return (
     <section className="task-page">
@@ -172,21 +179,27 @@ export function TasksPage() {
           <h1>任务列表</h1>
           <p>查看任务进度、失败原因和结果下载。</p>
         </div>
-        <button className="ghost compact" onClick={() => queryClient.invalidateQueries({ queryKey: ["bootstrap"] })}>
+        <button
+          className="ghost compact"
+          onClick={() => {
+            queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+            queryClient.invalidateQueries({ queryKey: ["tasks"] });
+          }}
+        >
           刷新
         </button>
       </div>
       <div className="task-metrics">
         <div>
-          <span>处理中</span>
+          <span>本页处理中</span>
           <strong>{processingCount}</strong>
         </div>
         <div>
-          <span>已完成</span>
+          <span>本页已完成</span>
           <strong>{succeededCount}</strong>
         </div>
         <div>
-          <span>失败</span>
+          <span>本页失败</span>
           <strong>{failedCount}</strong>
         </div>
       </div>
@@ -244,6 +257,19 @@ export function TasksPage() {
             )}
           </tbody>
         </table>
+        <div className="pagination-bar">
+          <span>
+            第 {taskPage.page.page} / {taskPage.page.totalPages} 页，共 {taskPage.page.total} 条
+          </span>
+          <div>
+            <button className="ghost compact" onClick={() => setCurrentPage((page) => Math.max(1, page - 1))} disabled={!taskPage.page.hasPrevious || tasksQuery.isFetching}>
+              上一页
+            </button>
+            <button className="ghost compact" onClick={() => setCurrentPage((page) => page + 1)} disabled={!taskPage.page.hasNext || tasksQuery.isFetching}>
+              下一页
+            </button>
+          </div>
+        </div>
       </div>
     </section>
   );

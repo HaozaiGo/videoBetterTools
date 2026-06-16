@@ -1,4 +1,4 @@
-import type { AdminSummary, AdminUser, Asset, AuthUser, BootstrapState, GpuMetrics, Task, UserCreateInput } from "../types";
+import type { AdminSummary, AdminUser, Asset, AuthUser, BootstrapState, GpuMetrics, PaginatedLedger, PaginatedTasks, Task, UserCreateInput } from "../types";
 
 const tokenKey = "model_plaza_auth_token";
 
@@ -36,6 +36,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function getBootstrap() {
   return request<BootstrapState>("/api/bootstrap");
+}
+
+export function getTasksPage(page = 1, perPage = 50) {
+  const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
+  return request<PaginatedTasks>(`/api/tasks?${params.toString()}`);
+}
+
+export function getLedgerPage(page = 1, perPage = 50) {
+  const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
+  return request<PaginatedLedger>(`/api/ledger?${params.toString()}`);
 }
 
 export async function openAuthenticatedFile(path: string) {
@@ -389,7 +399,7 @@ export function recharge(credits: number) {
 }
 
 export function failProviderJob(providerJobId: string) {
-  return request<{ duplicated: boolean; state: BootstrapState }>("/api/provider/callback", {
+  return request<{ duplicated: boolean; task: Task }>("/api/provider/callback", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

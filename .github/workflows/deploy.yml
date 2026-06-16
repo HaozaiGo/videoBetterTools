@@ -162,6 +162,11 @@ jobs:
 
           ln -sfn "$release_dir" "$DEPLOY_DIR/current"
           rm -f "$DEPLOY_DIR/release.tar.gz"
-          find "$DEPLOY_DIR/releases" -mindepth 1 -maxdepth 1 -type d | sort | head -n -5 | xargs -r rm -rf
+          current_release="$(readlink -f "$DEPLOY_DIR/current")"
+          find "$DEPLOY_DIR/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
+            | sort -rn \
+            | cut -d' ' -f2- \
+            | awk -v current="$current_release" 'NR > 5 && $0 != current { print }' \
+            | xargs -r rm -rf
           docker image prune -f
           REMOTE

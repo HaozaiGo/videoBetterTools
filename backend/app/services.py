@@ -5,8 +5,8 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import HTTPException, UploadFile
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, selectinload
 
 from app.auth import hash_password
 from app.config import settings
@@ -15,6 +15,9 @@ from app.pricing import estimate_credits
 from app.queue import enqueue_provider_job
 from app.storage import object_key_for_upload, safe_storage_name, storage
 from app.tool_config import CATEGORIES, TOOLS, get_tool
+
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 100
 
 
 def now() -> datetime:
@@ -220,17 +223,58 @@ def ledger_to_dict(entry: WalletLedger) -> dict:
     }
 
 
+def normalize_pagination(page: int = 1, per_page: int = DEFAULT_PAGE_SIZE) -> tuple[int, int]:
+    page = max(1, page)
+    per_page = max(1, min(per_page, MAX_PAGE_SIZE))
+    return page, per_page
+
+
+def page_info(total: int, page: int, per_page: int) -> dict:
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    return {
+        "page": page,
+        "perPage": per_page,
+        "total": total,
+        "totalPages": total_pages,
+        "hasNext": page < total_pages,
+        "hasPrevious": page > 1,
+    }
+
+
+def paginated_tasks(db: Session, user_id: str, page: int = 1, per_page: int = DEFAULT_PAGE_SIZE) -> dict:
+    page, per_page = normalize_pagination(page, per_page)
+    total = db.execute(select(func.count()).select_from(Task).where(Task.user_id == user_id)).scalar_one()
+    tasks = db.execute(
+        select(Task)
+        .where(Task.user_id == user_id)
+        .options(selectinload(Task.input_asset))
+        .order_by(Task.created_at.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    ).scalars()
+    return {"items": [task_to_dict(task) for task in tasks], "page": page_info(total, page, per_page)}
+
+
+def paginated_ledger(db: Session, user_id: str, page: int = 1, per_page: int = DEFAULT_PAGE_SIZE) -> dict:
+    page, per_page = normalize_pagination(page, per_page)
+    total = db.execute(select(func.count()).select_from(WalletLedger).where(WalletLedger.user_id == user_id)).scalar_one()
+    ledger = db.execute(
+        select(WalletLedger)
+        .where(WalletLedger.user_id == user_id)
+        .order_by(WalletLedger.created_at.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    ).scalars()
+    return {"items": [ledger_to_dict(entry) for entry in ledger], "page": page_info(total, page, per_page)}
+
+
 def serialize_bootstrap(db: Session, user_id: str | None = None) -> dict:
     ensure_demo_user(db)
     user_id = user_id or settings.demo_user_id
     user = db.get(User, user_id)
     wallet = get_wallet(db, user_id)
-    tasks = db.execute(
-        select(Task).where(Task.user_id == user_id).order_by(Task.created_at.desc())
-    ).scalars()
-    ledger = db.execute(
-        select(WalletLedger).where(WalletLedger.user_id == user_id).order_by(WalletLedger.created_at.desc())
-    ).scalars()
+    task_page = paginated_tasks(db, user_id)
+    ledger_page = paginated_ledger(db, user_id)
     return {
         "account": {
             "id": user.id,
@@ -243,8 +287,10 @@ def serialize_bootstrap(db: Session, user_id: str | None = None) -> dict:
         },
         "tools": TOOLS,
         "categories": CATEGORIES,
-        "tasks": [task_to_dict(task) for task in tasks],
-        "ledger": [ledger_to_dict(entry) for entry in ledger],
+        "tasks": task_page["items"],
+        "taskPage": task_page["page"],
+        "ledger": ledger_page["items"],
+        "ledgerPage": ledger_page["page"],
     }
 
 

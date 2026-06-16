@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -24,6 +24,8 @@ from app.services import (
     get_task_result_access,
     get_task_result_url,
     get_multipart_upload,
+    paginated_ledger,
+    paginated_tasks,
     provider_callback,
     recharge_wallet,
     save_upload,
@@ -104,6 +106,26 @@ def me(user: User = Depends(current_user)) -> dict:
 @app.get("/api/bootstrap")
 def bootstrap(db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
     return serialize_bootstrap(db, user.id)
+
+
+@app.get("/api/tasks")
+def list_tasks(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, alias="perPage", ge=1, le=100),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+) -> dict:
+    return paginated_tasks(db, user.id, page=page, per_page=per_page)
+
+
+@app.get("/api/ledger")
+def list_ledger(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, alias="perPage", ge=1, le=100),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+) -> dict:
+    return paginated_ledger(db, user.id, page=page, per_page=per_page)
 
 
 @app.post("/api/assets/presign")
@@ -230,7 +252,7 @@ def provider_callback_endpoint(payload: ProviderCallback, db: Session = Depends(
         progress_percent=payload.progressPercent,
         progress_stage=payload.progressStage,
     )
-    return {"duplicated": duplicated, "state": serialize_bootstrap(db, _task.user_id)}
+    return {"duplicated": duplicated, "task": task_to_dict(_task)}
 
 
 @app.post("/api/recharge")

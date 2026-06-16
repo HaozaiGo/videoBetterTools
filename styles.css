@@ -1140,6 +1140,27 @@ dd {
   padding: 0;
 }
 
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding: 12px 14px;
+}
+
+.pagination-bar span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.pagination-bar div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
