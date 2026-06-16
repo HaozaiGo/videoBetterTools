@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import signal
 import shutil
 import subprocess
 import threading
@@ -446,7 +447,7 @@ def _run_model_job(job_id: str) -> None:
                 "MODEL_PLAZA_ASSIGNED_GPU": assigned_gpu,
                 "MODEL_PLAZA_PROGRESS_FILE": str(_progress_path(job_id)),
             }
-            process = subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT, text=True, env=env)
+            process = subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT, text=True, env=env, start_new_session=True)
             with running_processes_lock:
                 running_processes[job_id] = process
                 running_gpu_devices[job_id] = assigned_gpu
@@ -832,11 +833,17 @@ def cancel_job(job_id: str, x_api_key: Annotated[str | None, Header(alias="X-API
     with running_processes_lock:
         process = running_processes.get(job_id)
     if process is not None and process.poll() is None:
-        process.terminate()
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            process.terminate()
         try:
             process.wait(timeout=int(os.environ.get("MODEL_PLAZA_GPU_CANCEL_GRACE_SECONDS", "8")))
         except subprocess.TimeoutExpired:
-            process.kill()
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                process.kill()
     return cancelled_status
 
 
