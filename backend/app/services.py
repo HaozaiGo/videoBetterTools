@@ -193,6 +193,17 @@ def get_task_result_access(db: Session, user_id: str, task_id: str) -> dict:
     if task.output_asset_id:
         output_asset = db.get(Asset, task.output_asset_id)
         if output_asset is not None and output_asset.storage_key:
+            if not storage.is_remote:
+                try:
+                    output_path = storage.ensure_local(output_asset.storage_key)
+                except FileNotFoundError as exc:
+                    raise HTTPException(status_code=404, detail="result not ready") from exc
+                return {
+                    "mode": "file",
+                    "path": output_path,
+                    "filename": filename,
+                    "mime_type": output_asset.mime_type or "application/octet-stream",
+                }
             return {"mode": "redirect", "url": storage.presign_download(output_asset.storage_key, filename), "filename": filename}
     raise HTTPException(status_code=404, detail="preview result not ready")
 

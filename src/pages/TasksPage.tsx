@@ -137,14 +137,14 @@ export function TasksPage() {
         const canPreview = Boolean(task.previewUrl);
         return (
           <div className="task-actions">
-            {task.outputUrl ? (
-              <a href={task.outputUrl} target="_blank" rel="noreferrer">
-                查看结果
-              </a>
-            ) : canPreview ? (
+            {canPreview ? (
               <button className="link-button" type="button" onClick={() => openTaskResult(task.id).catch((error) => alert(error.message))}>
                 查看结果
               </button>
+            ) : task.outputUrl ? (
+              <a href={task.outputUrl} target="_blank" rel="noreferrer">
+                查看结果
+              </a>
             ) : (
               "等待结果"
             )}
