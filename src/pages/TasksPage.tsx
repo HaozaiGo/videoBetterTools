@@ -42,6 +42,13 @@ function taskProgressLabel(task: Task, percent: number) {
   return "";
 }
 
+function taskResultFallback(task: Task) {
+  if (task.status === "failed") return "无结果";
+  if (task.status === "cancelled") return "已取消";
+  if (task.status === "succeeded") return "结果未入库";
+  return "等待结果";
+}
+
 export function TasksPage() {
   const queryClient = useQueryClient();
   const { data } = useSuspenseQuery({ queryKey: ["bootstrap"], queryFn: getBootstrap });
@@ -146,7 +153,7 @@ export function TasksPage() {
                 查看结果
               </a>
             ) : (
-              "等待结果"
+              taskResultFallback(task)
             )}
             {canCancel ? (
               <button className="link-button" onClick={() => cancelMutation.mutate(task.id)} disabled={cancelMutation.isPending}>
