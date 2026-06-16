@@ -2,7 +2,7 @@ import json
 import time
 import urllib.error
 import urllib.request
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -64,6 +64,8 @@ def admin_gpu_metrics() -> dict:
             "gpus": [],
             "runningJobs": [],
         }
+    parsed_base_url = urlparse(base_url)
+    target = f"{parsed_base_url.scheme}://{parsed_base_url.netloc}" if parsed_base_url.scheme and parsed_base_url.netloc else base_url
     headers = {}
     if settings.model_plaza_gpu_api_key:
         headers["X-API-Key"] = settings.model_plaza_gpu_api_key
@@ -72,10 +74,12 @@ def admin_gpu_metrics() -> dict:
         with urllib.request.urlopen(request, timeout=6) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace").strip()
+        suffix = f"：{detail[:300]}" if detail else ""
         return {
             "ok": False,
             "timestamp": time.time(),
-            "error": f"GPU API HTTP {exc.code}",
+            "error": f"GPU API HTTP {exc.code} ({target}){suffix}",
             "gpus": [],
             "runningJobs": [],
         }
@@ -83,7 +87,7 @@ def admin_gpu_metrics() -> dict:
         return {
             "ok": False,
             "timestamp": time.time(),
-            "error": f"GPU API 请求失败：{exc}",
+            "error": f"GPU API 请求失败 ({target})：{exc}",
             "gpus": [],
             "runningJobs": [],
         }
