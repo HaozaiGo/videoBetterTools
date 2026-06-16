@@ -144,6 +144,10 @@ jobs:
           EOF
           fi
 
+          if grep -q '^MODEL_PLAZA_GPU_API_URL=.*:18081' "$shared_env"; then
+            sed -i 's#:18081#:18080#' "$shared_env"
+          fi
+
           if [ -z "${PRODUCTION_ENV_B64:-}" ]; then
             if grep -Eq '^WEB_PORT=(80|18081)$' "$shared_env"; then
               sed -i 's/^WEB_PORT=.*/WEB_PORT=8003/' "$shared_env"
