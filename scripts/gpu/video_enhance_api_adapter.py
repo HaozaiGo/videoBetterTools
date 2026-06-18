@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 
 
-DEFAULT_API_URL = "http://32.196.46.122:18080"
+DEFAULT_API_URL = "http://32.196.46.122:18081"
 DEFAULT_API_KEY = "model-plaza-dev-gpu-key"
 
 

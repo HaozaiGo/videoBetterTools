@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient, useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import { Fragment, useState } from "react";
-import { cancelTask, getBootstrap, getTasksPage, openTaskResult } from "../api/client";
+import { cancelTask, getAuthToken, getBootstrap, getTasksPage } from "../api/client";
 import { formatCredits, formatDate, statusLabel, taskProgressDisplay } from "../lib/format";
 import { translateLanguageLabel } from "../lib/translate-languages";
 import type { BootstrapState, Task } from "../types";
@@ -47,6 +47,17 @@ function taskResultFallback(task: Task) {
   if (task.status === "cancelled") return "已取消";
   if (task.status === "succeeded") return "结果未入库";
   return "等待结果";
+}
+
+function taskResultHref(task: Task) {
+  const href = task.previewUrl || task.outputUrl;
+  if (!href) return "";
+  const url = new URL(href, window.location.origin);
+  const token = getAuthToken();
+  if (token && url.origin === window.location.origin && url.pathname.startsWith("/api/")) {
+    url.searchParams.set("access_token", token);
+  }
+  return url.href;
 }
 
 export function TasksPage() {
@@ -141,15 +152,11 @@ export function TasksPage() {
       cell: ({ row }) => {
         const task = row.original;
         const canCancel = ["queued", "processing"].includes(task.status);
-        const canPreview = Boolean(task.previewUrl);
+        const resultHref = taskResultHref(task);
         return (
           <div className="task-actions">
-            {canPreview ? (
-              <button className="link-button" type="button" onClick={() => openTaskResult(task.id).catch((error) => alert(error.message))}>
-                查看结果
-              </button>
-            ) : task.outputUrl ? (
-              <a href={task.outputUrl} target="_blank" rel="noreferrer">
+            {resultHref ? (
+              <a href={resultHref} target="_blank" rel="noreferrer">
                 查看结果
               </a>
             ) : (

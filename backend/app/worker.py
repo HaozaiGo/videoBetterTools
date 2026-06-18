@@ -11,6 +11,7 @@ from app.services import provider_callback
 from app.video.enhance import process_video_enhance
 from app.video.translate import process_video_translate
 from app.video.watermark import VideoProcessingError, process_subtitle_removal, process_watermark_removal
+from app.video.workflow import process_subtitle_translate_workflow
 
 logger = logging.getLogger("model_plaza.worker")
 
@@ -24,7 +25,7 @@ def process_provider_job(task_id: str) -> None:
         provider_callback(db, provider_job_id, "processing", callback_id=f"{provider_job_id}:processing")
 
     # 已接入真实视频处理能力的工具单独走 GPU/本地处理管线；其他工具仍保留模拟供应商结果。
-    if task.tool_slug in {"remove-watermark", "remove-subtitle", "enhance", "translate"}:
+    if task.tool_slug in {"remove-watermark", "remove-subtitle", "enhance", "translate", "subtitle-translate-workflow"}:
         _process_real_video_task(task_id)
         return
 
@@ -69,6 +70,8 @@ def _process_real_video_task(task_id: str) -> None:
             result = process_video_enhance(input_storage_key, task_id, params)
         elif tool_slug == "translate":
             result = process_video_translate(input_storage_key, task_id, params)
+        elif tool_slug == "subtitle-translate-workflow":
+            result = process_subtitle_translate_workflow(input_storage_key, task_id, params)
         elif tool_slug == "remove-subtitle":
             result = process_subtitle_removal(input_storage_key, task_id, params)
         else:

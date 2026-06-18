@@ -137,15 +137,15 @@ jobs:
           WEB_PORT=8003
           WORKER_REPLICAS=8
           TASK_JOB_TIMEOUT_SECONDS=7200
-          MODEL_PLAZA_GPU_API_URL=http://32.196.46.122:18080
+          MODEL_PLAZA_GPU_API_URL=http://32.196.46.122:18081
           MODEL_PLAZA_GPU_API_KEY=model-plaza-dev-gpu-key
           MODEL_PLAZA_CALLBACK_URL=http://api:8010/api/provider/callback
           STORAGE_BACKEND=local
           EOF
           fi
 
-          if grep -q '^MODEL_PLAZA_GPU_API_URL=.*:18081' "$shared_env"; then
-            sed -i 's#:18081#:18080#' "$shared_env"
+          if grep -q '^MODEL_PLAZA_GPU_API_URL=.*:18080' "$shared_env"; then
+            sed -i 's#:18080#:18081#' "$shared_env"
           fi
 
           if [ -z "${PRODUCTION_ENV_B64:-}" ]; then

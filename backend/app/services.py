@@ -156,6 +156,7 @@ def task_result_output_key(task: Task) -> str:
         "remove-subtitle": "subtitle-removed",
         "enhance": "enhanced",
         "translate": "translated",
+        "subtitle-translate-workflow": "translated",
     }
     suffix = suffix_by_tool.get(task.tool_slug, "result")
     return f"{task.id}-{suffix}.mp4"
