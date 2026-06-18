@@ -178,6 +178,18 @@ export type PaginatedLedger = {
   page: PageInfo;
 };
 
+export type InternalBatchStatus = {
+  id: string;
+  name: string;
+  total: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  processing: number;
+  downloadReady: boolean;
+  tasks: Task[];
+};
+
 export type WatermarkRegion = {
   x: number;
   y: number;

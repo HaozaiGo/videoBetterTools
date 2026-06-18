@@ -3,6 +3,7 @@ from pathlib import Path
 import shutil
 from urllib.parse import quote
 from uuid import uuid4
+import zipfile
 
 from fastapi import HTTPException, UploadFile
 from sqlalchemy import func, select
@@ -221,6 +222,79 @@ def get_task_result_url(db: Session, user_id: str, task_id: str) -> str:
         if output_asset is not None and output_asset.storage_key:
             return f"/api/tasks/{task.id}/result/{quote(task_result_download_name(task))}"
     raise HTTPException(status_code=404, detail="result not ready")
+
+
+def _internal_batch_tasks(db: Session, user_id: str, batch_id: str) -> list[Task]:
+    tasks = db.execute(
+        select(Task)
+        .where(Task.user_id == user_id, Task.tool_slug == "subtitle-translate-workflow")
+        .options(selectinload(Task.input_asset))
+        .order_by(Task.created_at.asc())
+    ).scalars()
+    return [task for task in tasks if isinstance(task.params, dict) and task.params.get("internalBatchId") == batch_id]
+
+
+def internal_batch_status(db: Session, user_id: str, batch_id: str) -> dict:
+    tasks = _internal_batch_tasks(db, user_id, batch_id)
+    if not tasks:
+        raise HTTPException(status_code=404, detail="batch not found")
+    batch_name = str((tasks[0].params or {}).get("internalBatchName") or "内部批量任务")
+    total = len(tasks)
+    succeeded = sum(1 for task in tasks if task.status == "succeeded")
+    failed = sum(1 for task in tasks if task.status == "failed")
+    cancelled = sum(1 for task in tasks if task.status == "cancelled")
+    processing = sum(1 for task in tasks if task.status in {"queued", "processing"})
+    return {
+        "id": batch_id,
+        "name": batch_name,
+        "total": total,
+        "succeeded": succeeded,
+        "failed": failed,
+        "cancelled": cancelled,
+        "processing": processing,
+        "downloadReady": total > 0 and succeeded == total,
+        "tasks": [task_to_dict(task) for task in tasks],
+    }
+
+
+def create_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
+    batch = internal_batch_status(db, user_id, batch_id)
+    if not batch["downloadReady"]:
+        raise HTTPException(status_code=409, detail=f"batch not ready: {batch['succeeded']}/{batch['total']} succeeded")
+
+    tasks = _internal_batch_tasks(db, user_id, batch_id)
+    safe_batch_name = safe_storage_name(str(batch["name"]) or batch_id).removesuffix(".zip")
+    zip_dir = settings.upload_path / "internal-batch-zips"
+    zip_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = zip_dir / f"{safe_batch_name}-{batch_id[:8]}.zip"
+
+    used_names: set[str] = set()
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index, task in enumerate(tasks, start=1):
+            preview_path = task_preview_path(task)
+            if preview_path.exists() and preview_path.is_file():
+                source_path = preview_path
+            elif task.output_asset_id:
+                output_asset = db.get(Asset, task.output_asset_id)
+                if output_asset is None:
+                    raise HTTPException(status_code=404, detail=f"task result not found: {task.id}")
+                try:
+                    source_path = storage.ensure_local(output_asset.storage_key)
+                except FileNotFoundError as exc:
+                    raise HTTPException(status_code=404, detail=f"task result not ready: {task.id}") from exc
+            else:
+                raise HTTPException(status_code=404, detail=f"task result not ready: {task.id}")
+
+            base_name = safe_storage_name(task_result_download_name(task))
+            zip_name = f"{index:03d}-{base_name}"
+            duplicate_index = 1
+            while zip_name in used_names:
+                zip_name = f"{index:03d}-{task.id[:8]}-{duplicate_index}-{base_name}"
+                duplicate_index += 1
+            used_names.add(zip_name)
+            archive.write(source_path, zip_name)
+
+    return {"path": zip_path, "filename": f"{safe_batch_name}.zip"}
 
 
 def ledger_to_dict(entry: WalletLedger) -> dict:

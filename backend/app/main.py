@@ -18,11 +18,13 @@ from app.services import (
     complete_multipart_upload,
     complete_uploaded_asset,
     create_multipart_upload,
+    create_internal_batch_zip,
     create_presigned_asset_upload,
     create_user,
     create_task,
     get_task_result_access,
     get_task_result_url,
+    internal_batch_status,
     get_multipart_upload,
     paginated_ledger,
     paginated_tasks,
@@ -234,6 +236,17 @@ def task_result_file(task_id: str, filename: str, db: Session = Depends(get_db),
 @app.get("/api/tasks/{task_id}/result-link")
 def task_result_link(task_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
     return {"url": get_task_result_url(db, user.id, task_id)}
+
+
+@app.get("/api/internal/batches/{batch_id}")
+def internal_batch_status_endpoint(batch_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    return internal_batch_status(db, user.id, batch_id)
+
+
+@app.get("/api/internal/batches/{batch_id}/download")
+def internal_batch_download_endpoint(batch_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    archive = create_internal_batch_zip(db, user.id, batch_id)
+    return FileResponse(archive["path"], media_type="application/zip", filename=archive["filename"], content_disposition_type="attachment")
 
 
 @app.post("/api/provider/callback")

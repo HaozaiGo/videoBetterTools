@@ -1,4 +1,4 @@
-import type { AdminSummary, AdminUser, Asset, AuthUser, BootstrapState, GpuMetrics, PaginatedLedger, PaginatedTasks, Task, UserCreateInput } from "../types";
+import type { AdminSummary, AdminUser, Asset, AuthUser, BootstrapState, GpuMetrics, InternalBatchStatus, PaginatedLedger, PaginatedTasks, Task, UserCreateInput } from "../types";
 
 const tokenKey = "model_plaza_auth_token";
 
@@ -88,6 +88,38 @@ export async function openTaskResult(taskId: string) {
     previewWindow?.close();
     throw error;
   }
+}
+
+export function getInternalBatchStatus(batchId: string) {
+  return request<InternalBatchStatus>(`/api/internal/batches/${encodeURIComponent(batchId)}`);
+}
+
+export async function downloadInternalBatchZip(batchId: string, batchName: string) {
+  const headers = new Headers();
+  const token = getAuthToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  const response = await fetch(`/api/internal/batches/${encodeURIComponent(batchId)}/download`, { headers });
+  if (!response.ok) {
+    let message = "批次结果尚未全部完成";
+    try {
+      const payload = await response.json();
+      message = payload.error || payload.detail || message;
+    } catch {
+      // Keep the default message for non-JSON errors.
+    }
+    throw new Error(message);
+  }
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = `${batchName || "内部批量任务"}.zip`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
 }
 
 export function uploadAsset(input: UploadAssetInput) {

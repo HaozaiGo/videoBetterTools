@@ -1,10 +1,10 @@
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
-import { createTask, getBootstrap, uploadAsset } from "../api/client";
+import { createTask, downloadInternalBatchZip, getBootstrap, getInternalBatchStatus, uploadAsset } from "../api/client";
 import { formatCredits } from "../lib/format";
 import { translateTargetLanguages, type TranslateTargetLanguage } from "../lib/translate-languages";
-import type { BootstrapState, WatermarkRegion } from "../types";
+import type { BootstrapState, InternalBatchStatus, WatermarkRegion } from "../types";
 import { estimateCredits } from "../tool-config.js";
 
 type MediaBox = {
@@ -47,6 +47,10 @@ function formatBytes(bytes: number) {
 
 function fileBatchId(file: File, index: number) {
   return `${file.name}-${file.size}-${file.lastModified}-${index}`;
+}
+
+function createBatchId() {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `batch-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function buildRegion(start: { x: number; y: number }, end: { x: number; y: number }): WatermarkRegion {
@@ -98,6 +102,8 @@ export function InternalBatchWorkflowPage() {
   const [videoUrl, setVideoUrl] = useState("");
   const [mediaBox, setMediaBox] = useState<MediaBox | null>(null);
   const [notice, setNotice] = useState("");
+  const [batchName, setBatchName] = useState("");
+  const [activeBatch, setActiveBatch] = useState<{ id: string; name: string; status?: InternalBatchStatus } | null>(null);
   const [targetLanguage, setTargetLanguage] = useState<TranslateTargetLanguage>("en");
   const [subtitlePlacement, setSubtitlePlacement] = useState<"bottom" | "middle-lower" | "top">("bottom");
   const [keepAudio, setKeepAudio] = useState(true);
@@ -280,16 +286,39 @@ export function InternalBatchWorkflowPage() {
     setNotice(`已为第 ${activeIndex + 1} 个视频框选字幕区域。`);
   };
 
+  const statusMutation = useMutation({
+    mutationFn: getInternalBatchStatus,
+    onSuccess: (status) => {
+      setActiveBatch({ id: status.id, name: status.name, status });
+    },
+    onError: (error) => {
+      setNotice(error instanceof Error ? error.message : "批次状态刷新失败");
+    },
+  });
+
+  const downloadMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeBatch) throw new Error("还没有可下载的批次");
+      await downloadInternalBatchZip(activeBatch.id, activeBatch.name);
+    },
+    onError: (error) => {
+      setNotice(error instanceof Error ? error.message : "批次压缩包下载失败");
+    },
+  });
+
   const submitMutation = useMutation({
     mutationFn: async () => {
       if (!workflowTool) throw new Error("内部工作流暂不可用");
       if (!files.length) throw new Error("请先上传视频");
+      const trimmedBatchName = batchName.trim();
+      if (!trimmedBatchName) throw new Error("请先输入本次批量任务的总名称");
       const firstMissingIndex = files.findIndex((file, index) => !(regionsByFileId[fileBatchId(file, index)] || []).length);
       if (firstMissingIndex >= 0) {
         setActiveIndex(firstMissingIndex);
         setIsSelecting(true);
         throw new Error(`请先为第 ${firstMissingIndex + 1} 个视频框选字幕区域`);
       }
+      const internalBatchId = createBatchId();
       let latestState: BootstrapState | null = null;
       let createdCount = 0;
       let failedCount = 0;
@@ -320,6 +349,8 @@ export function InternalBatchWorkflowPage() {
               textLightThreshold,
               inpaintMethod,
               inpaintRadius,
+              internalBatchId,
+              internalBatchName: trimmedBatchName,
               targetLanguage,
               subtitlePlacement,
               keepAudio,
@@ -341,16 +372,20 @@ export function InternalBatchWorkflowPage() {
       }
 
       if (!createdCount) throw new Error("批量工作流任务创建失败，请查看文件列表。");
-      return { state: latestState, createdCount, failedCount };
+      return { state: latestState, createdCount, failedCount, batchId: internalBatchId, batchName: trimmedBatchName };
     },
     onSuccess: (payload) => {
       if (payload.state) queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state);
+      setActiveBatch({ id: payload.batchId, name: payload.batchName });
+      statusMutation.mutate(payload.batchId);
       setNotice(payload.failedCount ? `已创建 ${payload.createdCount} 个工作流任务，${payload.failedCount} 个失败。` : `已创建 ${payload.createdCount} 个工作流任务。`);
     },
     onError: (error) => {
       setNotice(error instanceof Error ? error.message : "任务创建失败");
     },
   });
+
+  const visibleBatchStatus = statusMutation.data || activeBatch?.status || null;
 
   if (!workflowTool) {
     return (
@@ -530,6 +565,10 @@ export function InternalBatchWorkflowPage() {
         <aside className="quote-panel internal-workflow-panel">
           <span className="quote-kicker">工作流设置</span>
           <h2>去字幕 + 翻译</h2>
+          <label>
+            批次总名称
+            <input value={batchName} onChange={(event) => setBatchName(event.target.value)} placeholder="例如：1688口播素材-0618" />
+          </label>
           <div className="internal-settings-group">
             <strong>去字幕参数</strong>
             <label>
@@ -633,8 +672,30 @@ export function InternalBatchWorkflowPage() {
               </div>
             </dl>
           </div>
-          <button className="primary wide" type="button" disabled={!files.length || available < totalEstimate || submitMutation.isPending} onClick={() => submitMutation.mutate()}>
-            {!files.length ? "先上传视频" : available < totalEstimate ? "余额不足" : submitMutation.isPending ? "正在创建..." : `创建 ${files.length} 个工作流任务`}
+          {activeBatch ? (
+            <div className="internal-batch-download">
+              <strong>{activeBatch.name}</strong>
+              {visibleBatchStatus ? (
+                <span>
+                  已完成 {visibleBatchStatus.succeeded}/{visibleBatchStatus.total}
+                  {visibleBatchStatus.failed ? `，失败 ${visibleBatchStatus.failed}` : ""}
+                  {visibleBatchStatus.cancelled ? `，已取消 ${visibleBatchStatus.cancelled}` : ""}
+                </span>
+              ) : (
+                <span>批次已创建，可刷新状态。</span>
+              )}
+              <div>
+                <button className="ghost compact" type="button" disabled={statusMutation.isPending} onClick={() => statusMutation.mutate(activeBatch.id)}>
+                  {statusMutation.isPending ? "刷新中..." : "刷新状态"}
+                </button>
+                <button className="primary compact" type="button" disabled={!visibleBatchStatus?.downloadReady || downloadMutation.isPending} onClick={() => downloadMutation.mutate()}>
+                  {downloadMutation.isPending ? "准备中..." : "下载压缩包"}
+                </button>
+              </div>
+            </div>
+          ) : null}
+          <button className="primary wide" type="button" disabled={!files.length || !batchName.trim() || available < totalEstimate || submitMutation.isPending} onClick={() => submitMutation.mutate()}>
+            {!files.length ? "先上传视频" : !batchName.trim() ? "先输入批次名称" : available < totalEstimate ? "余额不足" : submitMutation.isPending ? "正在创建..." : `创建 ${files.length} 个工作流任务`}
           </button>
           <p className="fine-print">每个视频会先去除原字幕，再对处理后的视频生成目标语言硬字幕。</p>
         </aside>

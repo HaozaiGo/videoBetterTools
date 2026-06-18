@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient, useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import { Fragment, useState } from "react";
-import { cancelTask, getAuthToken, getBootstrap, getTasksPage } from "../api/client";
+import { cancelTask, downloadInternalBatchZip, getAuthToken, getBootstrap, getInternalBatchStatus, getTasksPage } from "../api/client";
 import { formatCredits, formatDate, statusLabel, taskProgressDisplay } from "../lib/format";
 import { translateLanguageLabel } from "../lib/translate-languages";
 import type { BootstrapState, Task } from "../types";
@@ -58,6 +58,56 @@ function taskResultHref(task: Task) {
     url.searchParams.set("access_token", token);
   }
   return url.href;
+}
+
+function internalBatchInfo(task: Task) {
+  const params = task.params || {};
+  const batchId = typeof params.internalBatchId === "string" ? params.internalBatchId : "";
+  const batchName = typeof params.internalBatchName === "string" ? params.internalBatchName : "内部批量任务";
+  return batchId ? { id: batchId, name: batchName } : null;
+}
+
+function InternalBatchDownloadPanel({ task }: { task: Task }) {
+  const batch = internalBatchInfo(task);
+  const [message, setMessage] = useState("");
+  const batchQuery = useQuery({
+    queryKey: ["internal-batch", batch?.id],
+    queryFn: () => getInternalBatchStatus(batch!.id),
+    enabled: Boolean(batch?.id),
+    refetchInterval: (query) => {
+      const state = query.state.data;
+      return state && !state.downloadReady && !state.failed && !state.cancelled ? 2500 : false;
+    },
+  });
+  const downloadMutation = useMutation({
+    mutationFn: async () => {
+      if (!batch) throw new Error("缺少批次信息");
+      await downloadInternalBatchZip(batch.id, batch.name);
+    },
+    onError: (error) => setMessage(error instanceof Error ? error.message : "下载失败"),
+  });
+
+  if (!batch) return null;
+
+  const status = batchQuery.data;
+  return (
+    <div className="task-batch-download">
+      <div>
+        <span>内部批次</span>
+        <strong>{status?.name || batch.name}</strong>
+        <em>{status ? `已完成 ${status.succeeded}/${status.total}${status.failed ? `，失败 ${status.failed}` : ""}${status.cancelled ? `，已取消 ${status.cancelled}` : ""}` : "正在读取批次状态"}</em>
+        {message ? <em>{message}</em> : null}
+      </div>
+      <div>
+        <button className="ghost compact" type="button" onClick={() => batchQuery.refetch()} disabled={batchQuery.isFetching}>
+          {batchQuery.isFetching ? "刷新中..." : "刷新批次"}
+        </button>
+        <button className="primary compact" type="button" onClick={() => downloadMutation.mutate()} disabled={!status?.downloadReady || downloadMutation.isPending}>
+          {downloadMutation.isPending ? "准备中..." : "下载压缩包"}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 export function TasksPage() {
@@ -244,6 +294,7 @@ export function TasksPage() {
                       <tr className="task-detail-row">
                         <td colSpan={columns.length}>
                           <div className="task-detail-card">
+                            <InternalBatchDownloadPanel task={task} />
                             <div>
                               <span>任务参数</span>
                               <strong>{paramSummary(task)}</strong>

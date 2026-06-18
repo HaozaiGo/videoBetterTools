@@ -1052,6 +1052,33 @@ select:focus {
   font-weight: 950;
 }
 
+.internal-batch-download {
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(21, 183, 158, 0.28);
+  border-radius: 8px;
+  background: var(--soft-green);
+  padding: 12px;
+}
+
+.internal-batch-download > strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.internal-batch-download > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.internal-batch-download > div {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
 .quote-kicker {
   color: var(--accent);
   font-size: 12px;
@@ -1470,6 +1497,29 @@ th {
 
 .task-detail-card strong {
   overflow-wrap: anywhere;
+}
+
+.task-batch-download {
+  grid-column: 1 / -1;
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid rgba(21, 183, 158, 0.28);
+  border-radius: 8px;
+  background: var(--soft-green);
+  padding: 12px;
+}
+
+.task-batch-download > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.task-batch-download > div:last-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .task-error strong,
