@@ -625,7 +625,7 @@ export function InternalBatchWorkflowPage() {
               </div>
               <div>
                 <dt>费用预估</dt>
-                <dd>{formatCredits(totalEstimate)}</dd>
+                <dd>{totalEstimate === 0 ? "内部通道免积分" : formatCredits(totalEstimate)}</dd>
               </div>
               <div>
                 <dt>可用余额</dt>

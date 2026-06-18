@@ -110,9 +110,9 @@ TOOLS = [
         "pricing": {
             "mode": "duration",
             "unitSeconds": 10,
-            "unitCredits": 10,
-            "minimumCredits": 20,
-            "priorityMultiplier": {"standard": 1, "express": 1.4},
+            "unitCredits": 0,
+            "minimumCredits": 0,
+            "priorityMultiplier": {"standard": 1, "express": 1},
         },
         "inputs": ["duration", "targetLanguage", "subtitlePlacement", "keepAudio", "priority"],
     },
