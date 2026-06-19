@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     volcengine_tos_ak: str = ""
     volcengine_tos_sk: str = ""
     volcengine_tos_presign_expires_seconds: int = 3600
+    asset_retention_hours: int = 72
+    cleanup_retention_hours: int = 72
+    cleanup_interval_seconds: int = 3600
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

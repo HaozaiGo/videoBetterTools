@@ -20,6 +20,8 @@ def _is_http_url(value: str) -> bool:
 
 def _final_result(output_key: str, output_path: Path) -> dict:
     stored = storage.save_file(output_key, output_path)
+    if storage.is_remote:
+        storage.delete_local_copy(stored.storage_key)
     return {
         "storage_key": stored.storage_key,
         "url": stored.public_url,
@@ -85,14 +87,17 @@ def process_video_translate(input_storage_key: str, task_id: str, params: dict) 
     params = {**params, "taskId": task_id}
     input_url = storage.presign_download(input_storage_key)
     input_path = storage.local_path(input_storage_key)
+    input_url_for_adapter = input_url if _is_http_url(input_url) else None
     if not input_path.exists():
-        if _is_http_url(input_url):
+        if input_url_for_adapter:
             input_path.parent.mkdir(parents=True, exist_ok=True)
         else:
             try:
                 input_path = storage.ensure_local(input_storage_key)
             except FileNotFoundError as exc:
                 raise VideoProcessingError("Input video file not found.") from exc
+    else:
+        input_url_for_adapter = None
 
     output_key = _output_key(task_id)
     output_path = settings.upload_path / output_key
@@ -101,7 +106,7 @@ def process_video_translate(input_storage_key: str, task_id: str, params: dict) 
         input_path,
         output_path,
         params,
-        input_url=input_url if _is_http_url(input_url) else None,
+        input_url=input_url_for_adapter,
         result_upload=None,
     )
     if remote_result:

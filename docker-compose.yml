@@ -56,6 +56,21 @@ services:
       redis:
         condition: service_started
 
+  cleanup:
+    build:
+      context: ./backend
+    command: sh -c "python -m app.cleanup --loop"
+    environment:
+      DATABASE_URL: postgresql+psycopg://model_plaza:model_plaza@postgres:5432/model_plaza
+      REDIS_URL: redis://redis:6379/0
+      UPLOAD_DIR: /data/uploads
+      AUTH_SECRET: change-me-in-production
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres-data:
   uploads:

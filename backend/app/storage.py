@@ -64,6 +64,22 @@ class LocalStorage:
             shutil.copyfile(local_path, target)
         return StoredObject(storage_key=storage_key, public_url=self.public_url(storage_key), size=target.stat().st_size)
 
+    def delete_local_copy(self, storage_key: str) -> bool:
+        path = self.local_path(storage_key)
+        if not path.exists():
+            return False
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+            return True
+        path.unlink(missing_ok=True)
+        return True
+
+    def remote_exists(self, storage_key: str) -> bool:
+        return self.local_path(storage_key).exists()
+
+    def delete_remote(self, storage_key: str) -> bool:
+        return False
+
     def write_text(self, storage_key: str, content: str) -> None:
         path = self.local_path(storage_key)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -120,6 +136,20 @@ class TosStorage(LocalStorage):
         normalized_key = storage_key.strip("/")
         self.client.put_object_from_file(self.bucket, normalized_key, str(local_path))
         return StoredObject(storage_key=normalized_key, public_url=self.public_url(normalized_key), size=local_path.stat().st_size)
+
+    def remote_exists(self, storage_key: str) -> bool:
+        try:
+            self.client.head_object(self.bucket, storage_key.strip("/"))
+        except Exception:
+            return False
+        return True
+
+    def delete_remote(self, storage_key: str) -> bool:
+        try:
+            self.client.delete_object(self.bucket, storage_key.strip("/"))
+        except Exception:
+            return False
+        return True
 
     def write_text(self, storage_key: str, content: str) -> None:
         super().write_text(storage_key, content)

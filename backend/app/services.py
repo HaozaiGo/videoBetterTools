@@ -25,6 +25,10 @@ def now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def asset_expires_at() -> datetime:
+    return now() + timedelta(hours=settings.asset_retention_hours)
+
+
 def public_url(storage_key: str) -> str:
     return storage.public_url(storage_key)
 
@@ -398,7 +402,7 @@ async def save_upload(db: Session, user_id: str, file: UploadFile, kind: str, du
         url=public_url(storage_key),
         size_bytes=len(content),
         duration_seconds=duration_seconds,
-        expires_at=now() + timedelta(days=7),
+        expires_at=asset_expires_at(),
     )
     db.add(asset)
     db.commit()
@@ -442,7 +446,7 @@ def complete_uploaded_asset(
         url=public_url(normalized_key),
         size_bytes=max(0, size_bytes),
         duration_seconds=duration_seconds,
-        expires_at=now() + timedelta(days=7),
+        expires_at=asset_expires_at(),
     )
     db.add(asset)
     db.commit()
@@ -602,7 +606,7 @@ def complete_multipart_upload(db: Session, user_id: str, upload_id: str) -> Asse
         url=stored.public_url,
         size_bytes=stored.size,
         duration_seconds=int(manifest["durationSeconds"]),
-        expires_at=now() + timedelta(days=7),
+        expires_at=asset_expires_at(),
     )
     db.add(asset)
     db.commit()
@@ -749,7 +753,7 @@ def provider_callback(
             storage_key=storage_key,
             url=result_url,
             size_bytes=output_size_bytes or 0,
-            expires_at=now() + timedelta(days=7),
+            expires_at=asset_expires_at(),
         )
         if output_storage_key is None:
             storage.write_text(output_asset.storage_key, f"任务 {task.id} 已完成\n")

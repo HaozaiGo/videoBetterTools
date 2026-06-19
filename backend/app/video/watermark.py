@@ -204,6 +204,8 @@ def _adapter_name(params: dict[str, Any]) -> str:
 
 def _final_result(output_key: str, output_path: Path) -> dict:
     stored = storage.save_file(output_key, output_path)
+    if storage.is_remote:
+        storage.delete_local_copy(stored.storage_key)
     return {
         "storage_key": stored.storage_key,
         "url": stored.public_url,
@@ -423,14 +425,17 @@ def process_masked_video_removal(input_storage_key: str, task_id: str, params: d
     input_url = storage.presign_download(input_storage_key)
     adapter = _adapter_name(params)
     input_path = storage.local_path(input_storage_key)
+    input_url_for_adapter = input_url if _is_http_url(input_url) else None
     if not input_path.exists():
-        if adapter in {"propainter", "e2fgvi"} and _is_http_url(input_url):
+        if adapter in {"propainter", "e2fgvi"} and input_url_for_adapter:
             input_path.parent.mkdir(parents=True, exist_ok=True)
         else:
             try:
                 input_path = storage.ensure_local(input_storage_key)
             except FileNotFoundError as exc:
                 raise VideoProcessingError("Input video file not found.") from exc
+    else:
+        input_url_for_adapter = None
 
     regions = params.get("regions") or []
     if not regions:
@@ -444,7 +449,7 @@ def process_masked_video_removal(input_storage_key: str, task_id: str, params: d
         input_path,
         output_path,
         params,
-        input_url=input_url if _is_http_url(input_url) else None,
+        input_url=input_url_for_adapter,
         result_upload=None,
     )
     if remote_result:
