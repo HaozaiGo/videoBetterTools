@@ -44,6 +44,7 @@ services:
     gpus: all
     environment:
       PYTHONUNBUFFERED: "1"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
       PATH: "/data1/conda/miniconda3/envs/video-inpaint/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
       HOME: "/shared/home"
       HF_HOME: "/shared/cache/huggingface"

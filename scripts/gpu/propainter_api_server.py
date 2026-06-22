@@ -114,6 +114,60 @@ def _parse_gpu_csv(output: str) -> list[dict]:
     return rows
 
 
+def _empty_gpu_metric(gpu_device: str, running_by_gpu: dict[str, int]) -> dict:
+    return {
+        "index": gpu_device,
+        "name": "GPU metrics unavailable",
+        "utilizationGpuPercent": 0,
+        "utilizationMemoryPercent": 0,
+        "memoryUsedMiB": 0,
+        "memoryTotalMiB": 0,
+        "temperatureGpu": 0,
+        "powerDrawW": 0,
+        "workerSlotsUsed": running_by_gpu.get(gpu_device, 0),
+        "workerSlotsTotal": GPU_WORKERS_PER_DEVICE,
+    }
+
+
+def _attach_worker_slots(gpus: list[dict], running_by_gpu: dict[str, int]) -> list[dict]:
+    for gpu in gpus:
+        gpu["workerSlotsUsed"] = running_by_gpu.get(str(gpu["index"]), 0)
+        gpu["workerSlotsTotal"] = GPU_WORKERS_PER_DEVICE
+    return gpus
+
+
+def _query_configured_gpu_metrics(running_by_gpu: dict[str, int]) -> tuple[list[dict], str]:
+    query_args = [
+        "--query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw",
+        "--format=csv",
+    ]
+    try:
+        query_output = _run_command(["nvidia-smi", f"--id={','.join(GPU_DEVICE_IDS)}", *query_args], timeout=5)
+        return _attach_worker_slots(_parse_gpu_csv(query_output), running_by_gpu), ""
+    except Exception as exc:
+        configured_error = str(exc)
+
+    try:
+        query_output = _run_command(["nvidia-smi", *query_args], timeout=5)
+        visible_gpus = _parse_gpu_csv(query_output)
+    except Exception as exc:
+        error = f"{configured_error}; fallback without --id failed: {exc}"
+        return [_empty_gpu_metric(gpu_device, running_by_gpu) for gpu_device in GPU_DEVICE_IDS], error
+
+    if len(visible_gpus) == len(GPU_DEVICE_IDS):
+        remapped = []
+        for gpu_device, metric in zip(GPU_DEVICE_IDS, visible_gpus):
+            remapped.append({**metric, "index": gpu_device})
+        return _attach_worker_slots(remapped, running_by_gpu), configured_error
+
+    visible_by_index = {str(metric.get("index", "")): metric for metric in visible_gpus}
+    metrics = []
+    for gpu_device in GPU_DEVICE_IDS:
+        metric = visible_by_index.get(gpu_device)
+        metrics.append({**metric} if metric else _empty_gpu_metric(gpu_device, running_by_gpu))
+    return _attach_worker_slots(metrics, running_by_gpu), configured_error
+
+
 def _number_from_smi_value(value: str) -> float:
     cleaned = value.replace("%", "").replace("MiB", "").replace("W", "").strip()
     try:
@@ -157,19 +211,7 @@ def _gpu_metrics() -> dict:
     with running_processes_lock:
         for gpu_device in running_gpu_devices.values():
             running_by_gpu[gpu_device] = running_by_gpu.get(gpu_device, 0) + 1
-    query_output = _run_command(
-        [
-            "nvidia-smi",
-            f"--id={','.join(GPU_DEVICE_IDS)}",
-            "--query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw",
-            "--format=csv",
-        ],
-        timeout=5,
-    )
-    gpus = _parse_gpu_csv(query_output)
-    for gpu in gpus:
-        gpu["workerSlotsUsed"] = running_by_gpu.get(str(gpu["index"]), 0)
-        gpu["workerSlotsTotal"] = GPU_WORKERS_PER_DEVICE
+    gpus, gpu_metrics_error = _query_configured_gpu_metrics(running_by_gpu)
     return {
         "ok": True,
         "timestamp": time.time(),
@@ -179,6 +221,7 @@ def _gpu_metrics() -> dict:
         "runningByGpu": running_by_gpu,
         "gpus": gpus,
         "runningJobs": _running_jobs_snapshot(),
+        **({"gpuMetricsError": gpu_metrics_error} if gpu_metrics_error else {}),
     }
 
 
