@@ -21,7 +21,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PRODUCTION_DEPLOY_HOST: 35.241.99.69
+  PRODUCTION_DEPLOY_HOST: 35.241.105.124
   RELEASE_DEPLOY_HOST: 101.96.226.213
   DEPLOY_USER: huangguojie
   DEPLOY_PORT: "22"
