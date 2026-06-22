@@ -271,32 +271,40 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
     zip_dir = settings.upload_path / "internal-batch-zips"
     zip_dir.mkdir(parents=True, exist_ok=True)
     zip_path = zip_dir / f"{safe_batch_name}-{batch_id[:8]}.zip"
+    if zip_path.exists() and zip_path.is_file() and zip_path.stat().st_size > 0:
+        return {"path": zip_path, "filename": f"{safe_batch_name}.zip"}
 
     used_names: set[str] = set()
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for index, task in enumerate(tasks, start=1):
-            preview_path = task_preview_path(task)
-            if preview_path.exists() and preview_path.is_file():
-                source_path = preview_path
-            elif task.output_asset_id:
-                output_asset = db.get(Asset, task.output_asset_id)
-                if output_asset is None:
-                    raise HTTPException(status_code=404, detail=f"task result not found: {task.id}")
-                try:
-                    source_path = storage.ensure_local(output_asset.storage_key)
-                except FileNotFoundError as exc:
-                    raise HTTPException(status_code=404, detail=f"task result not ready: {task.id}") from exc
-            else:
-                raise HTTPException(status_code=404, detail=f"task result not ready: {task.id}")
+    temp_zip_path = zip_path.with_suffix(f".{uuid4().hex}.tmp")
+    try:
+        with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for index, task in enumerate(tasks, start=1):
+                preview_path = task_preview_path(task)
+                if preview_path.exists() and preview_path.is_file():
+                    source_path = preview_path
+                elif task.output_asset_id:
+                    output_asset = db.get(Asset, task.output_asset_id)
+                    if output_asset is None:
+                        raise HTTPException(status_code=404, detail=f"task result not found: {task.id}")
+                    try:
+                        source_path = storage.ensure_local(output_asset.storage_key)
+                    except FileNotFoundError as exc:
+                        raise HTTPException(status_code=404, detail=f"task result not ready: {task.id}") from exc
+                else:
+                    raise HTTPException(status_code=404, detail=f"task result not ready: {task.id}")
 
-            base_name = safe_storage_name(task_result_download_name(task))
-            zip_name = f"{index:03d}-{base_name}"
-            duplicate_index = 1
-            while zip_name in used_names:
-                zip_name = f"{index:03d}-{task.id[:8]}-{duplicate_index}-{base_name}"
-                duplicate_index += 1
-            used_names.add(zip_name)
-            archive.write(source_path, zip_name)
+                base_name = safe_storage_name(task_result_download_name(task))
+                zip_name = f"{index:03d}-{base_name}"
+                duplicate_index = 1
+                while zip_name in used_names:
+                    zip_name = f"{index:03d}-{task.id[:8]}-{duplicate_index}-{base_name}"
+                    duplicate_index += 1
+                used_names.add(zip_name)
+                archive.write(source_path, zip_name)
+        temp_zip_path.replace(zip_path)
+    finally:
+        if temp_zip_path.exists():
+            temp_zip_path.unlink()
 
     return {"path": zip_path, "filename": f"{safe_batch_name}.zip"}
 
