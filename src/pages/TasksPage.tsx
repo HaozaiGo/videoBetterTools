@@ -77,7 +77,7 @@ function InternalBatchDownloadPanel({ task }: { task: Task }) {
     enabled: Boolean(batch?.id),
     refetchInterval: (query) => {
       const state = query.state.data;
-      return state && !state.downloadReady && !state.failed && !state.cancelled ? 2500 : false;
+      return state?.processing ? 2500 : false;
     },
   });
   const downloadMutation = useMutation({

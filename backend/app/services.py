@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import shutil
 from urllib.parse import quote
@@ -256,7 +257,7 @@ def internal_batch_status(db: Session, user_id: str, batch_id: str) -> dict:
         "failed": failed,
         "cancelled": cancelled,
         "processing": processing,
-        "downloadReady": total > 0 and succeeded == total,
+        "downloadReady": succeeded > 0,
         "tasks": [task_to_dict(task) for task in tasks],
     }
 
@@ -264,13 +265,14 @@ def internal_batch_status(db: Session, user_id: str, batch_id: str) -> dict:
 def create_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
     batch = internal_batch_status(db, user_id, batch_id)
     if not batch["downloadReady"]:
-        raise HTTPException(status_code=409, detail=f"batch not ready: {batch['succeeded']}/{batch['total']} succeeded")
+        raise HTTPException(status_code=409, detail=f"batch has no succeeded tasks: {batch['succeeded']}/{batch['total']} succeeded")
 
     tasks = _internal_batch_tasks(db, user_id, batch_id)
+    succeeded_tasks = [task for task in tasks if task.status == "succeeded"]
     safe_batch_name = safe_storage_name(str(batch["name"]) or batch_id).removesuffix(".zip")
     zip_dir = settings.upload_path / "internal-batch-zips"
     zip_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = zip_dir / f"{safe_batch_name}-{batch_id[:8]}.zip"
+    zip_path = zip_dir / f"{safe_batch_name}-{batch_id[:8]}-{batch['succeeded']}-of-{batch['total']}.zip"
     if zip_path.exists() and zip_path.is_file() and zip_path.stat().st_size > 0:
         return {"path": zip_path, "filename": f"{safe_batch_name}.zip"}
 
@@ -278,7 +280,35 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
     temp_zip_path = zip_path.with_suffix(f".{uuid4().hex}.tmp")
     try:
         with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for index, task in enumerate(tasks, start=1):
+            archive.writestr(
+                "_batch-summary.json",
+                json.dumps(
+                    {
+                        "id": batch["id"],
+                        "name": batch["name"],
+                        "total": batch["total"],
+                        "succeeded": batch["succeeded"],
+                        "failed": batch["failed"],
+                        "cancelled": batch["cancelled"],
+                        "processing": batch["processing"],
+                        "includedTaskIds": [task.id for task in succeeded_tasks],
+                        "skippedTasks": [
+                            {
+                                "id": task.id,
+                                "status": task.status,
+                                "errorCode": task.error_code,
+                                "progressPercent": task.progress_percent,
+                                "progressStage": task.progress_stage,
+                            }
+                            for task in tasks
+                            if task.status != "succeeded"
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+            for index, task in enumerate(succeeded_tasks, start=1):
                 preview_path = task_preview_path(task)
                 if preview_path.exists() and preview_path.is_file():
                     source_path = preview_path
