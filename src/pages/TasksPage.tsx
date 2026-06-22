@@ -2,7 +2,7 @@ import { useMutation, useQueryClient, useQuery, useSuspenseQuery } from "@tansta
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import { Fragment, useState } from "react";
 import type { FormEvent } from "react";
-import { cancelTask, downloadInternalBatchZip, getAuthToken, getBootstrap, getInternalBatchStatus, getTasksPage } from "../api/client";
+import { cancelTask, downloadInternalBatchZip, getAuthToken, getBootstrap, getInternalBatchStatus, getTasksPage, retryInternalBatchTasks } from "../api/client";
 import { formatCredits, formatDate, statusLabel, taskProgressDisplay } from "../lib/format";
 import { translateLanguageLabel } from "../lib/translate-languages";
 import type { BootstrapState, Task } from "../types";
@@ -69,6 +69,7 @@ function internalBatchInfo(task: Task) {
 }
 
 function InternalBatchDownloadPanel({ task }: { task: Task }) {
+  const queryClient = useQueryClient();
   const batch = internalBatchInfo(task);
   const [message, setMessage] = useState("");
   const batchQuery = useQuery({
@@ -87,10 +88,24 @@ function InternalBatchDownloadPanel({ task }: { task: Task }) {
     },
     onError: (error) => setMessage(error instanceof Error ? error.message : "下载失败"),
   });
+  const retryMutation = useMutation({
+    mutationFn: async () => {
+      if (!batch) throw new Error("缺少批次信息");
+      return retryInternalBatchTasks(batch.id);
+    },
+    onSuccess: (payload) => {
+      setMessage(`已重新生成 ${payload.retried} 个任务`);
+      queryClient.setQueryData(["internal-batch", batch?.id], payload.batch);
+      queryClient.setQueryData(["bootstrap"], payload.state);
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+    onError: (error) => setMessage(error instanceof Error ? error.message : "重新生成失败"),
+  });
 
   if (!batch) return null;
 
   const status = batchQuery.data;
+  const retryableCount = (status?.failed || 0) + (status?.cancelled || 0);
   return (
     <div className="task-batch-download">
       <div>
@@ -102,6 +117,9 @@ function InternalBatchDownloadPanel({ task }: { task: Task }) {
       <div>
         <button className="ghost compact" type="button" onClick={() => batchQuery.refetch()} disabled={batchQuery.isFetching}>
           {batchQuery.isFetching ? "刷新中..." : "刷新批次"}
+        </button>
+        <button className="ghost compact" type="button" onClick={() => retryMutation.mutate()} disabled={!retryableCount || retryMutation.isPending}>
+          {retryMutation.isPending ? "生成中..." : "重新生成失败项"}
         </button>
         <button className="primary compact" type="button" onClick={() => downloadMutation.mutate()} disabled={!status?.downloadReady || downloadMutation.isPending}>
           {downloadMutation.isPending ? "准备中..." : "下载压缩包"}

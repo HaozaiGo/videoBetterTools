@@ -339,6 +339,59 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
     return {"path": zip_path, "filename": f"{safe_batch_name}.zip"}
 
 
+def retry_internal_batch_tasks(db: Session, user_id: str, batch_id: str) -> dict:
+    tasks = _internal_batch_tasks(db, user_id, batch_id)
+    if not tasks:
+        raise HTTPException(status_code=404, detail="batch not found")
+
+    retryable_tasks = [task for task in tasks if task.status in {"failed", "cancelled"}]
+    if not retryable_tasks:
+        raise HTTPException(status_code=409, detail="batch has no failed or cancelled tasks to retry")
+
+    wallet = get_wallet(db, user_id, lock=True)
+    retry_specs: list[tuple[Task, dict, int]] = []
+    total_estimate = 0
+    for task in retryable_tasks:
+        tool = get_tool(task.tool_slug)
+        if tool is None or tool["status"] != "online":
+            raise HTTPException(status_code=400, detail=f"tool is not available: {task.tool_slug}")
+        input_asset = db.get(Asset, task.input_asset_id)
+        if input_asset is None or input_asset.user_id != user_id:
+            raise HTTPException(status_code=400, detail=f"missing uploaded asset for task: {task.id}")
+        params = dict(task.params or {})
+        estimate = estimate_credits(tool, {**params, "duration": params.get("duration") or input_asset.duration_seconds or 30})
+        retry_specs.append((task, tool, estimate))
+        total_estimate += estimate
+
+    if wallet.credits - wallet.frozen_credits < total_estimate:
+        raise HTTPException(status_code=402, detail="insufficient credits")
+
+    retried_ids: list[str] = []
+    for task, tool, estimate in retry_specs:
+        task.status = "queued"
+        task.provider_job_id = f"mock_{uuid4()}"
+        task.estimated_credits = estimate
+        task.frozen_credits = estimate
+        task.charged_credits = 0
+        task.error_code = None
+        task.progress_percent = 0
+        task.progress_stage = "等待 worker 领取任务"
+        task.output_asset_id = None
+        task.output_url = ""
+        task.completed_at = None
+        wallet.frozen_credits += estimate
+        add_ledger(db, user_id, "freeze", 0, f"{tool['name']} 重新生成，冻结 {estimate} 积分", task.id)
+        cancel_marker = settings.upload_path / f"{task.id}.cancel"
+        cancel_marker.unlink(missing_ok=True)
+        retried_ids.append(task.id)
+
+    db.commit()
+    for task_id in retried_ids:
+        enqueue_provider_job(task_id)
+
+    return {"retried": len(retried_ids), "taskIds": retried_ids, "batch": internal_batch_status(db, user_id, batch_id)}
+
+
 def ledger_to_dict(entry: WalletLedger) -> dict:
     return {
         "id": entry.id,

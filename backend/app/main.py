@@ -30,6 +30,7 @@ from app.services import (
     paginated_tasks,
     provider_callback,
     recharge_wallet,
+    retry_internal_batch_tasks,
     save_upload,
     save_multipart_chunk,
     serialize_bootstrap,
@@ -247,6 +248,12 @@ def internal_batch_status_endpoint(batch_id: str, db: Session = Depends(get_db),
 def internal_batch_download_endpoint(batch_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     archive = create_internal_batch_zip(db, user.id, batch_id)
     return FileResponse(archive["path"], media_type="application/zip", filename=archive["filename"], content_disposition_type="attachment")
+
+
+@app.post("/api/internal/batches/{batch_id}/retry")
+def internal_batch_retry_endpoint(batch_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    result = retry_internal_batch_tasks(db, user.id, batch_id)
+    return {**result, "state": serialize_bootstrap(db, user.id)}
 
 
 @app.post("/api/provider/callback")

@@ -1,7 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
-import { createTask, downloadInternalBatchZip, getBootstrap, getInternalBatchStatus, uploadAsset } from "../api/client";
+import { createTask, downloadInternalBatchZip, getBootstrap, getInternalBatchStatus, retryInternalBatchTasks, uploadAsset } from "../api/client";
 import { formatCredits } from "../lib/format";
 import { translateTargetLanguages, type TranslateTargetLanguage } from "../lib/translate-languages";
 import type { BootstrapState, InternalBatchStatus, WatermarkRegion } from "../types";
@@ -305,6 +305,21 @@ export function InternalBatchWorkflowPage() {
       setNotice(error instanceof Error ? error.message : "批次压缩包下载失败");
     },
   });
+  const retryMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeBatch) throw new Error("还没有可重新生成的批次");
+      return retryInternalBatchTasks(activeBatch.id);
+    },
+    onSuccess: (payload) => {
+      queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state);
+      setActiveBatch({ id: payload.batch.id, name: payload.batch.name, status: payload.batch });
+      statusMutation.reset();
+      setNotice(`已重新生成 ${payload.retried} 个失败/取消任务。`);
+    },
+    onError: (error) => {
+      setNotice(error instanceof Error ? error.message : "重新生成失败");
+    },
+  });
 
   const submitMutation = useMutation({
     mutationFn: async () => {
@@ -386,6 +401,7 @@ export function InternalBatchWorkflowPage() {
   });
 
   const visibleBatchStatus = statusMutation.data || activeBatch?.status || null;
+  const retryableBatchCount = (visibleBatchStatus?.failed || 0) + (visibleBatchStatus?.cancelled || 0);
 
   if (!workflowTool) {
     return (
@@ -687,6 +703,9 @@ export function InternalBatchWorkflowPage() {
               <div>
                 <button className="ghost compact" type="button" disabled={statusMutation.isPending} onClick={() => statusMutation.mutate(activeBatch.id)}>
                   {statusMutation.isPending ? "刷新中..." : "刷新状态"}
+                </button>
+                <button className="ghost compact" type="button" disabled={!retryableBatchCount || retryMutation.isPending} onClick={() => retryMutation.mutate()}>
+                  {retryMutation.isPending ? "生成中..." : "重新生成失败项"}
                 </button>
                 <button className="primary compact" type="button" disabled={!visibleBatchStatus?.downloadReady || downloadMutation.isPending} onClick={() => downloadMutation.mutate()}>
                   {downloadMutation.isPending ? "准备中..." : "下载压缩包"}

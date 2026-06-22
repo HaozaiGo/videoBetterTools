@@ -94,6 +94,12 @@ export function getInternalBatchStatus(batchId: string) {
   return request<InternalBatchStatus>(`/api/internal/batches/${encodeURIComponent(batchId)}`);
 }
 
+export function retryInternalBatchTasks(batchId: string) {
+  return request<{ retried: number; taskIds: string[]; batch: InternalBatchStatus; state: BootstrapState }>(`/api/internal/batches/${encodeURIComponent(batchId)}/retry`, {
+    method: "POST",
+  });
+}
+
 export async function downloadInternalBatchZip(batchId: string, batchName: string) {
   const url = new URL(`/api/internal/batches/${encodeURIComponent(batchId)}/download`, window.location.origin);
   const token = getAuthToken();
