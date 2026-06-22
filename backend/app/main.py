@@ -297,8 +297,13 @@ def admin_recharge_user_endpoint(user_id: str, payload: UserRecharge, db: Sessio
 
 
 @app.get("/api/admin/tasks")
-def admin_tasks_endpoint(db: Session = Depends(get_db), _admin: User = Depends(admin_user)) -> list[dict]:
-    return admin_tasks(db)
+def admin_tasks_endpoint(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, alias="perPage", ge=1, le=100),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> dict:
+    return admin_tasks(db, page=page, per_page=per_page)
 
 
 @app.get("/api/admin/gpu")

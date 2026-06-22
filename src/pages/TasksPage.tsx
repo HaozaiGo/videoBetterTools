@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient, useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import { Fragment, useState } from "react";
+import type { FormEvent } from "react";
 import { cancelTask, downloadInternalBatchZip, getAuthToken, getBootstrap, getInternalBatchStatus, getTasksPage } from "../api/client";
 import { formatCredits, formatDate, statusLabel, taskProgressDisplay } from "../lib/format";
 import { translateLanguageLabel } from "../lib/translate-languages";
@@ -115,6 +116,7 @@ export function TasksPage() {
   const { data } = useSuspenseQuery({ queryKey: ["bootstrap"], queryFn: getBootstrap });
   const [expandedTaskIds, setExpandedTaskIds] = useState<Set<string>>(() => new Set());
   const [currentPage, setCurrentPage] = useState(1);
+  const [pageInput, setPageInput] = useState("1");
   const tasksQuery = useQuery({
     queryKey: ["tasks", currentPage],
     queryFn: () => getTasksPage(currentPage, pageSize),
@@ -125,6 +127,23 @@ export function TasksPage() {
     },
   });
   const taskPage = tasksQuery.data || { items: data.tasks, page: data.taskPage };
+  const totalPages = Math.max(1, taskPage.page.totalPages);
+
+  const goToPage = (page: number) => {
+    const nextPage = Math.max(1, Math.min(totalPages, page));
+    setCurrentPage(nextPage);
+    setPageInput(String(nextPage));
+  };
+
+  const handlePageJump = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const nextPage = Number.parseInt(pageInput, 10);
+    if (Number.isNaN(nextPage)) {
+      setPageInput(String(currentPage));
+      return;
+    }
+    goToPage(nextPage);
+  };
 
   const cancelMutation = useMutation({
     mutationFn: cancelTask,
@@ -326,11 +345,28 @@ export function TasksPage() {
           <span>
             第 {taskPage.page.page} / {taskPage.page.totalPages} 页，共 {taskPage.page.total} 条
           </span>
-          <div>
-            <button className="ghost compact" onClick={() => setCurrentPage((page) => Math.max(1, page - 1))} disabled={!taskPage.page.hasPrevious || tasksQuery.isFetching}>
+          <form className="pagination-jump" onSubmit={handlePageJump}>
+            <label htmlFor="task-page-jump">跳至</label>
+            <input
+              id="task-page-jump"
+              type="number"
+              min="1"
+              max={totalPages}
+              inputMode="numeric"
+              value={pageInput}
+              onChange={(event) => setPageInput(event.target.value)}
+              disabled={tasksQuery.isFetching}
+            />
+            <span>页</span>
+            <button className="ghost compact" type="submit" disabled={tasksQuery.isFetching}>
+              跳转
+            </button>
+          </form>
+          <div className="pagination-actions">
+            <button className="ghost compact" onClick={() => goToPage(currentPage - 1)} disabled={!taskPage.page.hasPrevious || tasksQuery.isFetching}>
               上一页
             </button>
-            <button className="ghost compact" onClick={() => setCurrentPage((page) => page + 1)} disabled={!taskPage.page.hasNext || tasksQuery.isFetching}>
+            <button className="ghost compact" onClick={() => goToPage(currentPage + 1)} disabled={!taskPage.page.hasNext || tasksQuery.isFetching}>
               下一页
             </button>
           </div>

@@ -1318,10 +1318,33 @@ dd {
   font-weight: 850;
 }
 
-.pagination-bar div {
+.pagination-bar > div,
+.pagination-actions,
+.pagination-jump {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.pagination-jump {
+  margin-left: auto;
+}
+
+.pagination-jump label,
+.pagination-jump span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.pagination-jump input {
+  width: 72px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 850;
 }
 
 table {

@@ -5,11 +5,11 @@ import urllib.request
 from urllib.parse import urljoin, urlparse
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
 from app.models import Asset, Task, User, Wallet, WalletLedger
-from app.services import ledger_to_dict, task_to_dict
+from app.services import normalize_pagination, page_info, ledger_to_dict, task_to_dict
 
 
 def admin_summary(db: Session) -> dict:
@@ -44,9 +44,17 @@ def admin_users(db: Session) -> list[dict]:
     ]
 
 
-def admin_tasks(db: Session) -> list[dict]:
-    tasks = db.execute(select(Task).order_by(Task.created_at.desc()).limit(200)).scalars()
-    return [task_to_dict(task) for task in tasks]
+def admin_tasks(db: Session, page: int = 1, per_page: int = 50) -> dict:
+    page, per_page = normalize_pagination(page, per_page)
+    total = db.execute(select(func.count()).select_from(Task)).scalar_one()
+    tasks = db.execute(
+        select(Task)
+        .options(selectinload(Task.input_asset))
+        .order_by(Task.created_at.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    ).scalars()
+    return {"items": [task_to_dict(task) for task in tasks], "page": page_info(total, page, per_page)}
 
 
 def admin_ledger(db: Session) -> list[dict]:

@@ -467,8 +467,9 @@ export function getAdminUsers() {
   return request<AdminUser[]>("/api/admin/users");
 }
 
-export function getAdminTasks() {
-  return request<Task[]>("/api/admin/tasks");
+export function getAdminTasks(page = 1, perPage = 50) {
+  const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
+  return request<PaginatedTasks>(`/api/admin/tasks?${params.toString()}`);
 }
 
 export function getAdminGpuMetrics() {
