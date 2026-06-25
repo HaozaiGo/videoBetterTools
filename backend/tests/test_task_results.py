@@ -237,3 +237,72 @@ def test_internal_batch_retry_resets_failed_and_cancelled_tasks(tmp_path, monkey
         assert task.provider_job_id != old_provider_ids[task_id]
         assert task.error_code is None
         assert task.progress_stage == "等待 worker 领取任务"
+
+
+def test_internal_batch_zip_splits_large_batches_into_parts(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(services.settings, "internal_batch_zip_part_max_bytes", 25)
+
+    batch_id = "batch-split"
+    batch_name = "split batch"
+
+    with Session(engine) as db:
+        user = User(id="user-split", email="split@example.com", name="Split User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+
+        for index in range(1, 4):
+            asset = Asset(
+                id=f"split-asset-{index}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"split-{index}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"split-input-{index}.mp4",
+                url=f"/uploads/split-input-{index}.mp4",
+                size_bytes=20,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=f"split-task-{index}",
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=asset.id,
+                output_asset_id=None,
+                status="succeeded",
+                params={"internalBatchId": batch_id, "internalBatchName": batch_name},
+                estimated_credits=0,
+                frozen_credits=0,
+                charged_credits=0,
+                provider="mock",
+                provider_job_id=f"split-provider-{index}",
+                output_url="",
+                progress_percent=100,
+                progress_stage="处理完成",
+            )
+            db.add_all([asset, task])
+            db.flush()
+            (tmp_path / services.task_result_output_key(task)).write_bytes(bytes([index]) * 20)
+        db.commit()
+
+        archive = create_internal_batch_zip(db, user.id, batch_id)
+
+    assert archive["partCount"] == 3
+    assert len(archive["parts"]) == 3
+    assert [part["filename"] for part in archive["parts"]] == [
+        "split batch-part01-of03.zip",
+        "split batch-part02-of03.zip",
+        "split batch-part03-of03.zip",
+    ]
+
+    for index, part in enumerate(archive["parts"], start=1):
+        with zipfile.ZipFile(part["path"]) as zip_file:
+            summary = json.loads(zip_file.read("_batch-summary.json"))
+            video_names = [name for name in zip_file.namelist() if name.endswith(".mp4")]
+        assert summary["partIndex"] == index
+        assert summary["partCount"] == 3
+        assert summary["includedTaskIds"] == [f"split-task-{index}"]
+        assert len(video_names) == 1

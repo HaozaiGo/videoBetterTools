@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import Depends, FastAPI, File, Form, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -245,9 +245,31 @@ def internal_batch_status_endpoint(batch_id: str, db: Session = Depends(get_db),
 
 
 @app.get("/api/internal/batches/{batch_id}/download")
-def internal_batch_download_endpoint(batch_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+def internal_batch_download_endpoint(batch_id: str, part: int = Query(1, ge=1), db: Session = Depends(get_db), user: User = Depends(current_user)):
     archive = create_internal_batch_zip(db, user.id, batch_id)
-    return FileResponse(archive["path"], media_type="application/zip", filename=archive["filename"], content_disposition_type="attachment")
+    parts = archive.get("parts") or [archive]
+    if part > len(parts):
+        raise HTTPException(status_code=404, detail="download part not found")
+    selected = parts[part - 1]
+    return FileResponse(selected["path"], media_type="application/zip", filename=selected["filename"], content_disposition_type="attachment")
+
+
+@app.post("/api/internal/batches/{batch_id}/download-manifest")
+def internal_batch_download_manifest_endpoint(batch_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    archive = create_internal_batch_zip(db, user.id, batch_id)
+    parts = archive.get("parts") or [archive]
+    return {
+        "partCount": len(parts),
+        "parts": [
+            {
+                "index": part["index"],
+                "filename": part["filename"],
+                "sizeBytes": part["sizeBytes"],
+                "url": f"/api/internal/batches/{batch_id}/download?part={part['index']}",
+            }
+            for part in parts
+        ],
+    }
 
 
 @app.post("/api/internal/batches/{batch_id}/retry")

@@ -100,18 +100,38 @@ export function retryInternalBatchTasks(batchId: string) {
   });
 }
 
+type InternalBatchDownloadManifest = {
+  partCount: number;
+  parts: Array<{
+    index: number;
+    filename: string;
+    sizeBytes: number;
+    url: string;
+  }>;
+};
+
 export async function downloadInternalBatchZip(batchId: string, batchName: string) {
-  const url = new URL(`/api/internal/batches/${encodeURIComponent(batchId)}/download`, window.location.origin);
+  const manifest = await request<InternalBatchDownloadManifest>(`/api/internal/batches/${encodeURIComponent(batchId)}/download-manifest`, { method: "POST" });
   const token = getAuthToken();
-  if (token) {
-    url.searchParams.set("access_token", token);
+  const parts = manifest.parts.length
+    ? manifest.parts
+    : [{ index: 1, filename: `${batchName || "内部批量任务"}.zip`, sizeBytes: 0, url: `/api/internal/batches/${encodeURIComponent(batchId)}/download` }];
+
+  for (const [partIndex, part] of parts.entries()) {
+    const url = new URL(part.url, window.location.origin);
+    if (token) {
+      url.searchParams.set("access_token", token);
+    }
+    const link = document.createElement("a");
+    link.href = url.href;
+    link.download = part.filename || `${batchName || "内部批量任务"}.zip`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    if (partIndex < parts.length - 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
   }
-  const link = document.createElement("a");
-  link.href = url.href;
-  link.download = `${batchName || "内部批量任务"}.zip`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
 }
 
 export function uploadAsset(input: UploadAssetInput) {

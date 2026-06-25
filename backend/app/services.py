@@ -20,6 +20,7 @@ from app.tool_config import CATEGORIES, TOOLS, get_tool
 
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 100
+INTERNAL_BATCH_ZIP_SUMMARY_NAME = "_batch-summary.json"
 
 
 def now() -> datetime:
@@ -272,71 +273,95 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
     safe_batch_name = safe_storage_name(str(batch["name"]) or batch_id).removesuffix(".zip")
     zip_dir = settings.upload_path / "internal-batch-zips"
     zip_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = zip_dir / f"{safe_batch_name}-{batch_id[:8]}-{batch['succeeded']}-of-{batch['total']}.zip"
-    if zip_path.exists() and zip_path.is_file() and zip_path.stat().st_size > 0:
-        return {"path": zip_path, "filename": f"{safe_batch_name}.zip"}
 
     used_names: set[str] = set()
-    temp_zip_path = zip_path.with_suffix(f".{uuid4().hex}.tmp")
-    try:
-        with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr(
-                "_batch-summary.json",
-                json.dumps(
+    entries: list[dict] = []
+    for index, task in enumerate(succeeded_tasks, start=1):
+        preview_path = task_preview_path(task)
+        if preview_path.exists() and preview_path.is_file():
+            source_path = preview_path
+        elif task.output_asset_id:
+            output_asset = db.get(Asset, task.output_asset_id)
+            if output_asset is None:
+                raise HTTPException(status_code=404, detail=f"task result not found: {task.id}")
+            try:
+                source_path = storage.ensure_local(output_asset.storage_key)
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=f"task result not ready: {task.id}") from exc
+        else:
+            raise HTTPException(status_code=404, detail=f"task result not ready: {task.id}")
+
+        base_name = safe_storage_name(task_result_download_name(task))
+        zip_name = f"{index:03d}-{base_name}"
+        duplicate_index = 1
+        while zip_name in used_names:
+            zip_name = f"{index:03d}-{task.id[:8]}-{duplicate_index}-{base_name}"
+            duplicate_index += 1
+        used_names.add(zip_name)
+        entries.append({"task": task, "source_path": source_path, "zip_name": zip_name, "size": source_path.stat().st_size})
+
+    max_part_bytes = max(1, int(settings.internal_batch_zip_part_max_bytes))
+    entry_parts: list[list[dict]] = []
+    current_part: list[dict] = []
+    current_size = 0
+    for entry in entries:
+        entry_size = int(entry["size"])
+        if current_part and current_size + entry_size > max_part_bytes:
+            entry_parts.append(current_part)
+            current_part = []
+            current_size = 0
+        current_part.append(entry)
+        current_size += entry_size
+    if current_part:
+        entry_parts.append(current_part)
+
+    base_zip_stem = f"{safe_batch_name}-{batch_id[:8]}-{batch['succeeded']}-of-{batch['total']}"
+    part_count = max(1, len(entry_parts))
+    parts: list[dict] = []
+
+    for part_index, part_entries in enumerate(entry_parts, start=1):
+        zip_filename = f"{base_zip_stem}.zip" if part_count == 1 else f"{base_zip_stem}-part{part_index:02d}-of{part_count:02d}.zip"
+        zip_path = zip_dir / zip_filename
+        download_filename = f"{safe_batch_name}.zip" if part_count == 1 else f"{safe_batch_name}-part{part_index:02d}-of{part_count:02d}.zip"
+        if not (zip_path.exists() and zip_path.is_file() and zip_path.stat().st_size > 0):
+            summary = {
+                "id": batch["id"],
+                "name": batch["name"],
+                "total": batch["total"],
+                "succeeded": batch["succeeded"],
+                "failed": batch["failed"],
+                "cancelled": batch["cancelled"],
+                "processing": batch["processing"],
+                "partIndex": part_index,
+                "partCount": part_count,
+                "partMaxBytes": max_part_bytes,
+                "includedTaskIds": [entry["task"].id for entry in part_entries],
+                "skippedTasks": [
                     {
-                        "id": batch["id"],
-                        "name": batch["name"],
-                        "total": batch["total"],
-                        "succeeded": batch["succeeded"],
-                        "failed": batch["failed"],
-                        "cancelled": batch["cancelled"],
-                        "processing": batch["processing"],
-                        "includedTaskIds": [task.id for task in succeeded_tasks],
-                        "skippedTasks": [
-                            {
-                                "id": task.id,
-                                "status": task.status,
-                                "errorCode": task.error_code,
-                                "progressPercent": task.progress_percent,
-                                "progressStage": task.progress_stage,
-                            }
-                            for task in tasks
-                            if task.status != "succeeded"
-                        ],
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-            )
-            for index, task in enumerate(succeeded_tasks, start=1):
-                preview_path = task_preview_path(task)
-                if preview_path.exists() and preview_path.is_file():
-                    source_path = preview_path
-                elif task.output_asset_id:
-                    output_asset = db.get(Asset, task.output_asset_id)
-                    if output_asset is None:
-                        raise HTTPException(status_code=404, detail=f"task result not found: {task.id}")
-                    try:
-                        source_path = storage.ensure_local(output_asset.storage_key)
-                    except FileNotFoundError as exc:
-                        raise HTTPException(status_code=404, detail=f"task result not ready: {task.id}") from exc
-                else:
-                    raise HTTPException(status_code=404, detail=f"task result not ready: {task.id}")
+                        "id": task.id,
+                        "status": task.status,
+                        "errorCode": task.error_code,
+                        "progressPercent": task.progress_percent,
+                        "progressStage": task.progress_stage,
+                    }
+                    for task in tasks
+                    if task.status != "succeeded"
+                ],
+            }
+            temp_zip_path = zip_path.with_suffix(f".{uuid4().hex}.tmp")
+            try:
+                with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                    archive.writestr(INTERNAL_BATCH_ZIP_SUMMARY_NAME, json.dumps(summary, ensure_ascii=False, indent=2))
+                    for entry in part_entries:
+                        archive.write(entry["source_path"], entry["zip_name"])
+                temp_zip_path.replace(zip_path)
+            finally:
+                if temp_zip_path.exists():
+                    temp_zip_path.unlink()
+        parts.append({"path": zip_path, "filename": download_filename, "index": part_index, "sizeBytes": zip_path.stat().st_size})
 
-                base_name = safe_storage_name(task_result_download_name(task))
-                zip_name = f"{index:03d}-{base_name}"
-                duplicate_index = 1
-                while zip_name in used_names:
-                    zip_name = f"{index:03d}-{task.id[:8]}-{duplicate_index}-{base_name}"
-                    duplicate_index += 1
-                used_names.add(zip_name)
-                archive.write(source_path, zip_name)
-        temp_zip_path.replace(zip_path)
-    finally:
-        if temp_zip_path.exists():
-            temp_zip_path.unlink()
-
-    return {"path": zip_path, "filename": f"{safe_batch_name}.zip"}
+    first_part = parts[0]
+    return {"path": first_part["path"], "filename": first_part["filename"], "parts": parts, "partCount": part_count}
 
 
 def retry_internal_batch_tasks(db: Session, user_id: str, batch_id: str) -> dict:

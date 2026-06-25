@@ -126,6 +126,15 @@ def _progress_from_status(status: dict) -> tuple[int, str]:
     return max(0, min(100, percent)), stage
 
 
+def _stall_timeout_seconds() -> int:
+    return max(0, int(os.environ.get("MODEL_PLAZA_GPU_STALL_TIMEOUT_SECONDS", "1800")))
+
+
+def _progress_signature(status: dict) -> tuple[str, int, str]:
+    percent, stage = _progress_from_status(status)
+    return str(status.get("status") or "queued"), percent, stage
+
+
 def _sync_progress(job_id: str, status: dict) -> None:
     provider_job_id = os.environ.get("MODEL_PLAZA_PROVIDER_JOB_ID", "").strip()
     callback_url = os.environ.get("MODEL_PLAZA_CALLBACK_URL", "").strip()
@@ -219,8 +228,11 @@ def _poll_job(job_id: str) -> dict:
     interval = max(1, int(os.environ.get("MODEL_PLAZA_GPU_POLL_INTERVAL", "5")))
     timeout = max(interval, int(os.environ.get("MODEL_PLAZA_GPU_POLL_TIMEOUT", "7200")))
     max_status_failures = max(1, int(os.environ.get("MODEL_PLAZA_GPU_STATUS_FAILURES", "12")))
+    stall_timeout = _stall_timeout_seconds()
     deadline = time.time() + timeout
     status_failures = 0
+    last_progress_signature: tuple[str, int, str] | None = None
+    last_progress_change_at = time.time()
     while time.time() < deadline:
         if _cancel_requested():
             _cancel_job(job_id)
@@ -246,6 +258,14 @@ def _poll_job(job_id: str) -> dict:
             raise GpuJobCancelled(f"GPU job cancelled: {job_id}")
         if state == "failed":
             raise GpuApiError(f"GPU job failed: {status.get('error') or 'unknown error'}")
+        signature = _progress_signature(status)
+        if signature != last_progress_signature:
+            last_progress_signature = signature
+            last_progress_change_at = time.time()
+        elif state == "processing" and stall_timeout and time.time() - last_progress_change_at >= stall_timeout:
+            _cancel_job_safely(job_id, f"stalled progress for {stall_timeout}s")
+            percent, stage = _progress_from_status(status)
+            raise GpuApiError(f"GPU job stalled for {stall_timeout}s at {percent}%: {stage}")
         time.sleep(interval)
     _cancel_job_safely(job_id, f"poll timeout after {timeout}s")
     raise GpuApiError(f"GPU job timed out after {timeout}s: {job_id}")
