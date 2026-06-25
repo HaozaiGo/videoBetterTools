@@ -53,6 +53,13 @@ def _remove_path(path: Path, dry_run: bool) -> bool:
     return True
 
 
+def _disk_used_percent(path: Path) -> float:
+    usage = shutil.disk_usage(path)
+    if usage.total <= 0:
+        return 0
+    return usage.used / usage.total * 100
+
+
 def cleanup_multipart(cutoff: datetime, dry_run: bool = False) -> int:
     root = settings.upload_path / ".multipart"
     if not root.exists():
@@ -67,10 +74,11 @@ def cleanup_multipart(cutoff: datetime, dry_run: bool = False) -> int:
     return removed
 
 
-def cleanup_internal_batch_zips(cutoff: datetime, dry_run: bool = False) -> int:
+def cleanup_internal_batch_zips(cutoff: datetime | None = None, dry_run: bool = False) -> int:
     zip_dir = settings.upload_path / "internal-batch-zips"
     if not zip_dir.exists():
         return 0
+    cutoff = cutoff or (utc_now() - timedelta(hours=settings.internal_batch_zip_retention_hours))
 
     removed = 0
     for zip_path in zip_dir.glob("*.zip"):
@@ -111,6 +119,54 @@ def _asset_is_used_by_active_task(db: Session, asset_id: str) -> bool:
     return db.execute(query).first() is not None
 
 
+def _active_storage_keys(db: Session) -> set[str]:
+    active_tasks = db.execute(select(Task).where(Task.status.in_(ACTIVE_TASK_STATUSES))).scalars()
+    asset_ids: set[str] = set()
+    for task in active_tasks:
+        if task.input_asset_id:
+            asset_ids.add(task.input_asset_id)
+        if task.output_asset_id:
+            asset_ids.add(task.output_asset_id)
+    if not asset_ids:
+        return set()
+    assets = db.execute(select(Asset.storage_key).where(Asset.id.in_(asset_ids))).scalars()
+    return {storage_key for storage_key in assets if storage_key}
+
+
+def cleanup_disk_pressure(db: Session, current_time: datetime, dry_run: bool = False) -> int:
+    if not storage.is_remote or not settings.upload_path.exists():
+        return 0
+
+    high_watermark = max(1, min(100, settings.cleanup_disk_high_watermark_percent))
+    low_watermark = max(1, min(high_watermark, settings.cleanup_disk_low_watermark_percent))
+    if _disk_used_percent(settings.upload_path) < high_watermark:
+        return 0
+
+    min_age_cutoff = current_time - timedelta(hours=max(0, settings.cleanup_disk_min_age_hours))
+    active_keys = _active_storage_keys(db)
+    candidates: list[Path] = []
+    for path in settings.upload_path.rglob("*"):
+        if not path.is_file() or not _is_older_than(path, min_age_cutoff):
+            continue
+        relative_parts = set(path.relative_to(settings.upload_path).parts)
+        if relative_parts & SKIP_LOCAL_SYNC_DIRS:
+            continue
+        storage_key = _relative_storage_key(path)
+        if not storage_key or storage_key in active_keys:
+            continue
+        candidates.append(path)
+
+    removed = 0
+    for path in sorted(candidates, key=_path_mtime):
+        storage_key = _relative_storage_key(path)
+        if storage_key and storage.remote_exists(storage_key):
+            if _remove_path(path, dry_run):
+                removed += 1
+        if _disk_used_percent(settings.upload_path) <= low_watermark:
+            break
+    return removed
+
+
 def cleanup_expired_assets(db: Session, current_time: datetime, dry_run: bool = False) -> int:
     expired_assets = db.execute(
         select(Asset).where(Asset.expires_at.is_not(None), Asset.expires_at <= current_time)
@@ -144,12 +200,14 @@ def cleanup_once(retention_hours: int | None = None, dry_run: bool = False) -> d
 
     stats = {
         "multipart_dirs": cleanup_multipart(cutoff, dry_run=dry_run),
-        "internal_batch_zips": cleanup_internal_batch_zips(cutoff, dry_run=dry_run),
+        "internal_batch_zips": cleanup_internal_batch_zips(dry_run=dry_run),
         "synced_local_files": cleanup_synced_local_files(cutoff, dry_run=dry_run),
         "expired_assets": 0,
+        "disk_pressure_files": 0,
     }
     with SessionLocal() as db:
         stats["expired_assets"] = cleanup_expired_assets(db, current_time, dry_run=dry_run)
+        stats["disk_pressure_files"] = cleanup_disk_pressure(db, current_time, dry_run=dry_run)
     return stats
 
 
