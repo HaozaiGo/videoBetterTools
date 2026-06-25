@@ -1,4 +1,7 @@
 import importlib.util
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -75,3 +78,33 @@ def test_video_enhance_adapter_cancels_stalled_processing_job(monkeypatch) -> No
         module._poll_job("stuck-job")
 
     assert cancelled == ["stuck-job"]
+
+
+@pytest.mark.skipif(not Path("/proc").exists(), reason="process tree cleanup uses Linux /proc")
+def test_gpu_api_server_terminates_orphan_job_processes() -> None:
+    module = _load_script_module("propainter_api_server_test", "scripts/gpu/propainter_api_server.py")
+    job_id = "orphanjob123"
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(60)",
+            f"/shared/work/api-jobs/{job_id}/runner-work/chunks/chunk-0001",
+        ]
+    )
+    try:
+        deadline = time.time() + 5
+        while time.time() < deadline and process.poll() is not None:
+            time.sleep(0.1)
+
+        module._terminate_job_processes(job_id, reason="test cleanup")
+
+        deadline = time.time() + 5
+        while time.time() < deadline and process.poll() is None:
+            time.sleep(0.1)
+
+        assert process.poll() is not None
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)

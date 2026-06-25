@@ -57,6 +57,11 @@ CLEANUP_RUNNER_WORK_TTL_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_CLEANUP_RUNNE
 CLEANUP_DISK_HIGH_WATERMARK_PERCENT = max(1, min(100, _env_int("MODEL_PLAZA_GPU_CLEANUP_DISK_HIGH_WATERMARK_PERCENT", 80)))
 CLEANUP_DISK_LOW_WATERMARK_PERCENT = max(1, min(CLEANUP_DISK_HIGH_WATERMARK_PERCENT, _env_int("MODEL_PLAZA_GPU_CLEANUP_DISK_LOW_WATERMARK_PERCENT", 70)))
 CLEANUP_DISK_MIN_AGE_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_CLEANUP_DISK_MIN_AGE_SECONDS", 60 * 60))
+GPU_PREFLIGHT_ENABLED = os.environ.get("MODEL_PLAZA_GPU_PREFLIGHT_ENABLED", "1").lower() not in {"0", "false", "no"}
+GPU_STALL_TIMEOUT_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_STALL_TIMEOUT_SECONDS", 30 * 60))
+GPU_WATCHDOG_INTERVAL_SECONDS = max(5, _env_int("MODEL_PLAZA_GPU_WATCHDOG_INTERVAL_SECONDS", 30))
+GPU_CANCEL_GRACE_SECONDS = max(1, _env_int("MODEL_PLAZA_GPU_CANCEL_GRACE_SECONDS", 8))
+GPU_RECOVER_STALE_PROCESSING_TIMEOUT_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_RECOVER_STALE_PROCESSING_TIMEOUT_SECONDS", GPU_STALL_TIMEOUT_SECONDS))
 
 
 def _csv_values(value: str) -> list[str]:
@@ -80,6 +85,7 @@ for _slot_index in range(GPU_WORKERS_PER_DEVICE):
         gpu_slots.put(_gpu_device_id)
 running_processes: dict[str, subprocess.Popen] = {}
 running_gpu_devices: dict[str, str] = {}
+running_progress_snapshots: dict[str, tuple[tuple[str, int, str], float]] = {}
 running_processes_lock = threading.Lock()
 recover_lock = threading.Lock()
 cleanup_lock = threading.Lock()
@@ -177,6 +183,129 @@ def _number_from_smi_value(value: str) -> float:
     return int(parsed) if parsed.is_integer() else parsed
 
 
+def _gpu_preflight_error() -> str:
+    if not GPU_PREFLIGHT_ENABLED:
+        return ""
+    running_by_gpu = {gpu_device: 0 for gpu_device in GPU_DEVICE_IDS}
+    gpus, metrics_error = _query_configured_gpu_metrics(running_by_gpu)
+    if metrics_error:
+        return metrics_error
+    if len(gpus) < len(GPU_DEVICE_IDS):
+        return f"only {len(gpus)}/{len(GPU_DEVICE_IDS)} configured GPU metrics are available"
+    unavailable = [
+        str(gpu.get("index") or "")
+        for gpu in gpus
+        if str(gpu.get("name") or "") == "GPU metrics unavailable" or float(gpu.get("memoryTotalMiB") or 0) <= 0
+    ]
+    if unavailable:
+        return f"configured GPU metrics unavailable: {','.join(unavailable)}"
+    return ""
+
+
+def _require_gpu_preflight() -> None:
+    error = _gpu_preflight_error()
+    if error:
+        raise RuntimeError(f"GPU preflight failed: {error}")
+
+
+def _progress_signature_from_status(status: dict) -> tuple[str, int, str]:
+    return (
+        str(status.get("status") or ""),
+        int(status.get("progress_percent") or 0),
+        str(status.get("progress_stage") or ""),
+    )
+
+
+def _status_running_age_seconds(status: dict) -> float:
+    timestamp = float(status.get("started_at") or status.get("created_at") or status.get("updated_at") or 0)
+    if timestamp <= 0:
+        return 0
+    return max(0, time.time() - timestamp)
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _child_pids(parent_pid: int) -> list[int]:
+    children_by_parent: dict[int, list[int]] = {}
+    try:
+        for proc_path in Path("/proc").iterdir():
+            if not proc_path.name.isdigit():
+                continue
+            stat = (proc_path / "stat").read_text(encoding="utf-8", errors="replace")
+            after_name = stat.rsplit(")", 1)[-1].strip().split()
+            if len(after_name) >= 2:
+                pid = int(proc_path.name)
+                ppid = int(after_name[1])
+                children_by_parent.setdefault(ppid, []).append(pid)
+    except Exception:
+        return []
+
+    descendants: list[int] = []
+    stack = list(children_by_parent.get(parent_pid, []))
+    while stack:
+        pid = stack.pop()
+        descendants.append(pid)
+        stack.extend(children_by_parent.get(pid, []))
+    return descendants
+
+
+def _job_process_pids(job_id: str) -> list[int]:
+    marker = f"/api-jobs/{job_id}/"
+    pids: list[int] = []
+    for proc_path in Path("/proc").iterdir():
+        if not proc_path.name.isdigit():
+            continue
+        try:
+            cmdline = (proc_path / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        if marker in cmdline or job_id in cmdline:
+            pids.append(int(proc_path.name))
+    return pids
+
+
+def _terminate_job_processes(job_id: str, process: subprocess.Popen | None = None, reason: str = "") -> None:
+    deadline = time.time() + GPU_CANCEL_GRACE_SECONDS
+    base_pids = set(_job_process_pids(job_id))
+    if process is not None:
+        base_pids.add(process.pid)
+    all_pids = set(base_pids)
+    for pid in list(base_pids):
+        all_pids.update(_child_pids(pid))
+
+    if reason:
+        print(f"Terminating GPU job {job_id} processes after {reason}: {sorted(all_pids)}", flush=True)
+
+    def send(sig: signal.Signals) -> None:
+        for pid in sorted(all_pids, reverse=True):
+            try:
+                os.killpg(pid, sig)
+            except Exception:
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    pass
+                except Exception:
+                    pass
+
+    send(signal.SIGTERM)
+    while time.time() < deadline:
+        alive = [pid for pid in all_pids if _process_alive(pid)]
+        if not alive:
+            break
+        time.sleep(0.2)
+    if any(_process_alive(pid) for pid in all_pids):
+        send(signal.SIGKILL)
+
+
 def _running_jobs_snapshot() -> list[dict]:
     jobs: list[dict] = []
     now = time.time()
@@ -213,7 +342,7 @@ def _gpu_metrics() -> dict:
             running_by_gpu[gpu_device] = running_by_gpu.get(gpu_device, 0) + 1
     gpus, gpu_metrics_error = _query_configured_gpu_metrics(running_by_gpu)
     return {
-        "ok": True,
+        "ok": not bool(gpu_metrics_error),
         "timestamp": time.time(),
         "gpuDevices": GPU_DEVICE_IDS,
         "workersPerGpu": GPU_WORKERS_PER_DEVICE,
@@ -455,6 +584,7 @@ def _run_model_job(job_id: str) -> None:
             _download_input_url(input_url, input_path)
             _write_status(job_id, progress_percent=5, progress_stage="远端输入视频下载完成")
 
+        _require_gpu_preflight()
         assigned_gpu = _acquire_gpu_slot(job_id)
         if _read_status(job_id).get("status") == "cancelled":
             return
@@ -494,11 +624,13 @@ def _run_model_job(job_id: str) -> None:
             with running_processes_lock:
                 running_processes[job_id] = process
                 running_gpu_devices[job_id] = assigned_gpu
+                running_progress_snapshots[job_id] = (_progress_signature_from_status(_read_status(job_id)), time.time())
             return_code = process.wait()
             with running_processes_lock:
                 running_processes.pop(job_id, None)
                 running_gpu_devices.pop(job_id, None)
-            if _read_status(job_id).get("status") == "cancelled":
+                running_progress_snapshots.pop(job_id, None)
+            if _read_status(job_id).get("status") in TERMINAL_STATUSES:
                 return
             if return_code != 0:
                 raise subprocess.CalledProcessError(return_code, command)
@@ -529,7 +661,8 @@ def _run_model_job(job_id: str) -> None:
         with running_processes_lock:
             running_processes.pop(job_id, None)
             running_gpu_devices.pop(job_id, None)
-        if _read_status(job_id).get("status") == "cancelled":
+            running_progress_snapshots.pop(job_id, None)
+        if _read_status(job_id).get("status") in TERMINAL_STATUSES:
             return
         _write_status(job_id, status="failed", completed_at=time.time(), error=str(exc), log_path=str(log_path))
     finally:
@@ -667,6 +800,63 @@ def _cleanup_loop() -> None:
         time.sleep(CLEANUP_INTERVAL_SECONDS)
 
 
+def _watchdog_once() -> dict:
+    if GPU_STALL_TIMEOUT_SECONDS <= 0:
+        return {"enabled": False}
+    now = time.time()
+    cancelled: list[str] = []
+    with running_processes_lock:
+        running_items = list(running_processes.items())
+
+    for job_id, process in running_items:
+        if process.poll() is not None:
+            with running_processes_lock:
+                running_progress_snapshots.pop(job_id, None)
+            continue
+        try:
+            status = _read_status(job_id)
+        except Exception:
+            continue
+        if status.get("status") not in {"processing", "uploading"}:
+            with running_processes_lock:
+                running_progress_snapshots.pop(job_id, None)
+            continue
+
+        signature = _progress_signature_from_status(status)
+        with running_processes_lock:
+            previous = running_progress_snapshots.get(job_id)
+            if previous is None or previous[0] != signature:
+                running_progress_snapshots[job_id] = (signature, now)
+                continue
+            last_changed_at = previous[1]
+
+        if now - last_changed_at < GPU_STALL_TIMEOUT_SECONDS:
+            continue
+
+        _write_status(
+            job_id,
+            status="failed",
+            completed_at=now,
+            error=f"STALLED_PROGRESS: no progress for {GPU_STALL_TIMEOUT_SECONDS}s",
+            progress_stage=f"远端任务超过 {GPU_STALL_TIMEOUT_SECONDS // 60} 分钟无进度，已自动熔断",
+        )
+        _terminate_job_processes(job_id, process, reason=f"stalled progress for {GPU_STALL_TIMEOUT_SECONDS}s")
+        cancelled.append(job_id)
+
+    return {"enabled": True, "stalled_jobs_cancelled": cancelled}
+
+
+def _watchdog_loop() -> None:
+    while True:
+        try:
+            result = _watchdog_once()
+            if result.get("stalled_jobs_cancelled"):
+                print(f"GPU watchdog: {json.dumps(result, ensure_ascii=False)}", flush=True)
+        except Exception as exc:
+            print(f"GPU watchdog failed: {exc}", flush=True)
+        time.sleep(GPU_WATCHDOG_INTERVAL_SECONDS)
+
+
 def _recover_finished_job(job_id: str, output_path: Path) -> None:
     try:
         if not UPLOAD_RESULTS:
@@ -716,6 +906,19 @@ def _recover_stale_jobs() -> None:
                 continue
             if status.get("status") not in recoverable_statuses:
                 continue
+            if (
+                status.get("status") == "processing"
+                and GPU_RECOVER_STALE_PROCESSING_TIMEOUT_SECONDS > 0
+                and _status_running_age_seconds(status) >= GPU_RECOVER_STALE_PROCESSING_TIMEOUT_SECONDS
+            ):
+                _write_status(
+                    job_id,
+                    status="failed",
+                    completed_at=time.time(),
+                    error=f"stale processing job exceeded recovery timeout {GPU_RECOVER_STALE_PROCESSING_TIMEOUT_SECONDS}s",
+                    progress_stage="远端服务重启后发现任务已超时，已标记失败可重试",
+                )
+                continue
             if max_age_seconds > 0 and _job_age_seconds(status) > max_age_seconds:
                 _write_status(
                     job_id,
@@ -756,6 +959,7 @@ def recover_incomplete_jobs_on_startup() -> None:
     # 启动恢复可能包含大文件补传，不能阻塞 /health 和新任务提交。
     threading.Thread(target=_recover_stale_jobs, name="recover-stale-gpu-jobs", daemon=True).start()
     threading.Thread(target=_cleanup_loop, name="cleanup-gpu-jobs", daemon=True).start()
+    threading.Thread(target=_watchdog_loop, name="watchdog-gpu-jobs", daemon=True).start()
 
 
 @app.get("/health")
@@ -764,8 +968,10 @@ def health() -> dict:
     with running_processes_lock:
         for gpu_device in running_gpu_devices.values():
             running_by_gpu[gpu_device] = running_by_gpu.get(gpu_device, 0) + 1
+    gpu_preflight_error = _gpu_preflight_error()
     return {
-        "ok": True,
+        "ok": not bool(gpu_preflight_error),
+        "gpu_preflight_error": gpu_preflight_error,
         "max_workers": MAX_WORKERS,
         "gpu_devices": GPU_DEVICE_IDS,
         "workers_per_gpu": GPU_WORKERS_PER_DEVICE,
@@ -777,6 +983,9 @@ def health() -> dict:
         "cleanup_runner_work_ttl_seconds": CLEANUP_RUNNER_WORK_TTL_SECONDS,
         "cleanup_disk_high_watermark_percent": CLEANUP_DISK_HIGH_WATERMARK_PERCENT,
         "cleanup_disk_low_watermark_percent": CLEANUP_DISK_LOW_WATERMARK_PERCENT,
+        "gpu_stall_timeout_seconds": GPU_STALL_TIMEOUT_SECONDS,
+        "gpu_watchdog_interval_seconds": GPU_WATCHDOG_INTERVAL_SECONDS,
+        "gpu_recover_stale_processing_timeout_seconds": GPU_RECOVER_STALE_PROCESSING_TIMEOUT_SECONDS,
         "running_by_gpu": running_by_gpu,
     }
 
@@ -807,6 +1016,9 @@ async def create_job(
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> dict:
     _check_auth(x_api_key)
+    gpu_preflight_error = _gpu_preflight_error()
+    if gpu_preflight_error:
+        raise HTTPException(status_code=503, detail=f"GPU preflight failed: {gpu_preflight_error}")
     try:
         regions_json = json.loads(regions)
         params_json = json.loads(params)
@@ -875,18 +1087,8 @@ def cancel_job(job_id: str, x_api_key: Annotated[str | None, Header(alias="X-API
     cancelled_status = _write_status(job_id, status="cancelled", completed_at=time.time(), error="USER_CANCELLED", progress_percent=0, progress_stage="远端任务已取消")
     with running_processes_lock:
         process = running_processes.get(job_id)
-    if process is not None and process.poll() is None:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            process.terminate()
-        try:
-            process.wait(timeout=int(os.environ.get("MODEL_PLAZA_GPU_CANCEL_GRACE_SECONDS", "8")))
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                process.kill()
+        running_progress_snapshots.pop(job_id, None)
+    _terminate_job_processes(job_id, process, reason="job cancellation")
     return cancelled_status
 
 
