@@ -108,3 +108,36 @@ def test_gpu_api_server_terminates_orphan_job_processes() -> None:
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)
+
+
+def test_gpu_api_server_watchdog_treats_log_mtime_as_activity(tmp_path, monkeypatch) -> None:
+    module = _load_script_module("propainter_api_server_watchdog_test", "scripts/gpu/propainter_api_server.py")
+    job_id = "activejob123"
+    job_dir = tmp_path / "jobs" / job_id
+    log_dir = tmp_path / "logs"
+    log_path = log_dir / f"{job_id}.log"
+    job_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+    log_path.write_text("still working\n", encoding="utf-8")
+    status_path = job_dir / "status.json"
+    status_path.write_text(
+        '{"status":"processing","progress_percent":8,"progress_stage":"远端 GPU 4 已领取任务","log_path":"%s"}' % log_path,
+        encoding="utf-8",
+    )
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(module, "JOBS_ROOT", tmp_path / "jobs")
+    monkeypatch.setattr(module, "GPU_STALL_TIMEOUT_SECONDS", 10)
+    monkeypatch.setattr(module.time, "time", lambda: 100.0)
+    module.running_processes = {job_id: FakeProcess()}
+    module.running_progress_snapshots = {
+        job_id: (("processing", 8, "远端 GPU 4 已领取任务"), 0.0, 0.0)
+    }
+
+    result = module._watchdog_once()
+
+    assert result["stalled_jobs_cancelled"] == []
+    assert module.running_progress_snapshots[job_id][1] == 100.0

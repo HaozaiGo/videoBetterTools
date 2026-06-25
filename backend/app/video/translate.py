@@ -7,7 +7,7 @@ from typing import Any
 
 from app.config import settings
 from app.storage import storage
-from app.video.watermark import VideoProcessingError
+from app.video.watermark import GpuUnavailableError, VideoProcessingError, is_gpu_unavailable_error
 
 
 def _output_key(task_id: str) -> str:
@@ -77,6 +77,8 @@ def _run_translate_command(
     except subprocess.CalledProcessError as exc:
         detail = "\n".join(part for part in [exc.stdout, exc.stderr] if part).strip()
         tail = detail[-800:] if detail else str(exc)
+        if is_gpu_unavailable_error(tail):
+            raise GpuUnavailableError(f"translate GPU unavailable: {tail}") from exc
         raise VideoProcessingError(f"translate command failed: {tail}") from exc
     if result_meta_path.exists():
         return json.loads(result_meta_path.read_text(encoding="utf-8"))

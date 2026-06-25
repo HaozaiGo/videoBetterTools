@@ -4,13 +4,14 @@ import time
 
 from rq import SimpleWorker, Worker
 
+from app.config import settings
 from app.database import SessionLocal
 from app.models import Asset, Task
-from app.queue import redis_connection, task_queue
+from app.queue import enqueue_provider_job, redis_connection, task_queue
 from app.services import provider_callback
 from app.video.enhance import process_video_enhance
 from app.video.translate import process_video_translate
-from app.video.watermark import VideoProcessingError, process_subtitle_removal, process_watermark_removal
+from app.video.watermark import GpuUnavailableError, VideoProcessingError, process_subtitle_removal, process_watermark_removal
 from app.video.workflow import process_subtitle_translate_workflow
 
 logger = logging.getLogger("model_plaza.worker")
@@ -76,6 +77,10 @@ def _process_real_video_task(task_id: str) -> None:
             result = process_subtitle_removal(input_storage_key, task_id, params)
         else:
             result = process_watermark_removal(input_storage_key, task_id, params)
+    except GpuUnavailableError as exc:
+        logger.warning("GPU unavailable for task %s, requeueing: %s", task_id, exc)
+        _requeue_provider_job_for_gpu_unavailable(task_id, provider_job_id, str(exc))
+        return
     except VideoProcessingError as exc:
         logger.warning("Video processing failed for task %s: %s", task_id, exc)
         _fail_provider_job(provider_job_id, "VIDEO_PROCESSING_FAILED", str(exc))
@@ -100,6 +105,26 @@ def _process_real_video_task(task_id: str) -> None:
             output_mime_type=result["mime_type"],
             output_size_bytes=result["size_bytes"],
         )
+
+
+def _requeue_provider_job_for_gpu_unavailable(task_id: str, provider_job_id: str, progress_stage: str = "") -> None:
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
+            return
+        task.status = "queued"
+        task.error_code = None
+        task.progress_percent = max(5, task.progress_percent)
+        task.progress_stage = "远端 GPU 暂不可用，等待自动重试"
+        db.commit()
+
+    time.sleep(settings.gpu_unavailable_retry_delay_seconds)
+
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if task is None or task.provider_job_id != provider_job_id or task.status != "queued":
+            return
+    enqueue_provider_job(task_id)
 
 
 def _fail_provider_job(provider_job_id: str, error_code: str, progress_stage: str = "") -> None:

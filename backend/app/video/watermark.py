@@ -14,6 +14,25 @@ class VideoProcessingError(RuntimeError):
     pass
 
 
+class GpuUnavailableError(VideoProcessingError):
+    pass
+
+
+GPU_UNAVAILABLE_MARKERS = (
+    "GPU API HTTP 503",
+    "GPU preflight failed",
+    "Failed to initialize NVML",
+    "GPU metrics unavailable",
+    "configured GPU metrics unavailable",
+    "only 0/",
+    "nvidia-smi",
+)
+
+
+def is_gpu_unavailable_error(detail: str) -> bool:
+    return any(marker.lower() in detail.lower() for marker in GPU_UNAVAILABLE_MARKERS)
+
+
 def _binary(name: str) -> str:
     path = shutil.which(name)
     if path is None:
@@ -395,6 +414,8 @@ def process_with_external_model(
     except subprocess.CalledProcessError as exc:
         detail = "\n".join(part for part in [exc.stdout, exc.stderr] if part).strip()
         tail = detail[-1000:] if detail else str(exc)
+        if is_gpu_unavailable_error(tail):
+            raise GpuUnavailableError(f"{adapter} GPU unavailable: {tail}") from exc
         raise VideoProcessingError(f"{adapter} command failed: {tail}") from exc
     if result_meta_path.exists():
         return json.loads(result_meta_path.read_text(encoding="utf-8"))

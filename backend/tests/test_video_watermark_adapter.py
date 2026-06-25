@@ -4,7 +4,9 @@ import pytest
 
 from app.video import watermark
 from app.video.watermark import (
+    GpuUnavailableError,
     VideoProcessingError,
+    is_gpu_unavailable_error,
     _subtitle_text_mask,
     normalized_region_to_pixels,
     process_with_external_model,
@@ -31,6 +33,31 @@ def test_unknown_model_adapter_fails_fast(tmp_path) -> None:
 
     with pytest.raises(VideoProcessingError, match="Unsupported video model adapter"):
         process_with_model_adapter(input_path, output_path, {"modelAdapter": "unknown"})
+
+
+def test_gpu_unavailable_error_detection_matches_preflight_failures() -> None:
+    assert is_gpu_unavailable_error("GPU API HTTP 503: GPU preflight failed: Failed to initialize NVML")
+    assert is_gpu_unavailable_error("configured GPU metrics unavailable: 2,4,5")
+    assert not is_gpu_unavailable_error("propainter command failed: invalid mask")
+
+
+def test_external_model_raises_gpu_unavailable_for_preflight_failure(tmp_path, monkeypatch) -> None:
+    input_path = tmp_path / "input.mp4"
+    output_path = tmp_path / "output.mp4"
+    input_path.write_bytes(b"fake-video")
+
+    def fake_run(command, check, capture_output, text, env):
+        raise watermark.subprocess.CalledProcessError(
+            1,
+            command,
+            stderr="GPU API HTTP 503: GPU preflight failed: Failed to initialize NVML",
+        )
+
+    monkeypatch.setattr(watermark.settings, "propainter_command", "python runner.py")
+    monkeypatch.setattr(watermark.subprocess, "run", fake_run)
+
+    with pytest.raises(GpuUnavailableError):
+        process_with_external_model(input_path, output_path, {"regions": [{"x": 0, "y": 0, "width": 1, "height": 1}]}, "propainter")
 
 
 def test_subtitle_text_mask_targets_bright_text_only() -> None:

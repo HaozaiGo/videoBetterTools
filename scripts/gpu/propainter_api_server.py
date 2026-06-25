@@ -85,7 +85,7 @@ for _slot_index in range(GPU_WORKERS_PER_DEVICE):
         gpu_slots.put(_gpu_device_id)
 running_processes: dict[str, subprocess.Popen] = {}
 running_gpu_devices: dict[str, str] = {}
-running_progress_snapshots: dict[str, tuple[tuple[str, int, str], float]] = {}
+running_progress_snapshots: dict[str, tuple[tuple[str, int, str], float, float]] = {}
 running_processes_lock = threading.Lock()
 recover_lock = threading.Lock()
 cleanup_lock = threading.Lock()
@@ -213,6 +213,25 @@ def _progress_signature_from_status(status: dict) -> tuple[str, int, str]:
         str(status.get("status") or ""),
         int(status.get("progress_percent") or 0),
         str(status.get("progress_stage") or ""),
+    )
+
+
+def _path_mtime(path: Path | None) -> float:
+    if path is None:
+        return 0.0
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _job_activity_heartbeat(job_id: str, status: dict) -> float:
+    log_path_value = str(status.get("log_path") or "")
+    log_path = Path(log_path_value) if log_path_value else None
+    return max(
+        float(status.get("updated_at") or 0),
+        _path_mtime(_progress_path(job_id)),
+        _path_mtime(log_path),
     )
 
 
@@ -624,7 +643,8 @@ def _run_model_job(job_id: str) -> None:
             with running_processes_lock:
                 running_processes[job_id] = process
                 running_gpu_devices[job_id] = assigned_gpu
-                running_progress_snapshots[job_id] = (_progress_signature_from_status(_read_status(job_id)), time.time())
+                status = _read_status(job_id)
+                running_progress_snapshots[job_id] = (_progress_signature_from_status(status), time.time(), _job_activity_heartbeat(job_id, status))
             return_code = process.wait()
             with running_processes_lock:
                 running_processes.pop(job_id, None)
@@ -823,10 +843,11 @@ def _watchdog_once() -> dict:
             continue
 
         signature = _progress_signature_from_status(status)
+        heartbeat = _job_activity_heartbeat(job_id, status)
         with running_processes_lock:
             previous = running_progress_snapshots.get(job_id)
-            if previous is None or previous[0] != signature:
-                running_progress_snapshots[job_id] = (signature, now)
+            if previous is None or previous[0] != signature or heartbeat > previous[2]:
+                running_progress_snapshots[job_id] = (signature, now, heartbeat)
                 continue
             last_changed_at = previous[1]
 
