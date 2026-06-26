@@ -149,6 +149,9 @@ jobs:
           MODEL_PLAZA_GPU_API_KEY=model-plaza-dev-gpu-key
           MODEL_PLAZA_CALLBACK_URL=http://api:8010/api/provider/callback
           MODEL_PLAZA_GPU_STALL_TIMEOUT_SECONDS=1800
+          MODEL_PLAZA_GPU_STATUS_FAILURES=12
+          MODEL_PLAZA_GPU_DOWNLOAD_RETRIES=3
+          MODEL_PLAZA_GPU_DOWNLOAD_RETRY_BACKOFF_SECONDS=5
           STORAGE_BACKEND=local
           EOF
           fi
@@ -183,6 +186,10 @@ jobs:
           set_env_value CLEANUP_DISK_HIGH_WATERMARK_PERCENT 80
           set_env_value CLEANUP_DISK_LOW_WATERMARK_PERCENT 75
           set_env_value CLEANUP_DISK_MIN_AGE_HOURS 6
+          set_env_value VOLCENGINE_TOS_PRESIGN_EXPIRES_SECONDS 21600
+          set_env_value MODEL_PLAZA_GPU_STATUS_FAILURES 12
+          set_env_value MODEL_PLAZA_GPU_DOWNLOAD_RETRIES 3
+          set_env_value MODEL_PLAZA_GPU_DOWNLOAD_RETRY_BACKOFF_SECONDS 5
 
           ln -sfn "$shared_env" "$release_dir/.env"
           cd "$release_dir"

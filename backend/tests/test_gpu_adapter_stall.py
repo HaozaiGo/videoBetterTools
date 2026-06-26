@@ -72,12 +72,41 @@ def test_video_enhance_adapter_cancels_stalled_processing_job(monkeypatch) -> No
         "progress_percent": 8,
         "progress_stage": "远端 GPU 5 已领取任务",
     })
-    monkeypatch.setattr(module, "_cancel_job", lambda job_id: cancelled.append(job_id))
+    monkeypatch.setattr(module, "_cancel_job_safely", lambda job_id, reason: cancelled.append(reason))
 
     with pytest.raises(module.GpuApiError, match="stalled"):
         module._poll_job("stuck-job")
 
-    assert cancelled == ["stuck-job"]
+    assert cancelled == ["stalled progress for 10s"]
+
+
+def test_video_enhance_adapter_retries_transient_status_failures(monkeypatch) -> None:
+    module = _load_script_module("video_enhance_api_adapter_retry_test", "scripts/gpu/video_enhance_api_adapter.py")
+    clock = FakeClock()
+    calls = {"count": 0}
+    cancelled: list[str] = []
+
+    monkeypatch.setenv("MODEL_PLAZA_GPU_JOB_LABEL", "translate")
+    monkeypatch.setenv("MODEL_PLAZA_GPU_POLL_INTERVAL", "5")
+    monkeypatch.setenv("MODEL_PLAZA_GPU_POLL_TIMEOUT", "120")
+    monkeypatch.setenv("MODEL_PLAZA_GPU_STATUS_FAILURES", "3")
+    monkeypatch.setattr(module.time, "time", clock.time)
+    monkeypatch.setattr(module.time, "sleep", clock.sleep)
+    monkeypatch.setattr(module, "_cancel_requested", lambda: False)
+    monkeypatch.setattr(module, "_sync_progress", lambda job_id, status: None)
+    monkeypatch.setattr(module, "_cancel_job_safely", lambda job_id, reason: cancelled.append(reason))
+
+    def flaky_status(request, timeout=30):
+        calls["count"] += 1
+        if calls["count"] < 3:
+            raise module.GpuApiRequestError("temporary timeout")
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(module, "_request_json", flaky_status)
+
+    assert module._poll_job("retry-job") == {"status": "succeeded"}
+    assert calls["count"] == 3
+    assert cancelled == []
 
 
 @pytest.mark.skipif(not Path("/proc").exists(), reason="process tree cleanup uses Linux /proc")

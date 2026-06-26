@@ -274,12 +274,27 @@ def _poll_job(job_id: str) -> dict:
 def _download_result(job_id: str, output_path: Path) -> None:
     request = urllib.request.Request(_api_url(f"/jobs/{job_id}/result"), headers=_headers(), method="GET")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with urllib.request.urlopen(request, timeout=int(os.environ.get("MODEL_PLAZA_GPU_DOWNLOAD_TIMEOUT", "600"))) as response:
-            output_path.write_bytes(response.read())
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise GpuApiError(f"GPU API result HTTP {exc.code}: {body}") from exc
+    timeout = int(os.environ.get("MODEL_PLAZA_GPU_DOWNLOAD_TIMEOUT", "600"))
+    retries = max(1, int(os.environ.get("MODEL_PLAZA_GPU_DOWNLOAD_RETRIES", "3")))
+    backoff = max(0, int(os.environ.get("MODEL_PLAZA_GPU_DOWNLOAD_RETRY_BACKOFF_SECONDS", "5")))
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                output_path.write_bytes(response.read())
+                return
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            last_error = GpuApiError(f"GPU API result HTTP {exc.code} for job {job_id}: {body}")
+            if exc.code < 500 or attempt >= retries:
+                raise last_error from exc
+        except (TimeoutError, urllib.error.URLError, OSError) as exc:
+            last_error = GpuApiRequestError(f"GPU API result download failed for job {job_id} on attempt {attempt}/{retries} after {timeout}s: {exc}")
+            if attempt >= retries:
+                raise last_error from exc
+        print(f"GPU API result download retrying for job {job_id} after attempt {attempt}/{retries}: {last_error}", flush=True)
+        if backoff:
+            time.sleep(backoff)
 
 
 def _write_result_meta(status: dict, meta_path: Path) -> bool:

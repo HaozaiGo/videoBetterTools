@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     volcengine_tos_public_base_url: str = ""
     volcengine_tos_ak: str = ""
     volcengine_tos_sk: str = ""
-    volcengine_tos_presign_expires_seconds: int = 3600
+    volcengine_tos_presign_expires_seconds: int = 6 * 60 * 60
     asset_retention_hours: int = 48
     cleanup_retention_hours: int = 48
     internal_batch_zip_retention_hours: int = 12
