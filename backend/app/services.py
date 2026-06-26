@@ -1,11 +1,14 @@
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import shutil
+from urllib.parse import quote
 from uuid import uuid4
+import zipfile
 
 from fastapi import HTTPException, UploadFile
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, selectinload
 
 from app.auth import hash_password
 from app.config import settings
@@ -15,9 +18,17 @@ from app.queue import enqueue_provider_job
 from app.storage import object_key_for_upload, safe_storage_name, storage
 from app.tool_config import CATEGORIES, TOOLS, get_tool
 
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 100
+INTERNAL_BATCH_ZIP_SUMMARY_NAME = "_batch-summary.json"
+
 
 def now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def asset_expires_at() -> datetime:
+    return now() + timedelta(hours=settings.asset_retention_hours)
 
 
 def public_url(storage_key: str) -> str:
@@ -152,9 +163,17 @@ def task_result_output_key(task: Task) -> str:
         "remove-subtitle": "subtitle-removed",
         "enhance": "enhanced",
         "translate": "translated",
+        "subtitle-translate-workflow": "translated",
     }
     suffix = suffix_by_tool.get(task.tool_slug, "result")
     return f"{task.id}-{suffix}.mp4"
+
+
+def task_result_download_name(task: Task) -> str:
+    input_asset = getattr(task, "input_asset", None)
+    original_name = input_asset.original_name if input_asset else task.id
+    base_name = Path(original_name or task.id).stem or task.id
+    return safe_storage_name(f"{base_name}-{task.id[:8]}.mp4")
 
 
 def task_preview_path(task: Task) -> Path:
@@ -175,13 +194,25 @@ def get_task_result_access(db: Session, user_id: str, task_id: str) -> dict:
     task = db.execute(select(Task).where(Task.id == task_id, Task.user_id == user_id)).scalar_one_or_none()
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
+    filename = task_result_download_name(task)
     preview_path = task_preview_path(task)
     if preview_path.exists() and preview_path.is_file():
-        return {"mode": "file", "path": preview_path}
+        return {"mode": "file", "path": preview_path, "filename": filename}
     if task.output_asset_id:
         output_asset = db.get(Asset, task.output_asset_id)
         if output_asset is not None and output_asset.storage_key:
-            return {"mode": "redirect", "url": storage.presign_download(output_asset.storage_key)}
+            if not storage.is_remote:
+                try:
+                    output_path = storage.ensure_local(output_asset.storage_key)
+                except FileNotFoundError as exc:
+                    raise HTTPException(status_code=404, detail="result not ready") from exc
+                return {
+                    "mode": "file",
+                    "path": output_path,
+                    "filename": filename,
+                    "mime_type": output_asset.mime_type or "application/octet-stream",
+                }
+            return {"mode": "redirect", "url": storage.presign_download(output_asset.storage_key, filename), "filename": filename}
     raise HTTPException(status_code=404, detail="preview result not ready")
 
 
@@ -189,14 +220,201 @@ def get_task_result_url(db: Session, user_id: str, task_id: str) -> str:
     task = db.execute(select(Task).where(Task.id == task_id, Task.user_id == user_id)).scalar_one_or_none()
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
+    preview_path = task_preview_path(task)
+    if preview_path.exists() and preview_path.is_file():
+        return f"/api/tasks/{task.id}/result/{quote(task_result_download_name(task))}"
     if task.output_asset_id:
         output_asset = db.get(Asset, task.output_asset_id)
         if output_asset is not None and output_asset.storage_key:
-            return storage.presign_download(output_asset.storage_key)
-    preview_path = task_preview_path(task)
-    if preview_path.exists() and preview_path.is_file():
-        return storage.public_url(task_result_output_key(task))
+            return f"/api/tasks/{task.id}/result/{quote(task_result_download_name(task))}"
     raise HTTPException(status_code=404, detail="result not ready")
+
+
+def _internal_batch_tasks(db: Session, user_id: str, batch_id: str) -> list[Task]:
+    tasks = db.execute(
+        select(Task)
+        .where(Task.user_id == user_id, Task.tool_slug == "subtitle-translate-workflow")
+        .options(selectinload(Task.input_asset))
+        .order_by(Task.created_at.asc())
+    ).scalars()
+    return [task for task in tasks if isinstance(task.params, dict) and task.params.get("internalBatchId") == batch_id]
+
+
+def internal_batch_status(db: Session, user_id: str, batch_id: str) -> dict:
+    tasks = _internal_batch_tasks(db, user_id, batch_id)
+    if not tasks:
+        raise HTTPException(status_code=404, detail="batch not found")
+    batch_name = str((tasks[0].params or {}).get("internalBatchName") or "内部批量任务")
+    total = len(tasks)
+    succeeded = sum(1 for task in tasks if task.status == "succeeded")
+    failed = sum(1 for task in tasks if task.status == "failed")
+    cancelled = sum(1 for task in tasks if task.status == "cancelled")
+    processing = sum(1 for task in tasks if task.status in {"queued", "processing"})
+    return {
+        "id": batch_id,
+        "name": batch_name,
+        "total": total,
+        "succeeded": succeeded,
+        "failed": failed,
+        "cancelled": cancelled,
+        "processing": processing,
+        "downloadReady": succeeded > 0,
+        "tasks": [task_to_dict(task) for task in tasks],
+    }
+
+
+def create_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
+    batch = internal_batch_status(db, user_id, batch_id)
+    if not batch["downloadReady"]:
+        raise HTTPException(status_code=409, detail=f"batch has no succeeded tasks: {batch['succeeded']}/{batch['total']} succeeded")
+
+    tasks = _internal_batch_tasks(db, user_id, batch_id)
+    succeeded_tasks = [task for task in tasks if task.status == "succeeded"]
+    safe_batch_name = safe_storage_name(str(batch["name"]) or batch_id).removesuffix(".zip")
+    zip_dir = settings.upload_path / "internal-batch-zips"
+    zip_dir.mkdir(parents=True, exist_ok=True)
+
+    used_names: set[str] = set()
+    entries: list[dict] = []
+    for index, task in enumerate(succeeded_tasks, start=1):
+        preview_path = task_preview_path(task)
+        if preview_path.exists() and preview_path.is_file():
+            source_path = preview_path
+        elif task.output_asset_id:
+            output_asset = db.get(Asset, task.output_asset_id)
+            if output_asset is None:
+                raise HTTPException(status_code=404, detail=f"task result not found: {task.id}")
+            try:
+                source_path = storage.ensure_local(output_asset.storage_key)
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=f"task result not ready: {task.id}") from exc
+        else:
+            raise HTTPException(status_code=404, detail=f"task result not ready: {task.id}")
+
+        base_name = safe_storage_name(task_result_download_name(task))
+        zip_name = f"{index:03d}-{base_name}"
+        duplicate_index = 1
+        while zip_name in used_names:
+            zip_name = f"{index:03d}-{task.id[:8]}-{duplicate_index}-{base_name}"
+            duplicate_index += 1
+        used_names.add(zip_name)
+        entries.append({"task": task, "source_path": source_path, "zip_name": zip_name, "size": source_path.stat().st_size})
+
+    max_part_bytes = max(1, int(settings.internal_batch_zip_part_max_bytes))
+    entry_parts: list[list[dict]] = []
+    current_part: list[dict] = []
+    current_size = 0
+    for entry in entries:
+        entry_size = int(entry["size"])
+        if current_part and current_size + entry_size > max_part_bytes:
+            entry_parts.append(current_part)
+            current_part = []
+            current_size = 0
+        current_part.append(entry)
+        current_size += entry_size
+    if current_part:
+        entry_parts.append(current_part)
+
+    base_zip_stem = f"{safe_batch_name}-{batch_id[:8]}-{batch['succeeded']}-of-{batch['total']}"
+    part_count = max(1, len(entry_parts))
+    parts: list[dict] = []
+
+    for part_index, part_entries in enumerate(entry_parts, start=1):
+        zip_filename = f"{base_zip_stem}.zip" if part_count == 1 else f"{base_zip_stem}-part{part_index:02d}-of{part_count:02d}.zip"
+        zip_path = zip_dir / zip_filename
+        download_filename = f"{safe_batch_name}.zip" if part_count == 1 else f"{safe_batch_name}-part{part_index:02d}-of{part_count:02d}.zip"
+        if not (zip_path.exists() and zip_path.is_file() and zip_path.stat().st_size > 0):
+            summary = {
+                "id": batch["id"],
+                "name": batch["name"],
+                "total": batch["total"],
+                "succeeded": batch["succeeded"],
+                "failed": batch["failed"],
+                "cancelled": batch["cancelled"],
+                "processing": batch["processing"],
+                "partIndex": part_index,
+                "partCount": part_count,
+                "partMaxBytes": max_part_bytes,
+                "includedTaskIds": [entry["task"].id for entry in part_entries],
+                "skippedTasks": [
+                    {
+                        "id": task.id,
+                        "status": task.status,
+                        "errorCode": task.error_code,
+                        "progressPercent": task.progress_percent,
+                        "progressStage": task.progress_stage,
+                    }
+                    for task in tasks
+                    if task.status != "succeeded"
+                ],
+            }
+            temp_zip_path = zip_path.with_suffix(f".{uuid4().hex}.tmp")
+            try:
+                with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                    archive.writestr(INTERNAL_BATCH_ZIP_SUMMARY_NAME, json.dumps(summary, ensure_ascii=False, indent=2))
+                    for entry in part_entries:
+                        archive.write(entry["source_path"], entry["zip_name"])
+                temp_zip_path.replace(zip_path)
+            finally:
+                if temp_zip_path.exists():
+                    temp_zip_path.unlink()
+        parts.append({"path": zip_path, "filename": download_filename, "index": part_index, "sizeBytes": zip_path.stat().st_size})
+
+    first_part = parts[0]
+    return {"path": first_part["path"], "filename": first_part["filename"], "parts": parts, "partCount": part_count}
+
+
+def retry_internal_batch_tasks(db: Session, user_id: str, batch_id: str) -> dict:
+    tasks = _internal_batch_tasks(db, user_id, batch_id)
+    if not tasks:
+        raise HTTPException(status_code=404, detail="batch not found")
+
+    retryable_tasks = [task for task in tasks if task.status in {"failed", "cancelled"}]
+    if not retryable_tasks:
+        raise HTTPException(status_code=409, detail="batch has no failed or cancelled tasks to retry")
+
+    wallet = get_wallet(db, user_id, lock=True)
+    retry_specs: list[tuple[Task, dict, int]] = []
+    total_estimate = 0
+    for task in retryable_tasks:
+        tool = get_tool(task.tool_slug)
+        if tool is None or tool["status"] != "online":
+            raise HTTPException(status_code=400, detail=f"tool is not available: {task.tool_slug}")
+        input_asset = db.get(Asset, task.input_asset_id)
+        if input_asset is None or input_asset.user_id != user_id:
+            raise HTTPException(status_code=400, detail=f"missing uploaded asset for task: {task.id}")
+        params = dict(task.params or {})
+        estimate = estimate_credits(tool, {**params, "duration": params.get("duration") or input_asset.duration_seconds or 30})
+        retry_specs.append((task, tool, estimate))
+        total_estimate += estimate
+
+    if wallet.credits - wallet.frozen_credits < total_estimate:
+        raise HTTPException(status_code=402, detail="insufficient credits")
+
+    retried_ids: list[str] = []
+    for task, tool, estimate in retry_specs:
+        task.status = "queued"
+        task.provider_job_id = f"mock_{uuid4()}"
+        task.estimated_credits = estimate
+        task.frozen_credits = estimate
+        task.charged_credits = 0
+        task.error_code = None
+        task.progress_percent = 0
+        task.progress_stage = "等待 worker 领取任务"
+        task.output_asset_id = None
+        task.output_url = ""
+        task.completed_at = None
+        wallet.frozen_credits += estimate
+        add_ledger(db, user_id, "freeze", 0, f"{tool['name']} 重新生成，冻结 {estimate} 积分", task.id)
+        cancel_marker = settings.upload_path / f"{task.id}.cancel"
+        cancel_marker.unlink(missing_ok=True)
+        retried_ids.append(task.id)
+
+    db.commit()
+    for task_id in retried_ids:
+        enqueue_provider_job(task_id)
+
+    return {"retried": len(retried_ids), "taskIds": retried_ids, "batch": internal_batch_status(db, user_id, batch_id)}
 
 
 def ledger_to_dict(entry: WalletLedger) -> dict:
@@ -211,17 +429,58 @@ def ledger_to_dict(entry: WalletLedger) -> dict:
     }
 
 
+def normalize_pagination(page: int = 1, per_page: int = DEFAULT_PAGE_SIZE) -> tuple[int, int]:
+    page = max(1, page)
+    per_page = max(1, min(per_page, MAX_PAGE_SIZE))
+    return page, per_page
+
+
+def page_info(total: int, page: int, per_page: int) -> dict:
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    return {
+        "page": page,
+        "perPage": per_page,
+        "total": total,
+        "totalPages": total_pages,
+        "hasNext": page < total_pages,
+        "hasPrevious": page > 1,
+    }
+
+
+def paginated_tasks(db: Session, user_id: str, page: int = 1, per_page: int = DEFAULT_PAGE_SIZE) -> dict:
+    page, per_page = normalize_pagination(page, per_page)
+    total = db.execute(select(func.count()).select_from(Task).where(Task.user_id == user_id)).scalar_one()
+    tasks = db.execute(
+        select(Task)
+        .where(Task.user_id == user_id)
+        .options(selectinload(Task.input_asset))
+        .order_by(Task.created_at.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    ).scalars()
+    return {"items": [task_to_dict(task) for task in tasks], "page": page_info(total, page, per_page)}
+
+
+def paginated_ledger(db: Session, user_id: str, page: int = 1, per_page: int = DEFAULT_PAGE_SIZE) -> dict:
+    page, per_page = normalize_pagination(page, per_page)
+    total = db.execute(select(func.count()).select_from(WalletLedger).where(WalletLedger.user_id == user_id)).scalar_one()
+    ledger = db.execute(
+        select(WalletLedger)
+        .where(WalletLedger.user_id == user_id)
+        .order_by(WalletLedger.created_at.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    ).scalars()
+    return {"items": [ledger_to_dict(entry) for entry in ledger], "page": page_info(total, page, per_page)}
+
+
 def serialize_bootstrap(db: Session, user_id: str | None = None) -> dict:
     ensure_demo_user(db)
     user_id = user_id or settings.demo_user_id
     user = db.get(User, user_id)
     wallet = get_wallet(db, user_id)
-    tasks = db.execute(
-        select(Task).where(Task.user_id == user_id).order_by(Task.created_at.desc())
-    ).scalars()
-    ledger = db.execute(
-        select(WalletLedger).where(WalletLedger.user_id == user_id).order_by(WalletLedger.created_at.desc())
-    ).scalars()
+    task_page = paginated_tasks(db, user_id)
+    ledger_page = paginated_ledger(db, user_id)
     return {
         "account": {
             "id": user.id,
@@ -234,8 +493,10 @@ def serialize_bootstrap(db: Session, user_id: str | None = None) -> dict:
         },
         "tools": TOOLS,
         "categories": CATEGORIES,
-        "tasks": [task_to_dict(task) for task in tasks],
-        "ledger": [ledger_to_dict(entry) for entry in ledger],
+        "tasks": task_page["items"],
+        "taskPage": task_page["page"],
+        "ledger": ledger_page["items"],
+        "ledgerPage": ledger_page["page"],
     }
 
 
@@ -257,7 +518,7 @@ async def save_upload(db: Session, user_id: str, file: UploadFile, kind: str, du
         url=public_url(storage_key),
         size_bytes=len(content),
         duration_seconds=duration_seconds,
-        expires_at=now() + timedelta(days=7),
+        expires_at=asset_expires_at(),
     )
     db.add(asset)
     db.commit()
@@ -301,7 +562,7 @@ def complete_uploaded_asset(
         url=public_url(normalized_key),
         size_bytes=max(0, size_bytes),
         duration_seconds=duration_seconds,
-        expires_at=now() + timedelta(days=7),
+        expires_at=asset_expires_at(),
     )
     db.add(asset)
     db.commit()
@@ -461,7 +722,7 @@ def complete_multipart_upload(db: Session, user_id: str, upload_id: str) -> Asse
         url=stored.public_url,
         size_bytes=stored.size,
         duration_seconds=int(manifest["durationSeconds"]),
-        expires_at=now() + timedelta(days=7),
+        expires_at=asset_expires_at(),
     )
     db.add(asset)
     db.commit()
@@ -608,7 +869,7 @@ def provider_callback(
             storage_key=storage_key,
             url=result_url,
             size_bytes=output_size_bytes or 0,
-            expires_at=now() + timedelta(days=7),
+            expires_at=asset_expires_at(),
         )
         if output_storage_key is None:
             storage.write_text(output_asset.storage_key, f"任务 {task.id} 已完成\n")

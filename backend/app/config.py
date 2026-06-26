@@ -30,7 +30,16 @@ class Settings(BaseSettings):
     volcengine_tos_public_base_url: str = ""
     volcengine_tos_ak: str = ""
     volcengine_tos_sk: str = ""
-    volcengine_tos_presign_expires_seconds: int = 3600
+    volcengine_tos_presign_expires_seconds: int = 6 * 60 * 60
+    asset_retention_hours: int = 48
+    cleanup_retention_hours: int = 48
+    internal_batch_zip_retention_hours: int = 12
+    internal_batch_zip_part_max_bytes: int = 10 * 1024 * 1024 * 1024
+    cleanup_disk_high_watermark_percent: int = 80
+    cleanup_disk_low_watermark_percent: int = 75
+    cleanup_disk_min_age_hours: int = 6
+    cleanup_interval_seconds: int = 3600
+    gpu_unavailable_retry_delay_seconds: int = 60
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

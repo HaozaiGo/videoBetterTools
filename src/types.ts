@@ -159,6 +159,37 @@ export type LedgerEntry = {
   createdAt: number;
 };
 
+export type PageInfo = {
+  page: number;
+  perPage: number;
+  total: number;
+  totalPages: number;
+  hasNext: boolean;
+  hasPrevious: boolean;
+};
+
+export type PaginatedTasks = {
+  items: Task[];
+  page: PageInfo;
+};
+
+export type PaginatedLedger = {
+  items: LedgerEntry[];
+  page: PageInfo;
+};
+
+export type InternalBatchStatus = {
+  id: string;
+  name: string;
+  total: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  processing: number;
+  downloadReady: boolean;
+  tasks: Task[];
+};
+
 export type WatermarkRegion = {
   x: number;
   y: number;
@@ -173,7 +204,9 @@ export type BootstrapState = {
   tools: ToolDefinition[];
   categories: CategoryDefinition[];
   tasks: Task[];
+  taskPage: PageInfo;
   ledger: LedgerEntry[];
+  ledgerPage: PageInfo;
 };
 
 export type ToolFormValues = {

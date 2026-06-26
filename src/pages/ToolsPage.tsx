@@ -1,16 +1,31 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { useSuspenseQuery } from "@tanstack/react-query";
+import { useState, type FormEvent } from "react";
 import { getBootstrap } from "../api/client";
 import { formatCredits, statusLabel, taskProgressDisplay } from "../lib/format";
 import { ToolIcon } from "../lib/tool-icons";
 
 export function ToolsPage() {
+  const navigate = useNavigate();
   const { data } = useSuspenseQuery({ queryKey: ["bootstrap"], queryFn: getBootstrap });
+  const [command, setCommand] = useState("");
+  const [commandNotice, setCommandNotice] = useState("");
   const recentTasks = data.tasks.slice(0, 3);
-  const visibleTools = data.tools.filter((tool) => tool.status !== "disabled");
+  const visibleTools = data.tools.filter((tool) => tool.status !== "disabled" && tool.slug !== "subtitle-translate-workflow");
   const videoTools = visibleTools.filter((tool) => tool.category === "video");
   const imageTools = visibleTools.filter((tool) => tool.category === "image");
   const featuredTools = visibleTools.filter((tool) => tool.status === "online").slice(0, 4);
+  const handleCommandSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const normalizedCommand = command.trim().replace(/\s+/g, "");
+    if (normalizedCommand === "内部使用1688") {
+      setCommandNotice("");
+      navigate({ to: "/internal/batch-workflow" });
+      return;
+    }
+    setCommandNotice("未识别到内部口令，已为你打开视频去字幕工具。");
+    navigate({ to: "/tools/video/$toolSlug", params: { toolSlug: "remove-subtitle" } });
+  };
 
   return (
     <div className="launcher-page">
@@ -18,13 +33,19 @@ export function ToolsPage() {
         <p className="eyebrow">AI VIDEO COMMAND CENTER</p>
         <h1>今天要处理什么视频？</h1>
         <p>搜索工具或输入目标，系统推荐最短路径。上传、GPU任务、扣费和结果都在一个工作台里完成。</p>
-        <div className="command-search">
+        <form className="command-search" onSubmit={handleCommandSubmit}>
           <span aria-hidden="true">⌕</span>
-          <strong>例如：把这段口播视频去字幕后转成 2K</strong>
-          <Link className="primary" params={{ toolSlug: "remove-subtitle" }} to="/tools/video/$toolSlug">
+          <input
+            aria-label="视频处理命令"
+            value={command}
+            onChange={(event) => setCommand(event.target.value)}
+            placeholder="例如：把这段口播视频去字幕后转成 2K"
+          />
+          <button className="primary" type="submit">
             开始 ›
-          </Link>
-        </div>
+          </button>
+        </form>
+        {commandNotice ? <p className="command-notice">{commandNotice}</p> : null}
       </section>
 
       <section className="quick-tools" aria-label="推荐工具">

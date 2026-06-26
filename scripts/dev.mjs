@@ -8,7 +8,7 @@ const backendEnv = {
   PROPAINTER_COMMAND: process.env.PROPAINTER_COMMAND ?? "python ../scripts/gpu/propainter_api_adapter.py",
   ENHANCE_COMMAND: process.env.ENHANCE_COMMAND ?? "python ../scripts/gpu/video_enhance_api_adapter.py",
   TRANSLATE_COMMAND: process.env.TRANSLATE_COMMAND ?? "python ../scripts/gpu/video_translate_api_adapter.py",
-  MODEL_PLAZA_GPU_API_URL: process.env.MODEL_PLAZA_GPU_API_URL ?? "http://32.196.46.122:18080",
+  MODEL_PLAZA_GPU_API_URL: process.env.MODEL_PLAZA_GPU_API_URL ?? "http://32.196.46.122:18081",
   MODEL_PLAZA_GPU_API_KEY: process.env.MODEL_PLAZA_GPU_API_KEY ?? "model-plaza-dev-gpu-key",
   MODEL_PLAZA_GPU_API_TUNNEL: process.env.MODEL_PLAZA_GPU_API_TUNNEL ?? "0",
   MODEL_PLAZA_WORKER_MODE: process.env.MODEL_PLAZA_WORKER_MODE ?? "simple",

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import { useForm } from "@tanstack/react-form";
@@ -27,9 +28,13 @@ function formatGpuTimestamp(timestamp?: number) {
 
 export function AdminPage() {
   const queryClient = useQueryClient();
+  const [taskPageNumber, setTaskPageNumber] = useState(1);
   const { data: summary } = useSuspenseQuery({ queryKey: ["admin-summary"], queryFn: getAdminSummary });
   const { data: users } = useSuspenseQuery({ queryKey: ["admin-users"], queryFn: getAdminUsers });
-  const { data: tasks } = useSuspenseQuery({ queryKey: ["admin-tasks"], queryFn: getAdminTasks });
+  const { data: taskPage, isFetching: isTasksFetching } = useSuspenseQuery({
+    queryKey: ["admin-tasks", taskPageNumber],
+    queryFn: () => getAdminTasks(taskPageNumber),
+  });
   const { data: gpuMetrics, isFetching: isGpuFetching } = useQuery({
     queryKey: ["admin-gpu"],
     queryFn: getAdminGpuMetrics,
@@ -82,7 +87,7 @@ export function AdminPage() {
   });
 
   const taskTable = useReactTable({
-    data: tasks,
+    data: taskPage.items,
     columns: [
       taskColumns.accessor("toolSlug", { header: "工具" }),
       taskColumns.accessor("status", { header: "状态", cell: (info) => statusLabel(info.getValue()) }),
@@ -246,6 +251,27 @@ export function AdminPage() {
           </div>
           <div className="admin-task-monitor-table">
             <SimpleTable table={taskTable} empty="暂无任务" />
+            <div className="pagination-bar">
+              <span>
+                第 {taskPage.page.page} / {taskPage.page.totalPages} 页，共 {taskPage.page.total} 条
+              </span>
+              <div>
+                <button
+                  className="ghost compact"
+                  onClick={() => setTaskPageNumber((page) => Math.max(1, page - 1))}
+                  disabled={!taskPage.page.hasPrevious || isTasksFetching}
+                >
+                  上一页
+                </button>
+                <button
+                  className="ghost compact"
+                  onClick={() => setTaskPageNumber((page) => page + 1)}
+                  disabled={!taskPage.page.hasNext || isTasksFetching}
+                >
+                  下一页
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </div>

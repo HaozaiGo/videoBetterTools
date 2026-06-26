@@ -12,11 +12,15 @@ import uuid
 from pathlib import Path
 
 
-DEFAULT_API_URL = "http://32.196.46.122:18080"
+DEFAULT_API_URL = "http://32.196.46.122:18081"
 DEFAULT_API_KEY = "model-plaza-dev-gpu-key"
 
 
 class GpuApiError(RuntimeError):
+    pass
+
+
+class GpuApiRequestError(GpuApiError):
     pass
 
 
@@ -35,12 +39,15 @@ def _headers() -> dict[str, str]:
 
 
 def _request_json(request: urllib.request.Request, timeout: int = 30) -> dict:
+    label = f"{request.get_method()} {request.full_url}"
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise GpuApiError(f"GPU API HTTP {exc.code}: {body}") from exc
+        raise GpuApiError(f"GPU API HTTP {exc.code} for {label}: {body}") from exc
+    except (TimeoutError, urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        raise GpuApiRequestError(f"GPU API request failed for {label} after {timeout}s: {exc}") from exc
 
 
 def _cancel_requested() -> bool:
@@ -53,12 +60,29 @@ def _cancel_job(job_id: str) -> None:
     _request_json(request, timeout=30)
 
 
+def _cancel_job_safely(job_id: str, reason: str) -> None:
+    try:
+        _cancel_job(job_id)
+        print(f"GPU job {job_id} cancelled after {reason}", flush=True)
+    except GpuApiError as exc:
+        print(f"Failed to cancel GPU job {job_id} after {reason}: {exc}", flush=True)
+
+
 def _progress_from_status(status: dict) -> tuple[int, str]:
     state = str(status.get("status") or "queued")
     fallback_percent = {"queued": 2, "processing": 15, "succeeded": 100, "failed": 0, "cancelled": 0}.get(state, 0)
     percent = int(status.get("progress_percent") or fallback_percent)
     stage = str(status.get("progress_stage") or state)
     return max(0, min(100, percent)), stage
+
+
+def _stall_timeout_seconds() -> int:
+    return max(0, int(os.environ.get("MODEL_PLAZA_GPU_STALL_TIMEOUT_SECONDS", "1800")))
+
+
+def _progress_signature(status: dict) -> tuple[str, int, str]:
+    percent, stage = _progress_from_status(status)
+    return str(status.get("status") or "queued"), percent, stage
 
 
 def _sync_progress(job_id: str, status: dict) -> None:
@@ -154,13 +178,28 @@ def _poll_job(job_id: str) -> dict:
     job_label = os.environ.get("MODEL_PLAZA_GPU_JOB_LABEL", "enhance").strip() or "enhance"
     interval = max(1, int(os.environ.get("MODEL_PLAZA_GPU_POLL_INTERVAL", "5")))
     timeout = max(interval, int(os.environ.get("MODEL_PLAZA_GPU_POLL_TIMEOUT", "7200")))
+    max_status_failures = max(1, int(os.environ.get("MODEL_PLAZA_GPU_STATUS_FAILURES", "12")))
+    stall_timeout = _stall_timeout_seconds()
     deadline = time.time() + timeout
+    status_failures = 0
+    last_progress_signature: tuple[str, int, str] | None = None
+    last_progress_change_at = time.time()
     while time.time() < deadline:
         if _cancel_requested():
             _cancel_job(job_id)
             raise GpuJobCancelled(f"GPU {job_label} job cancelled: {job_id}")
         request = urllib.request.Request(_api_url(f"/jobs/{job_id}"), headers=_headers(), method="GET")
-        status = _request_json(request, timeout=30)
+        try:
+            status = _request_json(request, timeout=30)
+        except GpuApiRequestError as exc:
+            status_failures += 1
+            print(f"GPU {job_label} job {job_id}: status check failed ({status_failures}/{max_status_failures}): {exc}", flush=True)
+            if status_failures >= max_status_failures:
+                _cancel_job_safely(job_id, "repeated status check failures")
+                raise
+            time.sleep(interval)
+            continue
+        status_failures = 0
         state = status.get("status")
         _sync_progress(job_id, status)
         print(f"GPU {job_label} job {job_id}: {state}", flush=True)
@@ -170,19 +209,43 @@ def _poll_job(job_id: str) -> dict:
             raise GpuJobCancelled(f"GPU {job_label} job cancelled: {job_id}")
         if state == "failed":
             raise GpuApiError(f"GPU {job_label} job failed: {status.get('error') or 'unknown error'}")
+        signature = _progress_signature(status)
+        if signature != last_progress_signature:
+            last_progress_signature = signature
+            last_progress_change_at = time.time()
+        elif state == "processing" and stall_timeout and time.time() - last_progress_change_at >= stall_timeout:
+            _cancel_job_safely(job_id, f"stalled progress for {stall_timeout}s")
+            percent, stage = _progress_from_status(status)
+            raise GpuApiError(f"GPU {job_label} job stalled for {stall_timeout}s at {percent}%: {stage}")
         time.sleep(interval)
+    _cancel_job_safely(job_id, f"poll timeout after {timeout}s")
     raise GpuApiError(f"GPU {job_label} job timed out after {timeout}s: {job_id}")
 
 
 def _download_result(job_id: str, output_path: Path) -> None:
     request = urllib.request.Request(_api_url(f"/jobs/{job_id}/result"), headers=_headers(), method="GET")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with urllib.request.urlopen(request, timeout=int(os.environ.get("MODEL_PLAZA_GPU_DOWNLOAD_TIMEOUT", "600"))) as response:
-            output_path.write_bytes(response.read())
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise GpuApiError(f"GPU API result HTTP {exc.code}: {body}") from exc
+    timeout = int(os.environ.get("MODEL_PLAZA_GPU_DOWNLOAD_TIMEOUT", "600"))
+    retries = max(1, int(os.environ.get("MODEL_PLAZA_GPU_DOWNLOAD_RETRIES", "3")))
+    backoff = max(0, int(os.environ.get("MODEL_PLAZA_GPU_DOWNLOAD_RETRY_BACKOFF_SECONDS", "5")))
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                output_path.write_bytes(response.read())
+                return
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            last_error = GpuApiError(f"GPU API result HTTP {exc.code} for job {job_id}: {body}")
+            if exc.code < 500 or attempt >= retries:
+                raise last_error from exc
+        except (TimeoutError, urllib.error.URLError, OSError) as exc:
+            last_error = GpuApiRequestError(f"GPU API result download failed for job {job_id} on attempt {attempt}/{retries} after {timeout}s: {exc}")
+            if attempt >= retries:
+                raise last_error from exc
+        print(f"GPU API result download retrying for job {job_id} after attempt {attempt}/{retries}: {last_error}", flush=True)
+        if backoff:
+            time.sleep(backoff)
 
 
 def _write_result_meta(status: dict, meta_path: Path) -> bool:

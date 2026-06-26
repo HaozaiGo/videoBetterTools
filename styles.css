@@ -349,6 +349,37 @@ a {
   white-space: nowrap;
 }
 
+.command-search input {
+  min-width: 0;
+  min-height: 42px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 0;
+  font-weight: 850;
+  box-shadow: none;
+}
+
+.command-search input:focus {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.command-search input::placeholder {
+  color: var(--muted);
+}
+
+.command-search button {
+  white-space: nowrap;
+}
+
+.command-notice {
+  margin: 0;
+  color: var(--warning) !important;
+  font-size: 13px;
+  font-weight: 850;
+}
+
 .quick-tools {
   display: grid;
   grid-template-columns: repeat(4, minmax(160px, 1fr));
@@ -916,6 +947,138 @@ select:focus {
   gap: 14px;
 }
 
+.internal-workflow-page {
+  display: grid;
+  gap: 16px;
+  padding-top: 18px;
+}
+
+.internal-workflow-head {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 18px;
+}
+
+.internal-workflow-head span {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.internal-workflow-head h1 {
+  margin: 0;
+  font-size: 30px;
+  letter-spacing: 0;
+}
+
+.internal-workflow-head p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--muted);
+  font-weight: 700;
+  line-height: 1.55;
+}
+
+.internal-workflow-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 18px;
+  align-items: start;
+}
+
+.internal-workflow-main {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 18px;
+}
+
+.internal-upload-zone {
+  min-height: 180px;
+}
+
+.internal-workflow-panel {
+  align-content: start;
+}
+
+.internal-settings-group {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 12px;
+}
+
+.internal-settings-group > strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.internal-workflow-summary {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 12px;
+}
+
+.internal-workflow-summary dl {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.internal-workflow-summary div {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.internal-workflow-summary dt {
+  color: var(--muted);
+  font-weight: 850;
+}
+
+.internal-workflow-summary dd {
+  margin: 0;
+  color: var(--text);
+  font-weight: 950;
+}
+
+.internal-batch-download {
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(21, 183, 158, 0.28);
+  border-radius: 8px;
+  background: var(--soft-green);
+  padding: 12px;
+}
+
+.internal-batch-download > strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.internal-batch-download > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.internal-batch-download > div {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
 .quote-kicker {
   color: var(--accent);
   font-size: 12px;
@@ -1140,6 +1303,50 @@ dd {
   padding: 0;
 }
 
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding: 12px 14px;
+}
+
+.pagination-bar span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.pagination-bar > div,
+.pagination-actions,
+.pagination-jump {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pagination-jump {
+  margin-left: auto;
+}
+
+.pagination-jump label,
+.pagination-jump span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.pagination-jump input {
+  width: 72px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 850;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -1313,6 +1520,29 @@ th {
 
 .task-detail-card strong {
   overflow-wrap: anywhere;
+}
+
+.task-batch-download {
+  grid-column: 1 / -1;
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid rgba(21, 183, 158, 0.28);
+  border-radius: 8px;
+  background: var(--soft-green);
+  padding: 12px;
+}
+
+.task-batch-download > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.task-batch-download > div:last-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .task-error strong,
@@ -1536,7 +1766,8 @@ th {
   .launcher-grid,
   .tool-detail,
   .billing-layout,
-  .admin-columns {
+  .admin-columns,
+  .internal-workflow-grid {
     grid-template-columns: 1fr;
   }
 

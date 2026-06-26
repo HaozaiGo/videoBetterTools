@@ -6,7 +6,7 @@ import os
 import time
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -67,9 +67,12 @@ def verify_token(token: str) -> str:
 def current_user(
     db: Annotated[Session, Depends(get_db)],
     authorization: Annotated[str | None, Header()] = None,
+    access_token: Annotated[str | None, Query()] = None,
 ) -> User:
     if authorization and authorization.startswith("Bearer "):
         user_id = verify_token(authorization.removeprefix("Bearer ").strip())
+    elif access_token:
+        user_id = verify_token(access_token.strip())
     elif settings.allow_demo_without_auth:
         user_id = settings.demo_user_id
     else:

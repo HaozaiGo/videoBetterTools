@@ -89,6 +89,27 @@ services:
       redis:
         condition: service_started
 
+  cleanup:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.prod
+    restart: unless-stopped
+    command: python -m app.cleanup --loop
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-model_plaza}:${POSTGRES_PASSWORD:-model_plaza}@postgres:5432/${POSTGRES_DB:-model_plaza}
+      REDIS_URL: redis://redis:6379/0
+      UPLOAD_DIR: /data/uploads
+      PUBLIC_UPLOAD_PREFIX: /uploads
+      AUTH_SECRET: ${AUTH_SECRET}
+      ALLOW_DEMO_WITHOUT_AUTH: ${ALLOW_DEMO_WITHOUT_AUTH:-false}
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   web:
     image: model-plaza-web:${APP_VERSION:-latest}
     build:

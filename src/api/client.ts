@@ -1,4 +1,4 @@
-import type { AdminSummary, AdminUser, Asset, AuthUser, BootstrapState, GpuMetrics, Task, UserCreateInput } from "../types";
+import type { AdminSummary, AdminUser, Asset, AuthUser, BootstrapState, GpuMetrics, InternalBatchStatus, PaginatedLedger, PaginatedTasks, Task, UserCreateInput } from "../types";
 
 const tokenKey = "model_plaza_auth_token";
 
@@ -38,6 +38,16 @@ export function getBootstrap() {
   return request<BootstrapState>("/api/bootstrap");
 }
 
+export function getTasksPage(page = 1, perPage = 50) {
+  const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
+  return request<PaginatedTasks>(`/api/tasks?${params.toString()}`);
+}
+
+export function getLedgerPage(page = 1, perPage = 50) {
+  const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
+  return request<PaginatedLedger>(`/api/ledger?${params.toString()}`);
+}
+
 export async function openAuthenticatedFile(path: string) {
   const previewWindow = window.open("about:blank", "_blank");
   const headers = new Headers();
@@ -64,14 +74,63 @@ export async function openTaskResult(taskId: string) {
   const previewWindow = window.open("about:blank", "_blank");
   try {
     const payload = await request<{ url: string }>(`/api/tasks/${taskId}/result-link`);
+    const token = getAuthToken();
+    const resultUrl = new URL(payload.url, window.location.origin);
+    if (token && resultUrl.origin === window.location.origin && resultUrl.pathname.startsWith("/api/")) {
+      resultUrl.searchParams.set("access_token", token);
+    }
     if (previewWindow) {
-      previewWindow.location.href = payload.url;
+      previewWindow.location.href = resultUrl.href;
     } else {
-      window.open(payload.url, "_blank");
+      window.open(resultUrl.href, "_blank");
     }
   } catch (error) {
     previewWindow?.close();
     throw error;
+  }
+}
+
+export function getInternalBatchStatus(batchId: string) {
+  return request<InternalBatchStatus>(`/api/internal/batches/${encodeURIComponent(batchId)}`);
+}
+
+export function retryInternalBatchTasks(batchId: string) {
+  return request<{ retried: number; taskIds: string[]; batch: InternalBatchStatus; state: BootstrapState }>(`/api/internal/batches/${encodeURIComponent(batchId)}/retry`, {
+    method: "POST",
+  });
+}
+
+type InternalBatchDownloadManifest = {
+  partCount: number;
+  parts: Array<{
+    index: number;
+    filename: string;
+    sizeBytes: number;
+    url: string;
+  }>;
+};
+
+export async function downloadInternalBatchZip(batchId: string, batchName: string) {
+  const manifest = await request<InternalBatchDownloadManifest>(`/api/internal/batches/${encodeURIComponent(batchId)}/download-manifest`, { method: "POST" });
+  const token = getAuthToken();
+  const parts = manifest.parts.length
+    ? manifest.parts
+    : [{ index: 1, filename: `${batchName || "内部批量任务"}.zip`, sizeBytes: 0, url: `/api/internal/batches/${encodeURIComponent(batchId)}/download` }];
+
+  for (const [partIndex, part] of parts.entries()) {
+    const url = new URL(part.url, window.location.origin);
+    if (token) {
+      url.searchParams.set("access_token", token);
+    }
+    const link = document.createElement("a");
+    link.href = url.href;
+    link.download = part.filename || `${batchName || "内部批量任务"}.zip`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    if (partIndex < parts.length - 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
   }
 }
 
@@ -384,7 +443,7 @@ export function recharge(credits: number) {
 }
 
 export function failProviderJob(providerJobId: string) {
-  return request<{ duplicated: boolean; state: BootstrapState }>("/api/provider/callback", {
+  return request<{ duplicated: boolean; task: Task }>("/api/provider/callback", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -420,8 +479,9 @@ export function getAdminUsers() {
   return request<AdminUser[]>("/api/admin/users");
 }
 
-export function getAdminTasks() {
-  return request<Task[]>("/api/admin/tasks");
+export function getAdminTasks(page = 1, perPage = 50) {
+  const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
+  return request<PaginatedTasks>(`/api/admin/tasks?${params.toString()}`);
 }
 
 export function getAdminGpuMetrics() {

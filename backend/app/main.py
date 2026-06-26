@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,14 +18,19 @@ from app.services import (
     complete_multipart_upload,
     complete_uploaded_asset,
     create_multipart_upload,
+    create_internal_batch_zip,
     create_presigned_asset_upload,
     create_user,
     create_task,
     get_task_result_access,
     get_task_result_url,
+    internal_batch_status,
     get_multipart_upload,
+    paginated_ledger,
+    paginated_tasks,
     provider_callback,
     recharge_wallet,
+    retry_internal_batch_tasks,
     save_upload,
     save_multipart_chunk,
     serialize_bootstrap,
@@ -104,6 +109,26 @@ def me(user: User = Depends(current_user)) -> dict:
 @app.get("/api/bootstrap")
 def bootstrap(db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
     return serialize_bootstrap(db, user.id)
+
+
+@app.get("/api/tasks")
+def list_tasks(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, alias="perPage", ge=1, le=100),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+) -> dict:
+    return paginated_tasks(db, user.id, page=page, per_page=per_page)
+
+
+@app.get("/api/ledger")
+def list_ledger(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, alias="perPage", ge=1, le=100),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+) -> dict:
+    return paginated_ledger(db, user.id, page=page, per_page=per_page)
 
 
 @app.post("/api/assets/presign")
@@ -198,12 +223,59 @@ def preview_task_result(task_id: str, db: Session = Depends(get_db), user: User 
     if access["mode"] == "redirect":
         return RedirectResponse(str(access["url"]), status_code=302)
     preview_path = access["path"]
-    return FileResponse(preview_path, media_type="video/mp4", filename=preview_path.name)
+    return FileResponse(preview_path, media_type=access.get("mime_type", "video/mp4"), filename=access["filename"], content_disposition_type="inline")
+
+
+@app.get("/api/tasks/{task_id}/result/{filename}")
+def task_result_file(task_id: str, filename: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    access = get_task_result_access(db, user.id, task_id)
+    if access["mode"] == "redirect":
+        return RedirectResponse(str(access["url"]), status_code=302)
+    return FileResponse(access["path"], media_type=access.get("mime_type", "video/mp4"), filename=access["filename"], content_disposition_type="inline")
 
 
 @app.get("/api/tasks/{task_id}/result-link")
 def task_result_link(task_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
     return {"url": get_task_result_url(db, user.id, task_id)}
+
+
+@app.get("/api/internal/batches/{batch_id}")
+def internal_batch_status_endpoint(batch_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    return internal_batch_status(db, user.id, batch_id)
+
+
+@app.get("/api/internal/batches/{batch_id}/download")
+def internal_batch_download_endpoint(batch_id: str, part: int = Query(1, ge=1), db: Session = Depends(get_db), user: User = Depends(current_user)):
+    archive = create_internal_batch_zip(db, user.id, batch_id)
+    parts = archive.get("parts") or [archive]
+    if part > len(parts):
+        raise HTTPException(status_code=404, detail="download part not found")
+    selected = parts[part - 1]
+    return FileResponse(selected["path"], media_type="application/zip", filename=selected["filename"], content_disposition_type="attachment")
+
+
+@app.post("/api/internal/batches/{batch_id}/download-manifest")
+def internal_batch_download_manifest_endpoint(batch_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    archive = create_internal_batch_zip(db, user.id, batch_id)
+    parts = archive.get("parts") or [archive]
+    return {
+        "partCount": len(parts),
+        "parts": [
+            {
+                "index": part["index"],
+                "filename": part["filename"],
+                "sizeBytes": part["sizeBytes"],
+                "url": f"/api/internal/batches/{batch_id}/download?part={part['index']}",
+            }
+            for part in parts
+        ],
+    }
+
+
+@app.post("/api/internal/batches/{batch_id}/retry")
+def internal_batch_retry_endpoint(batch_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    result = retry_internal_batch_tasks(db, user.id, batch_id)
+    return {**result, "state": serialize_bootstrap(db, user.id)}
 
 
 @app.post("/api/provider/callback")
@@ -222,7 +294,7 @@ def provider_callback_endpoint(payload: ProviderCallback, db: Session = Depends(
         progress_percent=payload.progressPercent,
         progress_stage=payload.progressStage,
     )
-    return {"duplicated": duplicated, "state": serialize_bootstrap(db, _task.user_id)}
+    return {"duplicated": duplicated, "task": task_to_dict(_task)}
 
 
 @app.post("/api/recharge")
@@ -254,8 +326,13 @@ def admin_recharge_user_endpoint(user_id: str, payload: UserRecharge, db: Sessio
 
 
 @app.get("/api/admin/tasks")
-def admin_tasks_endpoint(db: Session = Depends(get_db), _admin: User = Depends(admin_user)) -> list[dict]:
-    return admin_tasks(db)
+def admin_tasks_endpoint(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, alias="perPage", ge=1, le=100),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> dict:
+    return admin_tasks(db, page=page, per_page=per_page)
 
 
 @app.get("/api/admin/gpu")

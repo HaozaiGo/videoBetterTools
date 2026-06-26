@@ -8,6 +8,7 @@ import { TasksPage } from "./pages/TasksPage";
 import { ToolPage } from "./pages/ToolPage";
 import { ToolsPage } from "./pages/ToolsPage";
 import { LoginPage } from "./pages/LoginPage";
+import { InternalBatchWorkflowPage } from "./pages/InternalBatchWorkflowPage";
 
 type RouterContext = {
   queryClient: QueryClient;
@@ -77,7 +78,13 @@ const adminRoute = createRoute({
   component: AdminPage,
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, loginRoute, toolsRoute, videoToolRoute, imageToolRoute, tasksRoute, billingRoute, adminRoute]);
+const internalBatchWorkflowRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/internal/batch-workflow",
+  component: InternalBatchWorkflowPage,
+});
+
+const routeTree = rootRoute.addChildren([indexRoute, loginRoute, toolsRoute, videoToolRoute, imageToolRoute, tasksRoute, billingRoute, adminRoute, internalBatchWorkflowRoute]);
 
 export const router = new Router({
   routeTree,

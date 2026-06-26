@@ -14,6 +14,25 @@ class VideoProcessingError(RuntimeError):
     pass
 
 
+class GpuUnavailableError(VideoProcessingError):
+    pass
+
+
+GPU_UNAVAILABLE_MARKERS = (
+    "GPU API HTTP 503",
+    "GPU preflight failed",
+    "Failed to initialize NVML",
+    "GPU metrics unavailable",
+    "configured GPU metrics unavailable",
+    "only 0/",
+    "nvidia-smi",
+)
+
+
+def is_gpu_unavailable_error(detail: str) -> bool:
+    return any(marker.lower() in detail.lower() for marker in GPU_UNAVAILABLE_MARKERS)
+
+
 def _binary(name: str) -> str:
     path = shutil.which(name)
     if path is None:
@@ -204,6 +223,8 @@ def _adapter_name(params: dict[str, Any]) -> str:
 
 def _final_result(output_key: str, output_path: Path) -> dict:
     stored = storage.save_file(output_key, output_path)
+    if storage.is_remote:
+        storage.delete_local_copy(stored.storage_key)
     return {
         "storage_key": stored.storage_key,
         "url": stored.public_url,
@@ -393,6 +414,8 @@ def process_with_external_model(
     except subprocess.CalledProcessError as exc:
         detail = "\n".join(part for part in [exc.stdout, exc.stderr] if part).strip()
         tail = detail[-1000:] if detail else str(exc)
+        if is_gpu_unavailable_error(tail):
+            raise GpuUnavailableError(f"{adapter} GPU unavailable: {tail}") from exc
         raise VideoProcessingError(f"{adapter} command failed: {tail}") from exc
     if result_meta_path.exists():
         return json.loads(result_meta_path.read_text(encoding="utf-8"))
@@ -423,14 +446,17 @@ def process_masked_video_removal(input_storage_key: str, task_id: str, params: d
     input_url = storage.presign_download(input_storage_key)
     adapter = _adapter_name(params)
     input_path = storage.local_path(input_storage_key)
+    input_url_for_adapter = input_url if _is_http_url(input_url) else None
     if not input_path.exists():
-        if adapter in {"propainter", "e2fgvi"} and _is_http_url(input_url):
+        if adapter in {"propainter", "e2fgvi"} and input_url_for_adapter:
             input_path.parent.mkdir(parents=True, exist_ok=True)
         else:
             try:
                 input_path = storage.ensure_local(input_storage_key)
             except FileNotFoundError as exc:
                 raise VideoProcessingError("Input video file not found.") from exc
+    else:
+        input_url_for_adapter = None
 
     regions = params.get("regions") or []
     if not regions:
@@ -444,7 +470,7 @@ def process_masked_video_removal(input_storage_key: str, task_id: str, params: d
         input_path,
         output_path,
         params,
-        input_url=input_url if _is_http_url(input_url) else None,
+        input_url=input_url_for_adapter,
         result_upload=None,
     )
     if remote_result:
