@@ -24,6 +24,7 @@ env:
   PRODUCTION_DEPLOY_HOST: 35.241.105.124
   RELEASE_DEPLOY_HOST: 101.96.226.213
   DEPLOY_PORT: "22"
+  SSH_OPTS: "-o BatchMode=yes -o ConnectTimeout=30 -o ConnectionAttempts=5 -o ServerAliveInterval=30 -o ServerAliveCountMax=20"
 
 jobs:
   deploy:
@@ -102,8 +103,10 @@ jobs:
       - name: Ensure Docker on release host
         if: startsWith(github.ref_name, 'release/')
         run: |
-          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+          ssh $SSH_OPTS -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
           set -euo pipefail
+
+          needs_docker_restart=0
 
           if ! command -v docker >/dev/null 2>&1; then
             if ! command -v apt-get >/dev/null 2>&1; then
@@ -113,10 +116,12 @@ jobs:
 
             apt-get update
             DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2
+            needs_docker_restart=1
           fi
 
           mkdir -p /etc/docker
-          cat > /etc/docker/daemon.json <<'EOF'
+          tmp_daemon_json="$(mktemp)"
+          cat > "$tmp_daemon_json" <<'EOF'
           {
             "registry-mirrors": [
               "https://docker.m.daocloud.io",
@@ -126,9 +131,19 @@ jobs:
           }
           EOF
 
+          if [ ! -f /etc/docker/daemon.json ] || ! cmp -s "$tmp_daemon_json" /etc/docker/daemon.json; then
+            cp "$tmp_daemon_json" /etc/docker/daemon.json
+            needs_docker_restart=1
+          fi
+          rm -f "$tmp_daemon_json"
+
           if command -v systemctl >/dev/null 2>&1; then
             systemctl enable docker
-            systemctl restart docker
+            if [ "$needs_docker_restart" = "1" ]; then
+              systemctl restart docker
+            else
+              systemctl start docker
+            fi
           fi
 
           docker --version
@@ -156,8 +171,8 @@ jobs:
           else
             prepare_remote="sudo mkdir -p '$DEPLOY_DIR/releases' '$DEPLOY_DIR/shared' && sudo chown -R '$DEPLOY_USER':'$DEPLOY_USER' '$DEPLOY_DIR'"
           fi
-          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$prepare_remote"
-          scp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" /tmp/model-plaza-release.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/release.tar.gz"
+          ssh $SSH_OPTS -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$prepare_remote"
+          scp $SSH_OPTS -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" /tmp/model-plaza-release.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/release.tar.gz"
 
       - name: Deploy with Docker Compose
         env:
@@ -171,7 +186,7 @@ jobs:
           fi
           production_env_b64="$(printf '%s' "${PRODUCTION_ENV:-}" | base64 -w 0)"
           main_env_b64="$(printf '%s' "${MAIN_PRODUCTION_ENV:-}" | base64 -w 0)"
-          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_DIR='$DEPLOY_DIR' GITHUB_SHA='$GITHUB_SHA' PRODUCTION_ENV_B64='$production_env_b64' MAIN_PRODUCTION_ENV_B64='$main_env_b64' DEPLOY_BUILD_MIRRORS='${DEPLOY_BUILD_MIRRORS:-0}' DEPLOY_WEB_PORT='${DEPLOY_WEB_PORT:-8003}' bash -s" <<'REMOTE'
+          ssh $SSH_OPTS -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_DIR='$DEPLOY_DIR' GITHUB_SHA='$GITHUB_SHA' PRODUCTION_ENV_B64='$production_env_b64' MAIN_PRODUCTION_ENV_B64='$main_env_b64' DEPLOY_BUILD_MIRRORS='${DEPLOY_BUILD_MIRRORS:-0}' DEPLOY_WEB_PORT='${DEPLOY_WEB_PORT:-8003}' bash -s" <<'REMOTE'
           set -euo pipefail
 
           release_dir="$DEPLOY_DIR/releases/$GITHUB_SHA"

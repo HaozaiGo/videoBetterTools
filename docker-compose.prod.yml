@@ -90,9 +90,7 @@ services:
         condition: service_started
 
   cleanup:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile.prod
+    image: model-plaza-api:${APP_VERSION:-latest}
     restart: unless-stopped
     command: python -m app.cleanup --loop
     env_file:
