@@ -103,7 +103,9 @@ jobs:
       - name: Ensure Docker on release host
         if: startsWith(github.ref_name, 'release/')
         run: |
-          ssh $SSH_OPTS -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+          run_remote() {
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              if ssh $SSH_OPTS -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
           set -euo pipefail
 
           needs_docker_restart=0
@@ -149,6 +151,17 @@ jobs:
           docker --version
           docker compose version
           REMOTE
+              then
+                return 0
+              fi
+              sleep_seconds=$((attempt * 10))
+              echo "SSH attempt $attempt failed; retrying in ${sleep_seconds}s..."
+              sleep "$sleep_seconds"
+            done
+            return 1
+          }
+
+          run_remote
 
       - name: Create source archive
         run: |
@@ -166,13 +179,25 @@ jobs:
 
       - name: Upload archive
         run: |
+          retry() {
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              if "$@"; then
+                return 0
+              fi
+              sleep_seconds=$((attempt * 10))
+              echo "Command attempt $attempt failed; retrying in ${sleep_seconds}s..."
+              sleep "$sleep_seconds"
+            done
+            return 1
+          }
+
           if [ "$DEPLOY_USER" = "root" ]; then
             prepare_remote="mkdir -p '$DEPLOY_DIR/releases' '$DEPLOY_DIR/shared'"
           else
             prepare_remote="sudo mkdir -p '$DEPLOY_DIR/releases' '$DEPLOY_DIR/shared' && sudo chown -R '$DEPLOY_USER':'$DEPLOY_USER' '$DEPLOY_DIR'"
           fi
-          ssh $SSH_OPTS -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$prepare_remote"
-          scp $SSH_OPTS -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" /tmp/model-plaza-release.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/release.tar.gz"
+          retry ssh $SSH_OPTS -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$prepare_remote"
+          retry scp $SSH_OPTS -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" /tmp/model-plaza-release.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/release.tar.gz"
 
       - name: Deploy with Docker Compose
         env:
@@ -186,7 +211,9 @@ jobs:
           fi
           production_env_b64="$(printf '%s' "${PRODUCTION_ENV:-}" | base64 -w 0)"
           main_env_b64="$(printf '%s' "${MAIN_PRODUCTION_ENV:-}" | base64 -w 0)"
-          ssh $SSH_OPTS -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_DIR='$DEPLOY_DIR' GITHUB_SHA='$GITHUB_SHA' PRODUCTION_ENV_B64='$production_env_b64' MAIN_PRODUCTION_ENV_B64='$main_env_b64' DEPLOY_BUILD_MIRRORS='${DEPLOY_BUILD_MIRRORS:-0}' DEPLOY_WEB_PORT='${DEPLOY_WEB_PORT:-8003}' bash -s" <<'REMOTE'
+          run_remote() {
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              if ssh $SSH_OPTS -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_DIR='$DEPLOY_DIR' GITHUB_SHA='$GITHUB_SHA' PRODUCTION_ENV_B64='$production_env_b64' MAIN_PRODUCTION_ENV_B64='$main_env_b64' DEPLOY_BUILD_MIRRORS='${DEPLOY_BUILD_MIRRORS:-0}' DEPLOY_WEB_PORT='${DEPLOY_WEB_PORT:-8003}' bash -s" <<'REMOTE'
           set -euo pipefail
 
           release_dir="$DEPLOY_DIR/releases/$GITHUB_SHA"
@@ -319,3 +346,14 @@ jobs:
             | xargs -r rm -rf
           docker image prune -f
           REMOTE
+              then
+                return 0
+              fi
+              sleep_seconds=$((attempt * 10))
+              echo "SSH deploy attempt $attempt failed; retrying in ${sleep_seconds}s..."
+              sleep "$sleep_seconds"
+            done
+            return 1
+          }
+
+          run_remote
