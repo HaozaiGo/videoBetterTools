@@ -106,30 +106,60 @@ type InternalBatchDownloadManifest = {
     index: number;
     filename: string;
     sizeBytes: number;
+    estimatedSizeBytes?: number;
     url: string;
   }>;
 };
 
+function formatDownloadSize(bytes?: number) {
+  if (!bytes || bytes <= 0) return "";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = bytes;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size >= 10 || unitIndex === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function triggerInternalBatchPartDownload(part: InternalBatchDownloadManifest["parts"][number], fallbackName: string, token: string | null) {
+  const url = new URL(part.url, window.location.origin);
+  if (token) {
+    url.searchParams.set("access_token", token);
+  }
+  const link = document.createElement("a");
+  link.href = url.href;
+  link.download = part.filename || fallbackName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
 export async function downloadInternalBatchZip(batchId: string, batchName: string) {
   const manifest = await request<InternalBatchDownloadManifest>(`/api/internal/batches/${encodeURIComponent(batchId)}/download-manifest`, { method: "POST" });
   const token = getAuthToken();
+  const fallbackName = `${batchName || "内部批量任务"}.zip`;
   const parts = manifest.parts.length
     ? manifest.parts
-    : [{ index: 1, filename: `${batchName || "内部批量任务"}.zip`, sizeBytes: 0, url: `/api/internal/batches/${encodeURIComponent(batchId)}/download` }];
+    : [{ index: 1, filename: fallbackName, sizeBytes: 0, url: `/api/internal/batches/${encodeURIComponent(batchId)}/download` }];
 
   for (const [partIndex, part] of parts.entries()) {
-    const url = new URL(part.url, window.location.origin);
-    if (token) {
-      url.searchParams.set("access_token", token);
-    }
-    const link = document.createElement("a");
-    link.href = url.href;
-    link.download = part.filename || `${batchName || "内部批量任务"}.zip`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
+    triggerInternalBatchPartDownload(part, fallbackName, token);
     if (partIndex < parts.length - 1) {
-      await new Promise((resolve) => window.setTimeout(resolve, 500));
+      const nextPart = parts[partIndex + 1];
+      const currentSize = formatDownloadSize(part.sizeBytes || part.estimatedSizeBytes);
+      const nextSize = formatDownloadSize(nextPart.sizeBytes || nextPart.estimatedSizeBytes);
+      const shouldContinue = window.confirm(
+        [
+          `已开始下载第 ${partIndex + 1}/${parts.length} 个压缩包${currentSize ? `（约 ${currentSize}）` : ""}。`,
+          `请等浏览器完成当前下载后，再点击“确定”下载第 ${partIndex + 2}/${parts.length} 个压缩包${nextSize ? `（约 ${nextSize}）` : ""}。`,
+          "点击“取消”可停止后续分包下载。",
+        ].join("\n")
+      );
+      if (!shouldContinue) {
+        return;
+      }
     }
   }
 }

@@ -28,6 +28,7 @@ from app.services import (
     get_multipart_upload,
     paginated_ledger,
     paginated_tasks,
+    plan_internal_batch_zip,
     provider_callback,
     recharge_wallet,
     retry_internal_batch_tasks,
@@ -246,7 +247,7 @@ def internal_batch_status_endpoint(batch_id: str, db: Session = Depends(get_db),
 
 @app.get("/api/internal/batches/{batch_id}/download")
 def internal_batch_download_endpoint(batch_id: str, part: int = Query(1, ge=1), db: Session = Depends(get_db), user: User = Depends(current_user)):
-    archive = create_internal_batch_zip(db, user.id, batch_id)
+    archive = create_internal_batch_zip(db, user.id, batch_id, part=part)
     parts = archive.get("parts") or [archive]
     if part > len(parts):
         raise HTTPException(status_code=404, detail="download part not found")
@@ -256,7 +257,7 @@ def internal_batch_download_endpoint(batch_id: str, part: int = Query(1, ge=1), 
 
 @app.post("/api/internal/batches/{batch_id}/download-manifest")
 def internal_batch_download_manifest_endpoint(batch_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
-    archive = create_internal_batch_zip(db, user.id, batch_id)
+    archive = plan_internal_batch_zip(db, user.id, batch_id)
     parts = archive.get("parts") or [archive]
     return {
         "partCount": len(parts),
@@ -265,6 +266,7 @@ def internal_batch_download_manifest_endpoint(batch_id: str, db: Session = Depen
                 "index": part["index"],
                 "filename": part["filename"],
                 "sizeBytes": part["sizeBytes"],
+                "estimatedSizeBytes": part.get("estimatedSizeBytes", 0),
                 "url": f"/api/internal/batches/{batch_id}/download?part={part['index']}",
             }
             for part in parts

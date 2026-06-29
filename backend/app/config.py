@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     cleanup_retention_hours: int = 48
     internal_batch_zip_retention_hours: int = 12
     internal_batch_zip_part_max_bytes: int = 10 * 1024 * 1024 * 1024
+    internal_batch_zip_part_max_files: int = 200
     cleanup_disk_high_watermark_percent: int = 80
     cleanup_disk_low_watermark_percent: int = 75
     cleanup_disk_min_age_hours: int = 6

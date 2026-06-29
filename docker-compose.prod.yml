@@ -23,9 +23,16 @@ services:
       - redis-data:/data
 
   api:
+    image: model-plaza-api:${APP_VERSION:-latest}
     build:
       context: .
       dockerfile: backend/Dockerfile.prod
+      args:
+        UV_BASE_IMAGE: ${UV_BASE_IMAGE:-ghcr.io/astral-sh/uv:python3.12-bookworm-slim}
+        APT_MIRROR: ${APT_MIRROR:-http://deb.debian.org/debian}
+        APT_SECURITY_MIRROR: ${APT_SECURITY_MIRROR:-http://deb.debian.org/debian-security}
+        PYPI_INDEX_URL: ${PYPI_INDEX_URL:-https://pypi.org/simple}
+        UV_SYNC_ARGS: ${UV_SYNC_ARGS:---frozen}
     restart: unless-stopped
     command: sh -c "alembic upgrade head && python -m app.seed && uvicorn app.main:app --host 0.0.0.0 --port 8010"
     env_file:
@@ -50,9 +57,16 @@ services:
         condition: service_started
 
   worker:
+    image: model-plaza-api:${APP_VERSION:-latest}
     build:
       context: .
       dockerfile: backend/Dockerfile.prod
+      args:
+        UV_BASE_IMAGE: ${UV_BASE_IMAGE:-ghcr.io/astral-sh/uv:python3.12-bookworm-slim}
+        APT_MIRROR: ${APT_MIRROR:-http://deb.debian.org/debian}
+        APT_SECURITY_MIRROR: ${APT_SECURITY_MIRROR:-http://deb.debian.org/debian-security}
+        PYPI_INDEX_URL: ${PYPI_INDEX_URL:-https://pypi.org/simple}
+        UV_SYNC_ARGS: ${UV_SYNC_ARGS:---frozen}
     restart: unless-stopped
     command: python -m app.worker
     env_file:
@@ -76,9 +90,7 @@ services:
         condition: service_started
 
   cleanup:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile.prod
+    image: model-plaza-api:${APP_VERSION:-latest}
     restart: unless-stopped
     command: python -m app.cleanup --loop
     env_file:
@@ -97,9 +109,12 @@ services:
         condition: service_healthy
 
   web:
+    image: model-plaza-web:${APP_VERSION:-latest}
     build:
       context: .
       dockerfile: Dockerfile.web
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
     restart: unless-stopped
     ports:
       - "${WEB_PORT:-8003}:80"

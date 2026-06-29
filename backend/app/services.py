@@ -263,7 +263,7 @@ def internal_batch_status(db: Session, user_id: str, batch_id: str) -> dict:
     }
 
 
-def create_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
+def _internal_batch_zip_entries(db: Session, user_id: str, batch_id: str) -> tuple[dict, list[Task], list[dict]]:
     batch = internal_batch_status(db, user_id, batch_id)
     if not batch["downloadReady"]:
         raise HTTPException(status_code=409, detail=f"batch has no succeeded tasks: {batch['succeeded']}/{batch['total']} succeeded")
@@ -273,6 +273,8 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
     safe_batch_name = safe_storage_name(str(batch["name"]) or batch_id).removesuffix(".zip")
     zip_dir = settings.upload_path / "internal-batch-zips"
     zip_dir.mkdir(parents=True, exist_ok=True)
+    batch["_safeZipName"] = safe_batch_name
+    batch["_zipDir"] = zip_dir
 
     used_names: set[str] = set()
     entries: list[dict] = []
@@ -280,14 +282,15 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
         preview_path = task_preview_path(task)
         if preview_path.exists() and preview_path.is_file():
             source_path = preview_path
+            entry_size = source_path.stat().st_size
+            storage_key = None
         elif task.output_asset_id:
             output_asset = db.get(Asset, task.output_asset_id)
             if output_asset is None:
                 raise HTTPException(status_code=404, detail=f"task result not found: {task.id}")
-            try:
-                source_path = storage.ensure_local(output_asset.storage_key)
-            except FileNotFoundError as exc:
-                raise HTTPException(status_code=404, detail=f"task result not ready: {task.id}") from exc
+            source_path = None
+            entry_size = int(output_asset.size_bytes or 0)
+            storage_key = output_asset.storage_key
         else:
             raise HTTPException(status_code=404, detail=f"task result not ready: {task.id}")
 
@@ -298,15 +301,19 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
             zip_name = f"{index:03d}-{task.id[:8]}-{duplicate_index}-{base_name}"
             duplicate_index += 1
         used_names.add(zip_name)
-        entries.append({"task": task, "source_path": source_path, "zip_name": zip_name, "size": source_path.stat().st_size})
+        entries.append({"task": task, "source_path": source_path, "storage_key": storage_key, "zip_name": zip_name, "size": entry_size})
+    return batch, tasks, entries
 
+
+def _internal_batch_zip_parts(batch: dict, entries: list[dict]) -> list[dict]:
     max_part_bytes = max(1, int(settings.internal_batch_zip_part_max_bytes))
+    max_part_files = max(1, int(settings.internal_batch_zip_part_max_files))
     entry_parts: list[list[dict]] = []
     current_part: list[dict] = []
     current_size = 0
     for entry in entries:
         entry_size = int(entry["size"])
-        if current_part and current_size + entry_size > max_part_bytes:
+        if current_part and (current_size + entry_size > max_part_bytes or len(current_part) >= max_part_files):
             entry_parts.append(current_part)
             current_part = []
             current_size = 0
@@ -315,7 +322,9 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
     if current_part:
         entry_parts.append(current_part)
 
-    base_zip_stem = f"{safe_batch_name}-{batch_id[:8]}-{batch['succeeded']}-of-{batch['total']}"
+    safe_batch_name = str(batch["_safeZipName"])
+    zip_dir = Path(batch["_zipDir"])
+    base_zip_stem = f"{safe_batch_name}-{str(batch['id'])[:8]}-{batch['succeeded']}-of-{batch['total']}"
     part_count = max(1, len(entry_parts))
     parts: list[dict] = []
 
@@ -323,6 +332,37 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
         zip_filename = f"{base_zip_stem}.zip" if part_count == 1 else f"{base_zip_stem}-part{part_index:02d}-of{part_count:02d}.zip"
         zip_path = zip_dir / zip_filename
         download_filename = f"{safe_batch_name}.zip" if part_count == 1 else f"{safe_batch_name}-part{part_index:02d}-of{part_count:02d}.zip"
+        parts.append(
+            {
+                "path": zip_path,
+                "filename": download_filename,
+                "index": part_index,
+                "sizeBytes": zip_path.stat().st_size if zip_path.exists() and zip_path.is_file() else 0,
+                "estimatedSizeBytes": sum(int(entry["size"]) for entry in part_entries),
+                "entries": part_entries,
+                "partCount": part_count,
+            }
+        )
+    return parts
+
+
+def plan_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
+    batch, _tasks, entries = _internal_batch_zip_entries(db, user_id, batch_id)
+    parts = _internal_batch_zip_parts(batch, entries)
+    return {"parts": parts, "partCount": len(parts)}
+
+
+def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: int | None = None) -> dict:
+    batch, tasks, entries = _internal_batch_zip_entries(db, user_id, batch_id)
+    parts = _internal_batch_zip_parts(batch, entries)
+    max_part_bytes = max(1, int(settings.internal_batch_zip_part_max_bytes))
+    max_part_files = max(1, int(settings.internal_batch_zip_part_max_files))
+    if part is not None and (part < 1 or part > len(parts)):
+        raise HTTPException(status_code=404, detail="download part not found")
+
+    selected_parts = parts if part is None else [parts[part - 1]]
+    for selected_part in selected_parts:
+        zip_path = selected_part["path"]
         if not (zip_path.exists() and zip_path.is_file() and zip_path.stat().st_size > 0):
             summary = {
                 "id": batch["id"],
@@ -332,10 +372,11 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
                 "failed": batch["failed"],
                 "cancelled": batch["cancelled"],
                 "processing": batch["processing"],
-                "partIndex": part_index,
-                "partCount": part_count,
+                "partIndex": selected_part["index"],
+                "partCount": selected_part["partCount"],
                 "partMaxBytes": max_part_bytes,
-                "includedTaskIds": [entry["task"].id for entry in part_entries],
+                "partMaxFiles": max_part_files,
+                "includedTaskIds": [entry["task"].id for entry in selected_part["entries"]],
                 "skippedTasks": [
                     {
                         "id": task.id,
@@ -352,16 +393,22 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
             try:
                 with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                     archive.writestr(INTERNAL_BATCH_ZIP_SUMMARY_NAME, json.dumps(summary, ensure_ascii=False, indent=2))
-                    for entry in part_entries:
-                        archive.write(entry["source_path"], entry["zip_name"])
+                    for entry in selected_part["entries"]:
+                        source_path = entry.get("source_path")
+                        if source_path is None:
+                            try:
+                                source_path = storage.ensure_local(entry["storage_key"])
+                            except FileNotFoundError as exc:
+                                raise HTTPException(status_code=404, detail=f"task result not ready: {entry['task'].id}") from exc
+                        archive.write(source_path, entry["zip_name"])
                 temp_zip_path.replace(zip_path)
             finally:
                 if temp_zip_path.exists():
                     temp_zip_path.unlink()
-        parts.append({"path": zip_path, "filename": download_filename, "index": part_index, "sizeBytes": zip_path.stat().st_size})
+        selected_part["sizeBytes"] = zip_path.stat().st_size
 
-    first_part = parts[0]
-    return {"path": first_part["path"], "filename": first_part["filename"], "parts": parts, "partCount": part_count}
+    first_part = selected_parts[0]
+    return {"path": first_part["path"], "filename": first_part["filename"], "parts": parts, "partCount": len(parts)}
 
 
 def retry_internal_batch_tasks(db: Session, user_id: str, batch_id: str) -> dict:

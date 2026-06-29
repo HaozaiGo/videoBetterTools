@@ -23,9 +23,8 @@ concurrency:
 env:
   PRODUCTION_DEPLOY_HOST: 35.241.105.124
   RELEASE_DEPLOY_HOST: 101.96.226.213
-  DEPLOY_USER: huangguojie
   DEPLOY_PORT: "22"
-  DEPLOY_DIR: /opt/videoBetterTools
+  SSH_OPTS: "-o BatchMode=yes -o ConnectTimeout=30 -o ConnectionAttempts=5 -o ServerAliveInterval=30 -o ServerAliveCountMax=20"
 
 jobs:
   deploy:
@@ -58,11 +57,23 @@ jobs:
           fi
 
           if [ "$target" = "release" ]; then
-            echo "DEPLOY_ENV=release" >> "$GITHUB_ENV"
-            echo "DEPLOY_HOST=$RELEASE_DEPLOY_HOST" >> "$GITHUB_ENV"
+            {
+              echo "DEPLOY_ENV=release"
+              echo "DEPLOY_HOST=$RELEASE_DEPLOY_HOST"
+              echo "DEPLOY_USER=root"
+              echo "DEPLOY_DIR=/opt/modelPlaza"
+              echo "DEPLOY_BUILD_MIRRORS=1"
+              echo "DEPLOY_WEB_PORT=80"
+            } >> "$GITHUB_ENV"
           else
-            echo "DEPLOY_ENV=production" >> "$GITHUB_ENV"
-            echo "DEPLOY_HOST=$PRODUCTION_DEPLOY_HOST" >> "$GITHUB_ENV"
+            {
+              echo "DEPLOY_ENV=production"
+              echo "DEPLOY_HOST=$PRODUCTION_DEPLOY_HOST"
+              echo "DEPLOY_USER=huangguojie"
+              echo "DEPLOY_DIR=/opt/videoBetterTools"
+              echo "DEPLOY_BUILD_MIRRORS=0"
+              echo "DEPLOY_WEB_PORT=8003"
+            } >> "$GITHUB_ENV"
           fi
 
           echo "Deploy target: $target"
@@ -89,6 +100,69 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -p "$DEPLOY_PORT" "$DEPLOY_HOST" >> ~/.ssh/known_hosts
 
+      - name: Ensure Docker on release host
+        if: startsWith(github.ref_name, 'release/')
+        run: |
+          run_remote() {
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              if ssh $SSH_OPTS -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+
+          needs_docker_restart=0
+
+          if ! command -v docker >/dev/null 2>&1; then
+            if ! command -v apt-get >/dev/null 2>&1; then
+              echo "Docker is not installed, and automatic installation currently supports only apt-based Linux hosts." >&2
+              exit 1
+            fi
+
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2
+            needs_docker_restart=1
+          fi
+
+          mkdir -p /etc/docker
+          tmp_daemon_json="$(mktemp)"
+          cat > "$tmp_daemon_json" <<'EOF'
+          {
+            "registry-mirrors": [
+              "https://docker.m.daocloud.io",
+              "https://docker.1ms.run",
+              "https://dockerpull.cn"
+            ]
+          }
+          EOF
+
+          if [ ! -f /etc/docker/daemon.json ] || ! cmp -s "$tmp_daemon_json" /etc/docker/daemon.json; then
+            cp "$tmp_daemon_json" /etc/docker/daemon.json
+            needs_docker_restart=1
+          fi
+          rm -f "$tmp_daemon_json"
+
+          if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable docker
+            if [ "$needs_docker_restart" = "1" ]; then
+              systemctl restart docker
+            else
+              systemctl start docker
+            fi
+          fi
+
+          docker --version
+          docker compose version
+          REMOTE
+              then
+                return 0
+              fi
+              sleep_seconds=$((attempt * 10))
+              echo "SSH attempt $attempt failed; retrying in ${sleep_seconds}s..."
+              sleep "$sleep_seconds"
+            done
+            return 1
+          }
+
+          run_remote
+
       - name: Create source archive
         run: |
           tar \
@@ -105,16 +179,41 @@ jobs:
 
       - name: Upload archive
         run: |
-          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "sudo mkdir -p '$DEPLOY_DIR/releases' '$DEPLOY_DIR/shared' && sudo chown -R '$DEPLOY_USER':'$DEPLOY_USER' '$DEPLOY_DIR'"
-          scp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" /tmp/model-plaza-release.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/release.tar.gz"
+          retry() {
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              if "$@"; then
+                return 0
+              fi
+              sleep_seconds=$((attempt * 10))
+              echo "Command attempt $attempt failed; retrying in ${sleep_seconds}s..."
+              sleep "$sleep_seconds"
+            done
+            return 1
+          }
+
+          if [ "$DEPLOY_USER" = "root" ]; then
+            prepare_remote="mkdir -p '$DEPLOY_DIR/releases' '$DEPLOY_DIR/shared'"
+          else
+            prepare_remote="sudo mkdir -p '$DEPLOY_DIR/releases' '$DEPLOY_DIR/shared' && sudo chown -R '$DEPLOY_USER':'$DEPLOY_USER' '$DEPLOY_DIR'"
+          fi
+          retry ssh $SSH_OPTS -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$prepare_remote"
+          retry scp $SSH_OPTS -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" /tmp/model-plaza-release.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/release.tar.gz"
 
       - name: Deploy with Docker Compose
         env:
-          PRODUCTION_ENV: ${{ secrets.PRODUCTION_ENV }}
+          MAIN_PRODUCTION_ENV: ${{ secrets.PRODUCTION_ENV }}
+          RELEASE_PRODUCTION_ENV: ${{ secrets.RELEASE_PRODUCTION_ENV }}
         run: |
+          if [ "$DEPLOY_ENV" = "release" ]; then
+            PRODUCTION_ENV="$RELEASE_PRODUCTION_ENV"
+          else
+            PRODUCTION_ENV="$MAIN_PRODUCTION_ENV"
+          fi
           production_env_b64="$(printf '%s' "${PRODUCTION_ENV:-}" | base64 -w 0)"
-          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_DIR='$DEPLOY_DIR' GITHUB_SHA='$GITHUB_SHA' PRODUCTION_ENV_B64='$production_env_b64' bash -s" <<'REMOTE'
+          main_env_b64="$(printf '%s' "${MAIN_PRODUCTION_ENV:-}" | base64 -w 0)"
+          run_remote() {
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              if ssh $SSH_OPTS -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_DIR='$DEPLOY_DIR' GITHUB_SHA='$GITHUB_SHA' PRODUCTION_ENV_B64='$production_env_b64' MAIN_PRODUCTION_ENV_B64='$main_env_b64' DEPLOY_BUILD_MIRRORS='${DEPLOY_BUILD_MIRRORS:-0}' DEPLOY_WEB_PORT='${DEPLOY_WEB_PORT:-8003}' bash -s" <<'REMOTE'
           set -euo pipefail
 
           release_dir="$DEPLOY_DIR/releases/$GITHUB_SHA"
@@ -134,7 +233,7 @@ jobs:
           POSTGRES_PASSWORD=$postgres_password
           AUTH_SECRET=$auth_secret
           ALLOW_DEMO_WITHOUT_AUTH=false
-          WEB_PORT=8003
+          WEB_PORT=$DEPLOY_WEB_PORT
           WORKER_REPLICAS=8
           TASK_JOB_TIMEOUT_SECONDS=7200
           ASSET_RETENTION_HOURS=48
@@ -142,9 +241,11 @@ jobs:
           CLEANUP_INTERVAL_SECONDS=3600
           INTERNAL_BATCH_ZIP_RETENTION_HOURS=12
           INTERNAL_BATCH_ZIP_PART_MAX_BYTES=10737418240
+          INTERNAL_BATCH_ZIP_PART_MAX_FILES=200
           CLEANUP_DISK_HIGH_WATERMARK_PERCENT=80
           CLEANUP_DISK_LOW_WATERMARK_PERCENT=75
           CLEANUP_DISK_MIN_AGE_HOURS=6
+          VOLCENGINE_TOS_PRESIGN_EXPIRES_SECONDS=21600
           MODEL_PLAZA_GPU_API_URL=http://32.196.46.122:18081
           MODEL_PLAZA_GPU_API_KEY=model-plaza-dev-gpu-key
           MODEL_PLAZA_CALLBACK_URL=http://api:8010/api/provider/callback
@@ -152,20 +253,12 @@ jobs:
           MODEL_PLAZA_GPU_STATUS_FAILURES=12
           MODEL_PLAZA_GPU_DOWNLOAD_RETRIES=3
           MODEL_PLAZA_GPU_DOWNLOAD_RETRY_BACKOFF_SECONDS=5
-          STORAGE_BACKEND=local
+          STORAGE_BACKEND=tos
           EOF
           fi
 
           if grep -q '^MODEL_PLAZA_GPU_API_URL=.*:18080' "$shared_env"; then
             sed -i 's#:18080#:18081#' "$shared_env"
-          fi
-
-          if [ -z "${PRODUCTION_ENV_B64:-}" ]; then
-            if grep -Eq '^WEB_PORT=(80|18081)$' "$shared_env"; then
-              sed -i 's/^WEB_PORT=.*/WEB_PORT=8003/' "$shared_env"
-            elif ! grep -q '^WEB_PORT=' "$shared_env"; then
-              printf '\nWEB_PORT=8003\n' >> "$shared_env"
-            fi
           fi
 
           set_env_value() {
@@ -178,11 +271,31 @@ jobs:
             fi
           }
 
+          main_env_file=""
+          if [ -n "${MAIN_PRODUCTION_ENV_B64:-}" ]; then
+            main_env_file="$(mktemp)"
+            printf '%s' "$MAIN_PRODUCTION_ENV_B64" | base64 -d > "$main_env_file"
+          fi
+
+          set_env_from_main() {
+            key="$1"
+            if [ -n "$main_env_file" ] && value="$(awk -v key="$key" 'index($0, key "=") == 1 { print substr($0, length(key) + 2); found=1 } END { exit found ? 0 : 1 }' "$main_env_file")"; then
+              set_env_value "$key" "$value"
+            fi
+          }
+
+          if [ -z "${PRODUCTION_ENV_B64:-}" ]; then
+            set_env_value WEB_PORT "$DEPLOY_WEB_PORT"
+          fi
+
+          set_env_value STORAGE_BACKEND tos
+          set_env_value MODEL_PLAZA_GPU_API_URL http://32.196.46.122:18081
           set_env_value ASSET_RETENTION_HOURS 48
           set_env_value CLEANUP_RETENTION_HOURS 48
           set_env_value CLEANUP_INTERVAL_SECONDS 3600
           set_env_value INTERNAL_BATCH_ZIP_RETENTION_HOURS 12
           set_env_value INTERNAL_BATCH_ZIP_PART_MAX_BYTES 10737418240
+          set_env_value INTERNAL_BATCH_ZIP_PART_MAX_FILES 200
           set_env_value CLEANUP_DISK_HIGH_WATERMARK_PERCENT 80
           set_env_value CLEANUP_DISK_LOW_WATERMARK_PERCENT 75
           set_env_value CLEANUP_DISK_MIN_AGE_HOURS 6
@@ -191,16 +304,42 @@ jobs:
           set_env_value MODEL_PLAZA_GPU_DOWNLOAD_RETRIES 3
           set_env_value MODEL_PLAZA_GPU_DOWNLOAD_RETRY_BACKOFF_SECONDS 5
 
+          if [ "${DEPLOY_BUILD_MIRRORS:-0}" = "1" ]; then
+            set_env_from_main STORAGE_BACKEND
+            set_env_from_main MODEL_PLAZA_GPU_API_URL
+            set_env_from_main VOLCENGINE_TOS_AK
+            set_env_from_main VOLCENGINE_TOS_SK
+            set_env_from_main VOLCENGINE_TOS_BUCKET
+            set_env_from_main VOLCENGINE_TOS_ENDPOINT
+            set_env_from_main VOLCENGINE_TOS_REGION
+            set_env_from_main VOLCENGINE_TOS_PUBLIC_BASE_URL
+            set_env_from_main VOLCENGINE_TOS_PRESIGN_EXPIRES_SECONDS
+          fi
+
+          if [ "${DEPLOY_BUILD_MIRRORS:-0}" = "1" ]; then
+            set_env_value APT_MIRROR http://mirrors.ivolces.com/debian
+            set_env_value APT_SECURITY_MIRROR http://mirrors.ivolces.com/debian-security
+            set_env_value PYPI_INDEX_URL https://mirrors.aliyun.com/pypi/simple
+            set_env_value UV_SYNC_ARGS "--upgrade"
+            set_env_value UV_BASE_IMAGE ghcr.nju.edu.cn/astral-sh/uv:python3.12-bookworm-slim
+            set_env_value NPM_REGISTRY https://registry.npmmirror.com
+            set_env_value WEB_PORT "$DEPLOY_WEB_PORT"
+          fi
+
+          rm -f "$main_env_file"
+
           ln -sfn "$shared_env" "$release_dir/.env"
           cd "$release_dir"
 
           worker_replicas="$(grep -E '^WORKER_REPLICAS=' .env | tail -n 1 | cut -d= -f2- || true)"
           worker_replicas="${worker_replicas:-3}"
-          docker compose -f docker-compose.prod.yml up -d --build --remove-orphans --scale "worker=$worker_replicas"
+          APP_VERSION="$GITHUB_SHA" docker compose -f docker-compose.prod.yml up -d --build --remove-orphans --scale "worker=$worker_replicas"
           docker compose -f docker-compose.prod.yml ps
 
           ln -sfn "$release_dir" "$DEPLOY_DIR/current"
           rm -f "$DEPLOY_DIR/release.tar.gz"
+          rm -f "$DEPLOY_DIR/images.tar.gz"
+          rm -rf "$DEPLOY_DIR/image-parts"
           current_release="$(readlink -f "$DEPLOY_DIR/current")"
           find "$DEPLOY_DIR/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
             | sort -rn \
@@ -209,3 +348,14 @@ jobs:
             | xargs -r rm -rf
           docker image prune -f
           REMOTE
+              then
+                return 0
+              fi
+              sleep_seconds=$((attempt * 10))
+              echo "SSH deploy attempt $attempt failed; retrying in ${sleep_seconds}s..."
+              sleep "$sleep_seconds"
+            done
+            return 1
+          }
+
+          run_remote
