@@ -720,8 +720,10 @@ export function InternalBatchWorkflowPage() {
                 </button>
               </div>
               <InternalBatchDownloadParts
+                batchId={activeBatch.id}
                 batchName={activeBatch.name}
                 manifest={downloadManifest}
+                onManifestChange={setDownloadManifest}
                 onStarted={(part) => setNotice(`已开始下载 ${part.filename}`)}
               />
             </div>

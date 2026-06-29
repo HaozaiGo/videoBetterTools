@@ -10,6 +10,8 @@ import type { BootstrapState, Task } from "../types";
 
 const columnHelper = createColumnHelper<Task>();
 const pageSize = 50;
+const taskListRefetchIntervalMs = 10_000;
+const internalBatchRefetchIntervalMs = 5_000;
 
 function failureReason(task: Task) {
   if (task.status !== "failed") return "";
@@ -80,7 +82,7 @@ function InternalBatchDownloadPanel({ task }: { task: Task }) {
     enabled: Boolean(batch?.id),
     refetchInterval: (query) => {
       const state = query.state.data;
-      return state?.processing ? 2500 : false;
+      return state?.processing ? internalBatchRefetchIntervalMs : false;
     },
   });
   const downloadMutation = useMutation({
@@ -132,8 +134,10 @@ function InternalBatchDownloadPanel({ task }: { task: Task }) {
         </button>
       </div>
       <InternalBatchDownloadParts
+        batchId={batch.id}
         batchName={batch.name}
         manifest={downloadManifest}
+        onManifestChange={setDownloadManifest}
         onStarted={(part) => setMessage(`已开始下载 ${part.filename}`)}
       />
     </div>
@@ -152,7 +156,7 @@ export function TasksPage() {
     initialData: currentPage === 1 ? { items: data.tasks, page: data.taskPage } : undefined,
     refetchInterval: (query) => {
       const state = query.state.data;
-      return state?.items.some((task) => ["queued", "processing"].includes(task.status)) ? 1600 : false;
+      return state?.items.some((task) => ["queued", "processing"].includes(task.status)) ? taskListRefetchIntervalMs : false;
     },
   });
   const taskPage = tasksQuery.data || { items: data.tasks, page: data.taskPage };
