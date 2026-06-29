@@ -111,17 +111,8 @@ type InternalBatchDownloadManifest = {
   }>;
 };
 
-function formatDownloadSize(bytes?: number) {
-  if (!bytes || bytes <= 0) return "";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let size = bytes;
-  let unitIndex = 0;
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex += 1;
-  }
-  return `${size >= 10 || unitIndex === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unitIndex]}`;
-}
+const internalBatchDownloadPollMs = 5000;
+const internalBatchDownloadPartTimeoutMs = 60 * 60 * 1000;
 
 function triggerInternalBatchPartDownload(part: InternalBatchDownloadManifest["parts"][number], fallbackName: string, token: string | null) {
   const url = new URL(part.url, window.location.origin);
@@ -136,6 +127,23 @@ function triggerInternalBatchPartDownload(part: InternalBatchDownloadManifest["p
   link.remove();
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function waitForInternalBatchPartReady(batchId: string, partIndex: number) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < internalBatchDownloadPartTimeoutMs) {
+    await sleep(internalBatchDownloadPollMs);
+    const manifest = await request<InternalBatchDownloadManifest>(`/api/internal/batches/${encodeURIComponent(batchId)}/download-manifest`, { method: "POST" });
+    const part = manifest.parts.find((item) => item.index === partIndex);
+    if (part && part.sizeBytes > 0) {
+      return;
+    }
+  }
+  throw new Error(`第 ${partIndex} 个压缩包生成超时，请稍后重试`);
+}
+
 export async function downloadInternalBatchZip(batchId: string, batchName: string) {
   const manifest = await request<InternalBatchDownloadManifest>(`/api/internal/batches/${encodeURIComponent(batchId)}/download-manifest`, { method: "POST" });
   const token = getAuthToken();
@@ -147,18 +155,8 @@ export async function downloadInternalBatchZip(batchId: string, batchName: strin
   for (const [partIndex, part] of parts.entries()) {
     triggerInternalBatchPartDownload(part, fallbackName, token);
     if (partIndex < parts.length - 1) {
-      const nextPart = parts[partIndex + 1];
-      const currentSize = formatDownloadSize(part.sizeBytes || part.estimatedSizeBytes);
-      const nextSize = formatDownloadSize(nextPart.sizeBytes || nextPart.estimatedSizeBytes);
-      const shouldContinue = window.confirm(
-        [
-          `已开始下载第 ${partIndex + 1}/${parts.length} 个压缩包${currentSize ? `（约 ${currentSize}）` : ""}。`,
-          `请等浏览器完成当前下载后，再点击“确定”下载第 ${partIndex + 2}/${parts.length} 个压缩包${nextSize ? `（约 ${nextSize}）` : ""}。`,
-          "点击“取消”可停止后续分包下载。",
-        ].join("\n")
-      );
-      if (!shouldContinue) {
-        return;
+      if (part.sizeBytes <= 0) {
+        await waitForInternalBatchPartReady(batchId, part.index);
       }
     }
   }
