@@ -106,6 +106,7 @@ type InternalBatchDownloadManifest = {
     index: number;
     filename: string;
     sizeBytes: number;
+    estimatedSizeBytes?: number;
     url: string;
   }>;
 };
