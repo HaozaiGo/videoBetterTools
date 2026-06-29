@@ -100,21 +100,20 @@ export function retryInternalBatchTasks(batchId: string) {
   });
 }
 
-type InternalBatchDownloadManifest = {
-  partCount: number;
-  parts: Array<{
-    index: number;
-    filename: string;
-    sizeBytes: number;
-    estimatedSizeBytes?: number;
-    url: string;
-  }>;
+export type InternalBatchDownloadPart = {
+  index: number;
+  filename: string;
+  sizeBytes: number;
+  estimatedSizeBytes?: number;
+  url: string;
 };
 
-const internalBatchDownloadPollMs = 5000;
-const internalBatchDownloadPartTimeoutMs = 60 * 60 * 1000;
+export type InternalBatchDownloadManifest = {
+  partCount: number;
+  parts: InternalBatchDownloadPart[];
+};
 
-function triggerInternalBatchPartDownload(part: InternalBatchDownloadManifest["parts"][number], fallbackName: string, token: string | null) {
+function triggerInternalBatchPartDownload(part: InternalBatchDownloadPart, fallbackName: string, token: string | null) {
   const url = new URL(part.url, window.location.origin);
   if (token) {
     url.searchParams.set("access_token", token);
@@ -127,39 +126,13 @@ function triggerInternalBatchPartDownload(part: InternalBatchDownloadManifest["p
   link.remove();
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+export function getInternalBatchDownloadManifest(batchId: string) {
+  return request<InternalBatchDownloadManifest>(`/api/internal/batches/${encodeURIComponent(batchId)}/download-manifest`, { method: "POST" });
 }
 
-async function waitForInternalBatchPartReady(batchId: string, partIndex: number) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < internalBatchDownloadPartTimeoutMs) {
-    await sleep(internalBatchDownloadPollMs);
-    const manifest = await request<InternalBatchDownloadManifest>(`/api/internal/batches/${encodeURIComponent(batchId)}/download-manifest`, { method: "POST" });
-    const part = manifest.parts.find((item) => item.index === partIndex);
-    if (part && part.sizeBytes > 0) {
-      return;
-    }
-  }
-  throw new Error(`第 ${partIndex} 个压缩包生成超时，请稍后重试`);
-}
-
-export async function downloadInternalBatchZip(batchId: string, batchName: string) {
-  const manifest = await request<InternalBatchDownloadManifest>(`/api/internal/batches/${encodeURIComponent(batchId)}/download-manifest`, { method: "POST" });
-  const token = getAuthToken();
+export function downloadInternalBatchZipPart(part: InternalBatchDownloadPart, batchName: string) {
   const fallbackName = `${batchName || "内部批量任务"}.zip`;
-  const parts = manifest.parts.length
-    ? manifest.parts
-    : [{ index: 1, filename: fallbackName, sizeBytes: 0, url: `/api/internal/batches/${encodeURIComponent(batchId)}/download` }];
-
-  for (const [partIndex, part] of parts.entries()) {
-    triggerInternalBatchPartDownload(part, fallbackName, token);
-    if (partIndex < parts.length - 1) {
-      if (part.sizeBytes <= 0) {
-        await waitForInternalBatchPartReady(batchId, part.index);
-      }
-    }
-  }
+  triggerInternalBatchPartDownload(part, fallbackName, getAuthToken());
 }
 
 export function uploadAsset(input: UploadAssetInput) {

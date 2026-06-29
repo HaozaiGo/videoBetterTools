@@ -2,7 +2,8 @@ import { useMutation, useQueryClient, useQuery, useSuspenseQuery } from "@tansta
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import { Fragment, useState } from "react";
 import type { FormEvent } from "react";
-import { cancelTask, downloadInternalBatchZip, getAuthToken, getBootstrap, getInternalBatchStatus, getTasksPage, retryInternalBatchTasks } from "../api/client";
+import { cancelTask, getAuthToken, getBootstrap, getInternalBatchDownloadManifest, getInternalBatchStatus, getTasksPage, retryInternalBatchTasks, type InternalBatchDownloadManifest } from "../api/client";
+import { InternalBatchDownloadParts } from "../components/InternalBatchDownloadParts";
 import { formatCredits, formatDate, statusLabel, taskProgressDisplay } from "../lib/format";
 import { translateLanguageLabel } from "../lib/translate-languages";
 import type { BootstrapState, Task } from "../types";
@@ -72,6 +73,7 @@ function InternalBatchDownloadPanel({ task }: { task: Task }) {
   const queryClient = useQueryClient();
   const batch = internalBatchInfo(task);
   const [message, setMessage] = useState("");
+  const [downloadManifest, setDownloadManifest] = useState<InternalBatchDownloadManifest | null>(null);
   const batchQuery = useQuery({
     queryKey: ["internal-batch", batch?.id],
     queryFn: () => getInternalBatchStatus(batch!.id),
@@ -84,7 +86,11 @@ function InternalBatchDownloadPanel({ task }: { task: Task }) {
   const downloadMutation = useMutation({
     mutationFn: async () => {
       if (!batch) throw new Error("缺少批次信息");
-      await downloadInternalBatchZip(batch.id, batch.name);
+      return getInternalBatchDownloadManifest(batch.id);
+    },
+    onSuccess: (manifest) => {
+      setDownloadManifest(manifest);
+      setMessage(manifest.partCount > 1 ? `已生成 ${manifest.partCount} 个分包` : "压缩包已准备");
     },
     onError: (error) => setMessage(error instanceof Error ? error.message : "下载失败"),
   });
@@ -122,9 +128,14 @@ function InternalBatchDownloadPanel({ task }: { task: Task }) {
           {retryMutation.isPending ? "生成中..." : "重新生成失败项"}
         </button>
         <button className="primary compact" type="button" onClick={() => downloadMutation.mutate()} disabled={!status?.downloadReady || downloadMutation.isPending}>
-          {downloadMutation.isPending ? "准备中..." : "下载压缩包"}
+          {downloadMutation.isPending ? "读取中..." : "获取分包"}
         </button>
       </div>
+      <InternalBatchDownloadParts
+        batchName={batch.name}
+        manifest={downloadManifest}
+        onStarted={(part) => setMessage(`已开始下载 ${part.filename}`)}
+      />
     </div>
   );
 }
