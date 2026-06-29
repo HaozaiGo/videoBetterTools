@@ -63,7 +63,7 @@ jobs:
               echo "DEPLOY_USER=root"
               echo "DEPLOY_DIR=/opt/modelPlaza"
               echo "DEPLOY_BUILD_MIRRORS=1"
-              echo "DEPLOY_WEB_PORT=80"
+              echo "DEPLOY_WEB_PORT=127.0.0.1:8003"
             } >> "$GITHUB_ENV"
           else
             {
