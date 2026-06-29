@@ -1,7 +1,8 @@
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
-import { createTask, downloadInternalBatchZip, getBootstrap, getInternalBatchStatus, retryInternalBatchTasks, uploadAsset } from "../api/client";
+import { createTask, getBootstrap, getInternalBatchDownloadManifest, getInternalBatchStatus, retryInternalBatchTasks, uploadAsset, type InternalBatchDownloadManifest } from "../api/client";
+import { InternalBatchDownloadParts } from "../components/InternalBatchDownloadParts";
 import { formatCredits } from "../lib/format";
 import { translateTargetLanguages, type TranslateTargetLanguage } from "../lib/translate-languages";
 import type { BootstrapState, InternalBatchStatus, WatermarkRegion } from "../types";
@@ -104,6 +105,7 @@ export function InternalBatchWorkflowPage() {
   const [notice, setNotice] = useState("");
   const [batchName, setBatchName] = useState("");
   const [activeBatch, setActiveBatch] = useState<{ id: string; name: string; status?: InternalBatchStatus } | null>(null);
+  const [downloadManifest, setDownloadManifest] = useState<InternalBatchDownloadManifest | null>(null);
   const [targetLanguage, setTargetLanguage] = useState<TranslateTargetLanguage>("en");
   const [subtitlePlacement, setSubtitlePlacement] = useState<"bottom" | "middle-lower" | "top">("bottom");
   const [keepAudio, setKeepAudio] = useState(true);
@@ -299,7 +301,11 @@ export function InternalBatchWorkflowPage() {
   const downloadMutation = useMutation({
     mutationFn: async () => {
       if (!activeBatch) throw new Error("还没有可下载的批次");
-      await downloadInternalBatchZip(activeBatch.id, activeBatch.name);
+      return getInternalBatchDownloadManifest(activeBatch.id);
+    },
+    onSuccess: (manifest) => {
+      setDownloadManifest(manifest);
+      setNotice(manifest.partCount > 1 ? `已生成 ${manifest.partCount} 个分包，请逐个点击下载。` : "压缩包已准备，可点击下载。");
     },
     onError: (error) => {
       setNotice(error instanceof Error ? error.message : "批次压缩包下载失败");
@@ -313,6 +319,7 @@ export function InternalBatchWorkflowPage() {
     onSuccess: (payload) => {
       queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state);
       setActiveBatch({ id: payload.batch.id, name: payload.batch.name, status: payload.batch });
+      setDownloadManifest(null);
       statusMutation.reset();
       setNotice(`已重新生成 ${payload.retried} 个失败/取消任务。`);
     },
@@ -392,6 +399,7 @@ export function InternalBatchWorkflowPage() {
     onSuccess: (payload) => {
       if (payload.state) queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state);
       setActiveBatch({ id: payload.batchId, name: payload.batchName });
+      setDownloadManifest(null);
       statusMutation.mutate(payload.batchId);
       setNotice(payload.failedCount ? `已创建 ${payload.createdCount} 个工作流任务，${payload.failedCount} 个失败。` : `已创建 ${payload.createdCount} 个工作流任务。`);
     },
@@ -708,9 +716,16 @@ export function InternalBatchWorkflowPage() {
                   {retryMutation.isPending ? "生成中..." : "重新生成失败项"}
                 </button>
                 <button className="primary compact" type="button" disabled={!visibleBatchStatus?.downloadReady || downloadMutation.isPending} onClick={() => downloadMutation.mutate()}>
-                  {downloadMutation.isPending ? "准备中..." : "下载压缩包"}
+                  {downloadMutation.isPending ? "读取中..." : "获取分包"}
                 </button>
               </div>
+              <InternalBatchDownloadParts
+                batchId={activeBatch.id}
+                batchName={activeBatch.name}
+                manifest={downloadManifest}
+                onManifestChange={setDownloadManifest}
+                onStarted={(part) => setNotice(`已开始下载 ${part.filename}`)}
+              />
             </div>
           ) : null}
           <button className="primary wide" type="button" disabled={!files.length || !batchName.trim() || available < totalEstimate || submitMutation.isPending} onClick={() => submitMutation.mutate()}>

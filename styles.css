@@ -1079,6 +1079,47 @@ select:focus {
   gap: 8px;
 }
 
+.internal-batch-parts-wrap {
+  display: grid !important;
+  gap: 8px;
+}
+
+.internal-batch-parts {
+  display: flex !important;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.internal-batch-part {
+  min-width: 108px;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.internal-batch-part small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.internal-batch-part.preparing {
+  border-color: rgba(49, 92, 255, 0.42);
+  background: #eef3ff;
+  color: var(--accent);
+}
+
+.internal-batch-part.ready {
+  border-color: rgba(21, 183, 158, 0.42);
+  background: #ffffff;
+}
+
+.internal-batch-download-status {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 850;
+}
+
 .quote-kicker {
   color: var(--accent);
   font-size: 12px;
@@ -1525,6 +1566,7 @@ th {
 .task-batch-download {
   grid-column: 1 / -1;
   display: flex !important;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
@@ -1543,6 +1585,10 @@ th {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.task-batch-download > .internal-batch-parts-wrap {
+  flex: 1 0 100%;
 }
 
 .task-error strong,
