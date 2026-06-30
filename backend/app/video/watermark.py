@@ -455,7 +455,7 @@ def process_masked_video_removal(input_storage_key: str, task_id: str, params: d
                 input_path = storage.ensure_local(input_storage_key)
             except FileNotFoundError as exc:
                 raise VideoProcessingError("Input video file not found.") from exc
-    else:
+    elif not storage.is_remote:
         input_url_for_adapter = None
 
     regions = params.get("regions") or []

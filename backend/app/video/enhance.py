@@ -98,7 +98,7 @@ def process_video_enhance(input_storage_key: str, task_id: str, params: dict) ->
                 input_path = storage.ensure_local(input_storage_key)
             except FileNotFoundError as exc:
                 raise VideoProcessingError("Input video file not found.") from exc
-    else:
+    elif not storage.is_remote:
         input_url_for_adapter = None
 
     output_key = _output_key(task_id)

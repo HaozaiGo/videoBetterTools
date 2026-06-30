@@ -3,6 +3,7 @@ import json
 import pytest
 
 from app.video import watermark
+from app.video import enhance, translate
 from app.video.watermark import (
     GpuUnavailableError,
     VideoProcessingError,
@@ -11,8 +12,28 @@ from app.video.watermark import (
     normalized_region_to_pixels,
     process_with_external_model,
     process_with_model_adapter,
+    process_masked_video_removal,
     target_video_dimensions,
 )
+
+
+class FakeRemoteStorage:
+    is_remote = True
+
+    def __init__(self, root):
+        self.root = root
+
+    def local_path(self, storage_key: str):
+        return self.root / storage_key
+
+    def presign_download(self, storage_key: str, filename: str | None = None) -> str:
+        return f"https://tos.example.com/{storage_key}"
+
+    def save_file(self, storage_key: str, local_path):
+        raise AssertionError("remote result metadata should avoid local save")
+
+    def delete_local_copy(self, storage_key: str) -> bool:
+        return True
 
 
 def test_normalized_region_to_pixels_clamps_to_video_bounds() -> None:
@@ -174,3 +195,79 @@ def test_external_model_can_return_remote_result_metadata(tmp_path, monkeypatch)
         "mime_type": "video/mp4",
         "size_bytes": 123,
     }
+
+
+def test_remote_storage_prefers_presigned_input_url_even_with_local_cache(tmp_path, monkeypatch) -> None:
+    storage_key = "model-plaza/input/videos/input.mp4"
+    local_input = tmp_path / storage_key
+    local_input.parent.mkdir(parents=True)
+    local_input.write_bytes(b"cached-video")
+    captured = {}
+
+    def fake_run(command, check, capture_output, text, env):
+        captured["env"] = env
+        with open(env["MODEL_PLAZA_RESULT_META"], "w", encoding="utf-8") as file:
+            json.dump(
+                {
+                    "storage_key": "model-plaza/output/videos/job.mp4",
+                    "url": "https://tos.example.com/model-plaza/output/videos/job.mp4",
+                    "mime_type": "video/mp4",
+                    "size_bytes": 456,
+                },
+                file,
+            )
+
+    monkeypatch.setattr(watermark, "storage", FakeRemoteStorage(tmp_path))
+    monkeypatch.setattr(watermark.settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(watermark.settings, "propainter_command", "python runner.py")
+    monkeypatch.setattr(watermark.subprocess, "run", fake_run)
+
+    result = process_masked_video_removal(
+        storage_key,
+        "task-1",
+        {
+            "modelAdapter": "propainter",
+            "regions": [{"x": 0, "y": 0, "width": 1, "height": 1}],
+        },
+    )
+
+    assert captured["env"]["MODEL_PLAZA_INPUT_URL"] == f"https://tos.example.com/{storage_key}"
+    assert result["storage_key"] == "model-plaza/output/videos/job.mp4"
+
+
+@pytest.mark.parametrize(
+    ("module", "command_setting", "processor"),
+    [
+        (enhance, "enhance_command", enhance.process_video_enhance),
+        (translate, "translate_command", translate.process_video_translate),
+    ],
+)
+def test_remote_video_processors_prefer_presigned_input_url_with_local_cache(tmp_path, monkeypatch, module, command_setting, processor) -> None:
+    storage_key = "model-plaza/input/videos/input.mp4"
+    local_input = tmp_path / storage_key
+    local_input.parent.mkdir(parents=True)
+    local_input.write_bytes(b"cached-video")
+    captured = {}
+
+    def fake_run(command, check, capture_output, text, env):
+        captured["env"] = env
+        with open(env["MODEL_PLAZA_RESULT_META"], "w", encoding="utf-8") as file:
+            json.dump(
+                {
+                    "storage_key": "model-plaza/output/videos/job.mp4",
+                    "url": "https://tos.example.com/model-plaza/output/videos/job.mp4",
+                    "mime_type": "video/mp4",
+                    "size_bytes": 789,
+                },
+                file,
+            )
+
+    monkeypatch.setattr(module, "storage", FakeRemoteStorage(tmp_path))
+    monkeypatch.setattr(module.settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(module.settings, command_setting, "python runner.py")
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    result = processor(storage_key, "task-1", {})
+
+    assert captured["env"]["MODEL_PLAZA_INPUT_URL"] == f"https://tos.example.com/{storage_key}"
+    assert result["storage_key"] == "model-plaza/output/videos/job.mp4"
