@@ -4,6 +4,7 @@ set -euo pipefail
 OLD_DIR=${OLD_DIR:-/data1/model-plaza-video-worker}
 DOCKER_DIR=${DOCKER_DIR:-/data1/model-plaza-video-worker-docker}
 SHARED_DIR=${SHARED_DIR:-/data1/model-plaza-video-worker-shared}
+RESULTS_DIR=${RESULTS_DIR:-/data1/model-plaza-results}
 CONDA_ROOT=${CONDA_ROOT:-/data1/conda}
 CONDA_PYTHON=${CONDA_PYTHON:-/data1/conda/miniconda3/envs/video-inpaint/bin/python}
 HOST_PORT=${HOST_PORT:-18081}
@@ -22,7 +23,8 @@ mkdir -p \
   "$SHARED_DIR/inputs" \
   "$SHARED_DIR/outputs" \
   "$SHARED_DIR/cache" \
-  "$SHARED_DIR/home"
+  "$SHARED_DIR/home" \
+  "$RESULTS_DIR"
 
 rsync -a --delete "$OLD_DIR/scripts/" "$DOCKER_DIR/app/scripts/"
 rsync -a --delete "$OLD_DIR/repos/" "$SHARED_DIR/repos/"
@@ -52,6 +54,7 @@ services:
       MODEL_PLAZA_VIDEO_ROOT: "/app"
       MODEL_PLAZA_GPU_JOBS_ROOT: "/shared/work/api-jobs"
       MODEL_PLAZA_GPU_LOGS_ROOT: "/shared/logs"
+      MODEL_PLAZA_GPU_RESULTS_ROOT: "$RESULTS_DIR"
       MODEL_PLAZA_PROPAINTER_RUNNER: "/app/scripts/propainter_runner.py"
       MODEL_PLAZA_ENHANCE_RUNNER: "/app/scripts/video_enhance_runner.py"
       MODEL_PLAZA_TRANSLATE_RUNNER: "/app/scripts/video_translate_runner.py"
@@ -86,6 +89,7 @@ services:
       - ./app:/app
       - ./secrets/gpu-tos.env:/run/secrets/gpu-tos.env:ro
       - $SHARED_DIR:/shared
+      - $RESULTS_DIR:$RESULTS_DIR
       - $SHARED_DIR/repos:/app/repos:ro
       - $SHARED_DIR/models:/app/models:ro
       - $CONDA_ROOT:/data1/conda:ro
@@ -145,6 +149,7 @@ cat > "$DOCKER_DIR/.docker-wrapper.env" <<ENV
 OLD_DIR=$OLD_DIR
 DOCKER_DIR=$DOCKER_DIR
 SHARED_DIR=$SHARED_DIR
+RESULTS_DIR=$RESULTS_DIR
 CONDA_ROOT=$CONDA_ROOT
 CONDA_PYTHON=$CONDA_PYTHON
 HOST_PORT=$HOST_PORT

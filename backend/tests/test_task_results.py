@@ -234,6 +234,199 @@ def test_internal_batch_zip_releases_db_before_materializing_remote_files(tmp_pa
         assert zip_file.read("001-remote-remote-z.mp4") == b"remote-video"
 
 
+def test_internal_batch_zip_can_be_materialized_on_gpu_and_marked_ready(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(services.settings, "internal_batch_zip_gpu_enabled", True)
+    monkeypatch.setattr(services.settings, "model_plaza_gpu_api_url", "https://gpu.example.test")
+
+    class FakeRemoteStorage:
+        is_remote = True
+
+        def presign_download(self, storage_key: str, filename: str | None = None) -> str:
+            return f"https://tos.example.test/{storage_key}?filename={filename or ''}"
+
+    requested_payloads: list[dict] = []
+
+    def fake_remote_zip(payload: dict) -> dict:
+        requested_payloads.append(payload)
+        return {
+            "url": "https://tos.example.test/model-plaza/output/zips/batch/remote.zip",
+            "storage_key": payload["zip_storage_key"],
+            "size_bytes": 1234,
+        }
+
+    monkeypatch.setattr(services, "storage", FakeRemoteStorage())
+    monkeypatch.setattr(services, "_request_remote_internal_batch_zip", fake_remote_zip)
+    output_storage_key = "model-plaza/output/videos/2026/07/02/result.mp4"
+
+    with Session(engine) as db:
+        user = User(id="user-gpu-zip", email="gpu-zip@example.com", name="GPU Zip User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        input_asset = Asset(
+            id="gpu-zip-input",
+            user_id=user.id,
+            kind="video",
+            original_name="clip.mp4",
+            mime_type="video/mp4",
+            storage_key="input.mp4",
+            url="https://tos.example.test/input.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        output_asset = Asset(
+            id="gpu-zip-output",
+            user_id=user.id,
+            kind="video",
+            original_name="clip-result.mp4",
+            mime_type="video/mp4",
+            storage_key=output_storage_key,
+            url="https://tos.example.test/model-plaza/output/videos/2026/07/02/result.mp4",
+            size_bytes=12,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="gpu-zip-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=input_asset.id,
+            output_asset_id=output_asset.id,
+            status="succeeded",
+            params={"internalBatchId": "gpu-zip-batch", "internalBatchName": "gpu zip"},
+            estimated_credits=0,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="gpu-zip-provider",
+            output_url=output_asset.url,
+            progress_percent=100,
+            progress_stage="处理完成",
+        )
+        db.add_all([user, wallet, input_asset, output_asset, task])
+        db.commit()
+
+        archive = create_internal_batch_zip(db, user.id, "gpu-zip-batch", part=1)
+
+        assert archive["parts"][0]["sizeBytes"] == 1234
+        assert archive["parts"][0]["remoteUrl"] == "https://tos.example.test/model-plaza/output/zips/batch/remote.zip"
+        manifest = plan_internal_batch_zip(db, user.id, "gpu-zip-batch")
+
+    assert requested_payloads[0]["entries"][0]["storage_key"] == output_storage_key
+    assert requested_payloads[0]["entries"][0]["download_url"].startswith("https://tos.example.test/model-plaza/output/videos/")
+    assert requested_payloads[0]["summary"]["includedTaskIds"] == ["gpu-zip-task"]
+    assert manifest["parts"][0]["sizeBytes"] == 1234
+
+
+def test_completed_internal_batch_auto_enqueues_gpu_zip_prepare(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(services.settings, "internal_batch_zip_auto_prepare_enabled", True)
+    monkeypatch.setattr(services.settings, "internal_batch_zip_gpu_enabled", True)
+    monkeypatch.setattr(services.settings, "model_plaza_gpu_api_url", "https://gpu.example.test")
+
+    class FakeRemoteStorage:
+        is_remote = True
+
+    enqueued: list[tuple[str, str]] = []
+    monkeypatch.setattr(services, "storage", FakeRemoteStorage())
+    monkeypatch.setattr(services, "enqueue_internal_batch_zip", lambda user_id, batch_id: enqueued.append((user_id, batch_id)))
+
+    batch_id = "auto-zip-batch"
+    with Session(engine) as db:
+        user = User(id="user-auto-zip", email="auto-zip@example.com", name="Auto Zip User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=1)
+        db.add_all([user, wallet])
+
+        done_input = Asset(
+            id="auto-zip-input-1",
+            user_id=user.id,
+            kind="video",
+            original_name="done.mp4",
+            mime_type="video/mp4",
+            storage_key="input-done.mp4",
+            url="https://tos.example.test/input-done.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        done_output = Asset(
+            id="auto-zip-output-1",
+            user_id=user.id,
+            kind="result",
+            original_name="done-result.mp4",
+            mime_type="video/mp4",
+            storage_key="model-plaza/output/videos/done.mp4",
+            url="https://tos.example.test/done.mp4",
+            size_bytes=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        pending_input = Asset(
+            id="auto-zip-input-2",
+            user_id=user.id,
+            kind="video",
+            original_name="pending.mp4",
+            mime_type="video/mp4",
+            storage_key="input-pending.mp4",
+            url="https://tos.example.test/input-pending.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        done_task = Task(
+            id="auto-zip-task-1",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=done_input.id,
+            output_asset_id=done_output.id,
+            status="succeeded",
+            params={"internalBatchId": batch_id, "internalBatchName": "auto zip"},
+            estimated_credits=1,
+            frozen_credits=0,
+            charged_credits=1,
+            provider="mock",
+            provider_job_id="auto-zip-provider-1",
+            output_url=done_output.url,
+            progress_percent=100,
+            progress_stage="处理完成",
+        )
+        pending_task = Task(
+            id="auto-zip-task-2",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=pending_input.id,
+            status="processing",
+            params={"internalBatchId": batch_id, "internalBatchName": "auto zip"},
+            estimated_credits=1,
+            frozen_credits=1,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="auto-zip-provider-2",
+            progress_percent=95,
+            progress_stage="远端处理完成",
+        )
+        db.add_all([done_input, done_output, pending_input, done_task, pending_task])
+        db.commit()
+
+        duplicated, task = services.provider_callback(
+            db,
+            "auto-zip-provider-2",
+            "succeeded",
+            callback_id="auto-zip-provider-2:succeeded",
+            output_url="https://tos.example.test/pending-result.mp4",
+            output_storage_key="model-plaza/output/videos/pending-result.mp4",
+            output_mime_type="video/mp4",
+            output_size_bytes=10,
+        )
+
+    assert duplicated is False
+    assert task.status == "succeeded"
+    assert enqueued == [("user-auto-zip", batch_id)]
+
+
 def test_internal_batch_retry_resets_failed_and_cancelled_tasks(tmp_path, monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
