@@ -142,6 +142,7 @@ export type Task = {
   provider: string;
   providerJobId: string;
   errorCode: string | null;
+  failureReason?: string;
   progressPercent: number;
   progressStage: string;
   createdAt: number;

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 import app.services as services
 from app.models import Asset, Base, Task, User, Wallet
-from app.services import create_internal_batch_zip, get_task_result_access, get_task_result_url, internal_batch_status, now, plan_internal_batch_zip, retry_internal_batch_tasks
+from app.services import create_internal_batch_zip, get_task_result_access, get_task_result_url, internal_batch_status, now, plan_internal_batch_zip, retry_failed_task_single_gpu, retry_internal_batch_tasks, task_to_dict
 
 
 class FakeLocalStorage:
@@ -237,6 +237,84 @@ def test_internal_batch_retry_resets_failed_and_cancelled_tasks(tmp_path, monkey
         assert task.provider_job_id != old_provider_ids[task_id]
         assert task.error_code is None
         assert task.progress_stage == "等待 worker 领取任务"
+
+
+def test_failed_task_serializes_specific_failure_reason() -> None:
+    task = Task(
+        id="oom-task",
+        user_id="user-oom",
+        tool_slug="remove-subtitle",
+        input_asset_id="asset-oom",
+        status="failed",
+        params={},
+        estimated_credits=1,
+        frozen_credits=0,
+        charged_credits=0,
+        provider="mock",
+        provider_job_id="provider-oom",
+        error_code="VIDEO_PROCESSING_FAILED",
+        progress_stage="CUDA_OUT_OF_MEMORY: GPU 显存不足",
+    )
+
+    payload = task_to_dict(task)
+
+    assert payload["failureReason"] == "GPU 显存不足导致模型退出。建议点击“单卡重跑”，或降低并发后重试。"
+
+
+def test_retry_failed_task_single_gpu_marks_exclusive_retry(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path))
+    enqueued: list[str] = []
+    monkeypatch.setattr(services, "enqueue_provider_job", enqueued.append)
+
+    with Session(engine) as db:
+        user = User(id="user-single-gpu", email="single-gpu@example.com", name="Single GPU User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        asset = Asset(
+            id="asset-single-gpu",
+            user_id=user.id,
+            kind="video",
+            original_name="single.mp4",
+            mime_type="video/mp4",
+            storage_key="single.mp4",
+            url="/uploads/single.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="task-single-gpu",
+            user_id=user.id,
+            tool_slug="remove-subtitle",
+            input_asset_id=asset.id,
+            status="failed",
+            params={"modelAdapter": "propainter"},
+            estimated_credits=1,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="old-provider-single-gpu",
+            error_code="VIDEO_PROCESSING_FAILED",
+            output_url="",
+            progress_percent=0,
+            progress_stage="CUDA_OUT_OF_MEMORY",
+            completed_at=now(),
+        )
+        db.add_all([user, wallet, asset, task])
+        db.commit()
+
+        retried = retry_failed_task_single_gpu(db, user.id, task.id)
+        wallet_after = db.get(Wallet, user.id)
+
+    assert retried.status == "queued"
+    assert retried.provider_job_id != "old-provider-single-gpu"
+    assert retried.error_code is None
+    assert retried.params["forceSingleGpu"] is True
+    assert retried.params["exclusiveGpu"] is True
+    assert retried.progress_stage == "等待 worker 领取任务（单卡独占重跑）"
+    assert enqueued == ["task-single-gpu"]
+    assert wallet_after.frozen_credits == retried.frozen_credits
 
 
 def test_internal_batch_zip_splits_large_batches_into_parts(tmp_path, monkeypatch) -> None:

@@ -31,6 +31,14 @@ def asset_expires_at() -> datetime:
     return now() + timedelta(hours=settings.asset_retention_hours)
 
 
+def is_expired(value: datetime | None) -> bool:
+    if value is None:
+        return False
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value <= now()
+
+
 def public_url(storage_key: str) -> str:
     return storage.public_url(storage_key)
 
@@ -148,6 +156,7 @@ def task_to_dict(task: Task) -> dict:
         "provider": task.provider,
         "providerJobId": task.provider_job_id,
         "errorCode": task.error_code,
+        "failureReason": failure_reason_for_task(task),
         "progressPercent": task.progress_percent,
         "progressStage": task.progress_stage,
         "createdAt": serialize_datetime(task.created_at),
@@ -155,6 +164,36 @@ def task_to_dict(task: Task) -> dict:
         "outputUrl": task.output_url,
         "previewUrl": f"/api/tasks/{task.id}/preview-result" if has_result_access else "",
     }
+
+
+def failure_reason_for_task(task: Task) -> str:
+    if task.status != "failed":
+        return ""
+    stage = task.progress_stage or ""
+    haystack = f"{task.error_code or ''}\n{stage}".lower()
+    if "input_asset_not_found" in haystack or "input video file not found" in haystack:
+        return "输入文件不存在或已过期，请重新上传后再试。"
+    if "cuda_out_of_memory" in haystack or "cuda out of memory" in haystack or "outofmemoryerror" in haystack:
+        return "GPU 显存不足导致模型退出。建议点击“单卡重跑”，或降低并发后重试。"
+    if "result_upload_timeout" in haystack or "result upload exceeded total timeout" in haystack:
+        return "结果文件已生成，但上传对象存储超时。可以直接重跑；若频繁出现，需要放宽上传超时或检查 TOS 上传链路。"
+    if "result_upload_failed" in haystack or "tos upload failed" in haystack or "presigned upload failed" in haystack:
+        return "结果上传对象存储失败，请检查 TOS/预签名上传链路后重试。"
+    if "gpu_stalled" in haystack or "stalled_progress" in haystack or "stalled progress" in haystack:
+        return "远端 GPU 任务长时间无进度，已被自动熔断，可重跑。"
+    if "video_decode_failed" in haystack or "moov atom not found" in haystack or "invalid data found" in haystack:
+        return "视频解码失败，可能是素材损坏或编码不兼容。"
+    if "propainter command failed" in haystack:
+        return "远端 ProPainter 去字幕模型执行失败。建议优先使用“单卡重跑”；如果仍失败，再降低并发或调整模型参数。"
+    if "translate command failed" in haystack:
+        return "远端翻译/字幕生成链路失败。可重跑；如果多次失败，需检查翻译模型或上传链路日志。"
+    if task.error_code == "VIDEO_PROCESSING_FAILED":
+        return "远端视频处理失败，可能是模型报错、显存不足、视频编码不兼容或网络传输中断。"
+    if task.error_code == "PROVIDER_FAILED":
+        return "供应商返回失败。"
+    if task.error_code == "MANUAL_TEST_FAILED":
+        return "手动触发的失败回调，用于验证退款流程。"
+    return "任务失败，系统已释放冻结积分。"
 
 
 def task_result_output_key(task: Task) -> str:
@@ -462,6 +501,64 @@ def retry_internal_batch_tasks(db: Session, user_id: str, batch_id: str) -> dict
         enqueue_provider_job(task_id)
 
     return {"retried": len(retried_ids), "taskIds": retried_ids, "batch": internal_batch_status(db, user_id, batch_id)}
+
+
+def retry_failed_task_single_gpu(db: Session, user_id: str, task_id: str) -> Task:
+    task = db.execute(
+        select(Task)
+        .where(Task.id == task_id, Task.user_id == user_id)
+        .options(selectinload(Task.input_asset))
+        .with_for_update()
+    ).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if task.status != "failed":
+        raise HTTPException(status_code=409, detail="only failed tasks can be retried")
+
+    tool = get_tool(task.tool_slug)
+    if tool is None or tool["status"] != "online":
+        raise HTTPException(status_code=400, detail=f"tool is not available: {task.tool_slug}")
+    input_asset = db.get(Asset, task.input_asset_id)
+    if input_asset is None or input_asset.user_id != user_id:
+        raise HTTPException(status_code=400, detail="missing uploaded asset for task")
+    if is_expired(input_asset.expires_at):
+        raise HTTPException(status_code=400, detail="uploaded asset has expired")
+
+    params = dict(task.params or {})
+    params.update(
+        {
+            "forceSingleGpu": True,
+            "exclusiveGpu": True,
+            "singleGpuRetry": True,
+            "singleGpuRetryAt": int(now().timestamp() * 1000),
+        }
+    )
+    estimate = estimate_credits(tool, {**params, "duration": params.get("duration") or input_asset.duration_seconds or 30})
+    wallet = get_wallet(db, user_id, lock=True)
+    if wallet.credits - wallet.frozen_credits < estimate:
+        raise HTTPException(status_code=402, detail="insufficient credits")
+
+    task.status = "queued"
+    task.provider_job_id = f"mock_{uuid4()}"
+    task.params = params
+    task.estimated_credits = estimate
+    task.frozen_credits = estimate
+    task.charged_credits = 0
+    task.error_code = None
+    task.progress_percent = 0
+    task.progress_stage = "等待 worker 领取任务（单卡独占重跑）"
+    task.output_asset_id = None
+    task.output_url = ""
+    task.completed_at = None
+    wallet.frozen_credits += estimate
+    add_ledger(db, user_id, "freeze", 0, f"{tool['name']} 单卡重跑，冻结 {estimate} 积分", task.id)
+    cancel_marker = settings.upload_path / f"{task.id}.cancel"
+    cancel_marker.unlink(missing_ok=True)
+
+    db.commit()
+    db.refresh(task)
+    enqueue_provider_job(task.id)
+    return task
 
 
 def ledger_to_dict(entry: WalletLedger) -> dict:

@@ -31,6 +31,7 @@ from app.services import (
     plan_internal_batch_zip,
     provider_callback,
     recharge_wallet,
+    retry_failed_task_single_gpu,
     retry_internal_batch_tasks,
     save_upload,
     save_multipart_chunk,
@@ -215,6 +216,12 @@ def create_task_endpoint(payload: TaskCreate, db: Session = Depends(get_db), use
 @app.post("/api/tasks/{task_id}/cancel")
 def cancel_task_endpoint(task_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
     task = cancel_task(db, user.id, task_id)
+    return {"task": task_to_dict(task), "state": serialize_bootstrap(db, user.id)}
+
+
+@app.post("/api/tasks/{task_id}/retry-single-gpu")
+def retry_task_single_gpu_endpoint(task_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    task = retry_failed_task_single_gpu(db, user.id, task_id)
     return {"task": task_to_dict(task), "state": serialize_bootstrap(db, user.id)}
 
 

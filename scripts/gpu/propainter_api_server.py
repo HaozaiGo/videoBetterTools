@@ -22,7 +22,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from multiprocessing import get_context
 from pathlib import Path
-from queue import Queue
 from typing import Annotated
 from urllib.parse import quote
 
@@ -79,10 +78,9 @@ MAX_WORKERS = max(1, int(os.environ.get("MODEL_PLAZA_GPU_MAX_WORKERS", str(GPU_S
 
 app = FastAPI(title="片刻修AI GPU Worker")
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-gpu_slots: Queue[str] = Queue(maxsize=GPU_SLOT_CAPACITY)
-for _slot_index in range(GPU_WORKERS_PER_DEVICE):
-    for _gpu_device_id in GPU_DEVICE_IDS:
-        gpu_slots.put(_gpu_device_id)
+gpu_slot_condition = threading.Condition()
+gpu_slot_usage: dict[str, int] = {gpu_device: 0 for gpu_device in GPU_DEVICE_IDS}
+exclusive_gpu_jobs: dict[str, str] = {}
 running_processes: dict[str, subprocess.Popen] = {}
 running_gpu_devices: dict[str, str] = {}
 running_progress_snapshots: dict[str, tuple[tuple[str, int, str], float, float]] = {}
@@ -373,15 +371,49 @@ def _gpu_metrics() -> dict:
     }
 
 
-def _acquire_gpu_slot(job_id: str) -> str:
-    gpu_device = gpu_slots.get()
-    _write_status(job_id, assigned_gpu=gpu_device)
-    return gpu_device
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _release_gpu_slot(gpu_device: str | None) -> None:
-    if gpu_device:
-        gpu_slots.put(gpu_device)
+def _candidate_gpu_devices(preferred_gpu: str = "") -> list[str]:
+    if preferred_gpu and preferred_gpu in GPU_DEVICE_IDS:
+        return [preferred_gpu]
+    return list(GPU_DEVICE_IDS)
+
+
+def _acquire_gpu_slot(job_id: str, preferred_gpu: str = "", exclusive: bool = False) -> str:
+    candidates = _candidate_gpu_devices(preferred_gpu)
+    with gpu_slot_condition:
+        while True:
+            for gpu_device in candidates:
+                if exclusive:
+                    if gpu_slot_usage.get(gpu_device, 0) == 0 and gpu_device not in exclusive_gpu_jobs:
+                        gpu_slot_usage[gpu_device] = GPU_WORKERS_PER_DEVICE
+                        exclusive_gpu_jobs[gpu_device] = job_id
+                        _write_status(job_id, assigned_gpu=gpu_device, exclusive_gpu=True)
+                        return gpu_device
+                    continue
+                if gpu_device in exclusive_gpu_jobs:
+                    continue
+                if gpu_slot_usage.get(gpu_device, 0) < GPU_WORKERS_PER_DEVICE:
+                    gpu_slot_usage[gpu_device] = gpu_slot_usage.get(gpu_device, 0) + 1
+                    _write_status(job_id, assigned_gpu=gpu_device, exclusive_gpu=False)
+                    return gpu_device
+            gpu_slot_condition.wait(timeout=5)
+
+
+def _release_gpu_slot(job_id: str, gpu_device: str | None) -> None:
+    if not gpu_device:
+        return
+    with gpu_slot_condition:
+        if exclusive_gpu_jobs.get(gpu_device) == job_id:
+            exclusive_gpu_jobs.pop(gpu_device, None)
+            gpu_slot_usage[gpu_device] = 0
+        else:
+            gpu_slot_usage[gpu_device] = max(0, gpu_slot_usage.get(gpu_device, 0) - 1)
+        gpu_slot_condition.notify_all()
 
 
 def _check_auth(api_key: str | None) -> None:
@@ -568,6 +600,33 @@ def _upload_result_with_deadline(job_id: str, output_path: Path) -> dict:
     return dict(payload.get("result") or {})
 
 
+def _tail_text(path: Path, max_chars: int = 12000) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return text[-max_chars:]
+
+
+def _summarize_job_error(exc: Exception, log_path: Path) -> str:
+    detail = "\n".join(part for part in [str(exc), _tail_text(log_path)] if part)
+    lowered = detail.lower()
+    if "cuda out of memory" in lowered or "torch.outofmemoryerror" in lowered:
+        return "CUDA_OUT_OF_MEMORY: GPU 显存不足，建议使用单卡独占重跑或降低并发后重试"
+    if "result upload exceeded total timeout" in lowered:
+        timeout = os.environ.get("MODEL_PLAZA_GPU_RESULT_UPLOAD_TOTAL_TIMEOUT", "900")
+        return f"RESULT_UPLOAD_TIMEOUT: 结果上传超过 {timeout}s，视频已生成但上传对象存储超时"
+    if "presigned upload failed" in lowered or "tos upload failed" in lowered:
+        return "RESULT_UPLOAD_FAILED: 结果上传对象存储失败，请检查 TOS/预签名上传链路"
+    if "stalled_progress" in lowered or "stalled progress" in lowered:
+        return "GPU_STALLED: 远端任务长时间无进度，已被自动熔断"
+    if "no input.mp4" in lowered or "input_url" in lowered and "failed" in lowered:
+        return "GPU_INPUT_FAILED: GPU 端下载或读取输入视频失败"
+    if "invalid data found" in lowered or "could not find codec" in lowered or "moov atom not found" in lowered:
+        return "VIDEO_DECODE_FAILED: 视频解码失败，可能是文件损坏或编码不兼容"
+    return f"GPU_RUNNER_FAILED: {str(exc)[:240]}"
+
+
 def _runner_for_job_type(job_type: str) -> Path:
     if job_type == "propainter":
         return PROPAINTER_RUNNER_PATH
@@ -593,6 +652,12 @@ def _run_model_job(job_id: str) -> None:
     assigned_gpu: str | None = None
 
     try:
+        try:
+            params_payload = json.loads(params_path.read_text(encoding="utf-8"))
+        except Exception:
+            params_payload = {}
+        preferred_gpu = str(params_payload.get("preferredGpu") or params_payload.get("preferredGPU") or "").strip()
+        exclusive_gpu = _truthy(params_payload.get("forceSingleGpu")) or _truthy(params_payload.get("exclusiveGpu"))
         if not input_path.exists():
             input_url_path = _input_url_path(job_id)
             if not input_url_path.exists():
@@ -604,7 +669,7 @@ def _run_model_job(job_id: str) -> None:
             _write_status(job_id, progress_percent=5, progress_stage="远端输入视频下载完成")
 
         _require_gpu_preflight()
-        assigned_gpu = _acquire_gpu_slot(job_id)
+        assigned_gpu = _acquire_gpu_slot(job_id, preferred_gpu=preferred_gpu, exclusive=exclusive_gpu)
         if _read_status(job_id).get("status") == "cancelled":
             return
 
@@ -615,7 +680,7 @@ def _run_model_job(job_id: str) -> None:
             log_path=str(log_path),
             assigned_gpu=assigned_gpu,
             progress_percent=8,
-            progress_stage=f"远端 GPU {assigned_gpu} 已领取任务",
+            progress_stage=f"远端 GPU {assigned_gpu} {'独占' if exclusive_gpu else ''}已领取任务",
         )
         command = [
             PYTHON_PATH,
@@ -684,9 +749,9 @@ def _run_model_job(job_id: str) -> None:
             running_progress_snapshots.pop(job_id, None)
         if _read_status(job_id).get("status") in TERMINAL_STATUSES:
             return
-        _write_status(job_id, status="failed", completed_at=time.time(), error=str(exc), log_path=str(log_path))
+        _write_status(job_id, status="failed", completed_at=time.time(), error=_summarize_job_error(exc, log_path), log_path=str(log_path))
     finally:
-        _release_gpu_slot(assigned_gpu)
+        _release_gpu_slot(job_id, assigned_gpu)
 
 
 def _job_age_seconds(status: dict) -> float:

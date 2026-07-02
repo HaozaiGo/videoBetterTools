@@ -2,7 +2,7 @@ import { useMutation, useQueryClient, useQuery, useSuspenseQuery } from "@tansta
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import { Fragment, useState } from "react";
 import type { FormEvent } from "react";
-import { cancelTask, getAuthToken, getBootstrap, getInternalBatchDownloadManifest, getInternalBatchStatus, getTasksPage, retryInternalBatchTasks, type InternalBatchDownloadManifest } from "../api/client";
+import { cancelTask, getAuthToken, getBootstrap, getInternalBatchDownloadManifest, getInternalBatchStatus, getTasksPage, retryInternalBatchTasks, retryTaskSingleGpu, type InternalBatchDownloadManifest } from "../api/client";
 import { InternalBatchDownloadParts } from "../components/InternalBatchDownloadParts";
 import { formatCredits, formatDate, statusLabel, taskProgressDisplay } from "../lib/format";
 import { translateLanguageLabel } from "../lib/translate-languages";
@@ -15,6 +15,7 @@ const internalBatchRefetchIntervalMs = 5_000;
 
 function failureReason(task: Task) {
   if (task.status !== "failed") return "";
+  if (task.failureReason) return task.failureReason;
   const reasons: Record<string, string> = {
     INPUT_ASSET_NOT_FOUND: "输入文件不存在或已过期，请重新上传后再试。",
     VIDEO_PROCESSING_FAILED: "远端视频处理失败，可能是模型报错、显存不足、视频编码不兼容或网络传输中断。",
@@ -150,6 +151,7 @@ export function TasksPage() {
   const [expandedTaskIds, setExpandedTaskIds] = useState<Set<string>>(() => new Set());
   const [currentPage, setCurrentPage] = useState(1);
   const [pageInput, setPageInput] = useState("1");
+  const [pageMessage, setPageMessage] = useState("");
   const tasksQuery = useQuery({
     queryKey: ["tasks", currentPage],
     queryFn: () => getTasksPage(currentPage, pageSize),
@@ -183,6 +185,18 @@ export function TasksPage() {
     onSuccess: (payload) => {
       queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state);
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+  });
+
+  const retrySingleGpuMutation = useMutation({
+    mutationFn: retryTaskSingleGpu,
+    onSuccess: (payload) => {
+      setPageMessage("已加入单卡独占重跑队列");
+      queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state);
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+    onError: (error) => {
+      setPageMessage(error instanceof Error ? error.message : "单卡重跑失败");
     },
   });
 
@@ -305,6 +319,7 @@ export function TasksPage() {
           刷新
         </button>
       </div>
+      {pageMessage ? <p className="page-message">{pageMessage}</p> : null}
       <div className="task-metrics">
         <div>
           <span>本页处理中</span>
@@ -356,6 +371,15 @@ export function TasksPage() {
                                 <span>失败原因</span>
                                 <strong>{failureReason(task)}</strong>
                                 {task.errorCode ? <em>错误码：{task.errorCode}</em> : null}
+                                {task.progressStage ? <em>原始信息：{task.progressStage}</em> : null}
+                                <button
+                                  className="primary compact"
+                                  type="button"
+                                  onClick={() => retrySingleGpuMutation.mutate(task.id)}
+                                  disabled={retrySingleGpuMutation.isPending}
+                                >
+                                  {retrySingleGpuMutation.isPending ? "入队中..." : "单卡重跑"}
+                                </button>
                               </div>
                             ) : null}
                           </div>
