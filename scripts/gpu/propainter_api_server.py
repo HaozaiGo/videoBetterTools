@@ -18,6 +18,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from multiprocessing import get_context
@@ -32,6 +33,7 @@ from fastapi.responses import FileResponse
 ROOT = Path(os.environ.get("MODEL_PLAZA_VIDEO_ROOT", "/data1/model-plaza-video-worker")).resolve()
 JOBS_ROOT = Path(os.environ.get("MODEL_PLAZA_GPU_JOBS_ROOT", str(ROOT / "work" / "api-jobs"))).resolve()
 LOGS_ROOT = Path(os.environ.get("MODEL_PLAZA_GPU_LOGS_ROOT", str(ROOT / "logs"))).resolve()
+RESULTS_ROOT = Path(os.environ.get("MODEL_PLAZA_GPU_RESULTS_ROOT", "/data1/model-plaza-results")).resolve()
 PROPAINTER_RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_PROPAINTER_RUNNER", str(ROOT / "scripts" / "propainter_runner.py"))).resolve()
 ENHANCE_RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_ENHANCE_RUNNER", str(ROOT / "scripts" / "video_enhance_runner.py"))).resolve()
 TRANSLATE_RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_TRANSLATE_RUNNER", str(ROOT / "scripts" / "video_translate_runner.py"))).resolve()
@@ -56,6 +58,9 @@ CLEANUP_RUNNER_WORK_TTL_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_CLEANUP_RUNNE
 CLEANUP_DISK_HIGH_WATERMARK_PERCENT = max(1, min(100, _env_int("MODEL_PLAZA_GPU_CLEANUP_DISK_HIGH_WATERMARK_PERCENT", 80)))
 CLEANUP_DISK_LOW_WATERMARK_PERCENT = max(1, min(CLEANUP_DISK_HIGH_WATERMARK_PERCENT, _env_int("MODEL_PLAZA_GPU_CLEANUP_DISK_LOW_WATERMARK_PERCENT", 70)))
 CLEANUP_DISK_MIN_AGE_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_CLEANUP_DISK_MIN_AGE_SECONDS", 60 * 60))
+RESULT_CACHE_HIGH_WATERMARK_BYTES = max(0, _env_int("MODEL_PLAZA_GPU_RESULT_CACHE_HIGH_WATERMARK_BYTES", 1_000_000_000_000))
+RESULT_CACHE_LOW_WATERMARK_BYTES = max(0, min(RESULT_CACHE_HIGH_WATERMARK_BYTES, _env_int("MODEL_PLAZA_GPU_RESULT_CACHE_LOW_WATERMARK_BYTES", 900_000_000_000)))
+RESULT_CACHE_MIN_AGE_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_RESULT_CACHE_MIN_AGE_SECONDS", 60 * 60))
 GPU_PREFLIGHT_ENABLED = os.environ.get("MODEL_PLAZA_GPU_PREFLIGHT_ENABLED", "1").lower() not in {"0", "false", "no"}
 GPU_STALL_TIMEOUT_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_STALL_TIMEOUT_SECONDS", 30 * 60))
 GPU_WATCHDOG_INTERVAL_SECONDS = max(5, _env_int("MODEL_PLAZA_GPU_WATCHDOG_INTERVAL_SECONDS", 30))
@@ -87,6 +92,8 @@ running_progress_snapshots: dict[str, tuple[tuple[str, int, str], float, float]]
 running_processes_lock = threading.Lock()
 recover_lock = threading.Lock()
 cleanup_lock = threading.Lock()
+zip_locks: dict[str, threading.Lock] = {}
+zip_locks_guard = threading.Lock()
 
 
 def _run_command(command: list[str], timeout: int = 5) -> str:
@@ -491,24 +498,65 @@ def _tos_enabled() -> bool:
     return all(config[key] for key in ("ak", "sk", "bucket", "endpoint", "region", "public_base_url"))
 
 
-def _upload_result_to_tos(job_id: str, output_path: Path) -> dict | None:
+def _safe_relative_path(value: str) -> Path:
+    raw = value.strip().lstrip("/")
+    if not raw:
+        raise ValueError("storage key is required")
+    path = Path(raw)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError("storage key contains an unsafe path")
+    return path
+
+
+def _result_cache_path(storage_key: str) -> Path:
+    return RESULTS_ROOT / _safe_relative_path(storage_key)
+
+
+def _upload_file_to_tos(object_key: str, local_path: Path) -> dict | None:
     if not _tos_enabled():
         return None
 
     import tos
 
     config = _tos_config()
-    now = datetime.now(timezone.utc)
-    object_key = f"model-plaza/output/videos/{now:%Y/%m/%d}/{job_id}.mp4"
     client = tos.TosClientV2(config["ak"], config["sk"], config["endpoint"], config["region"])
-    client.put_object_from_file(config["bucket"], object_key, str(output_path))
+    client.put_object_from_file(config["bucket"], object_key, str(local_path))
     encoded_key = quote(object_key, safe="/")
     return {
-        "result_storage_key": object_key,
-        "result_url": f"{config['public_base_url']}/{encoded_key}",
-        "result_mime_type": "video/mp4",
-        "result_size_bytes": output_path.stat().st_size,
+        "storage_key": object_key,
+        "url": f"{config['public_base_url']}/{encoded_key}",
+        "size_bytes": local_path.stat().st_size,
     }
+
+
+def _upload_result_to_tos(job_id: str, output_path: Path) -> dict | None:
+    now = datetime.now(timezone.utc)
+    object_key = f"model-plaza/output/videos/{now:%Y/%m/%d}/{job_id}.mp4"
+    uploaded = _upload_file_to_tos(object_key, output_path)
+    if not uploaded:
+        return None
+    return {
+        "result_storage_key": uploaded["storage_key"],
+        "result_url": uploaded["url"],
+        "result_mime_type": "video/mp4",
+        "result_size_bytes": uploaded["size_bytes"],
+    }
+
+
+def _persist_result_cache(storage_key: str, source_path: Path) -> Path | None:
+    if not storage_key or not source_path.exists():
+        return None
+    try:
+        target = _result_cache_path(storage_key)
+    except ValueError:
+        return None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source_path.resolve() != target.resolve():
+        temp_path = target.with_suffix(target.suffix + f".{uuid.uuid4().hex}.tmp")
+        shutil.copyfile(source_path, temp_path)
+        temp_path.replace(target)
+    os.utime(target, None)
+    return target
 
 
 def _result_upload_config(job_id: str) -> dict:
@@ -733,15 +781,17 @@ def _run_model_job(job_id: str) -> None:
             return
         _write_status(job_id, status="uploading", upload_started_at=time.time())
         result_updates = _upload_result_with_deadline(job_id, output_path)
+        cached_path = _persist_result_cache(str(result_updates.get("result_storage_key") or ""), output_path)
         _write_status(
             job_id,
             status="succeeded",
             completed_at=time.time(),
-            result_path=str(output_path),
+            result_path=str(cached_path or output_path),
             progress_percent=100,
             progress_stage="远端处理完成",
             **result_updates,
         )
+        _cleanup_result_cache_for_watermark()
     except Exception as exc:
         with running_processes_lock:
             running_processes.pop(job_id, None)
@@ -854,6 +904,52 @@ def _cleanup_for_disk_pressure() -> tuple[int, int]:
     return jobs_removed, bytes_removed
 
 
+def _result_cache_files() -> list[tuple[float, Path, int]]:
+    if not RESULTS_ROOT.exists():
+        return []
+    files: list[tuple[float, Path, int]] = []
+    for path in RESULTS_ROOT.rglob("*"):
+        try:
+            if not path.is_file() or path.name.endswith((".tmp", ".lock")):
+                continue
+            stat = path.stat()
+        except OSError:
+            continue
+        files.append((stat.st_mtime, path, stat.st_size))
+    return files
+
+
+def _cleanup_result_cache_for_watermark() -> dict:
+    if RESULT_CACHE_HIGH_WATERMARK_BYTES <= 0 or not RESULTS_ROOT.exists():
+        return {"enabled": False}
+    files = _result_cache_files()
+    used_bytes = sum(size for _mtime, _path, size in files)
+    if used_bytes <= RESULT_CACHE_HIGH_WATERMARK_BYTES:
+        return {"enabled": True, "removed": 0, "bytes_removed": 0, "used_bytes": used_bytes}
+
+    now = time.time()
+    removed = 0
+    bytes_removed = 0
+    for mtime, path, size in sorted(files, key=lambda item: item[0]):
+        if RESULT_CACHE_MIN_AGE_SECONDS > 0 and now - mtime < RESULT_CACHE_MIN_AGE_SECONDS:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed += 1
+        bytes_removed += size
+        used_bytes -= size
+        if used_bytes <= RESULT_CACHE_LOW_WATERMARK_BYTES:
+            break
+    for directory in sorted((path for path in RESULTS_ROOT.rglob("*") if path.is_dir()), key=lambda item: len(item.parts), reverse=True):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    return {"enabled": True, "removed": removed, "bytes_removed": bytes_removed, "used_bytes": used_bytes}
+
+
 def _cleanup_once() -> dict:
     if not CLEANUP_ENABLED or not JOBS_ROOT.exists():
         return {"enabled": CLEANUP_ENABLED, "skipped": True}
@@ -861,6 +957,7 @@ def _cleanup_once() -> dict:
         started_at = time.time()
         expired_jobs, expired_bytes, runner_work_dirs, runner_work_bytes = _cleanup_expired_terminal_jobs(started_at)
         pressure_jobs, pressure_bytes = _cleanup_for_disk_pressure()
+        result_cache = _cleanup_result_cache_for_watermark()
         return {
             "enabled": True,
             "expired_jobs_removed": expired_jobs,
@@ -869,6 +966,7 @@ def _cleanup_once() -> dict:
             "runner_work_bytes_removed": runner_work_bytes,
             "pressure_jobs_removed": pressure_jobs,
             "pressure_bytes_removed": pressure_bytes,
+            "result_cache": result_cache,
             "disk_used_percent": round(_disk_usage_percent(), 2),
             "duration_seconds": round(time.time() - started_at, 3),
         }
@@ -958,13 +1056,15 @@ def _recover_finished_job(job_id: str, output_path: Path) -> None:
             return
         _write_status(job_id, status="uploading", upload_started_at=time.time(), result_path=str(output_path), error="")
         result_updates = _upload_result_with_deadline(job_id, output_path)
+        cached_path = _persist_result_cache(str(result_updates.get("result_storage_key") or ""), output_path)
         _write_status(
             job_id,
             status="succeeded",
             completed_at=time.time(),
-            result_path=str(output_path),
+            result_path=str(cached_path or output_path),
             **result_updates,
         )
+        _cleanup_result_cache_for_watermark()
     except Exception as exc:
         _write_status(
             job_id,
@@ -1040,6 +1140,95 @@ def _download_input_url(input_url: str, output_path: Path) -> None:
             shutil.copyfileobj(response, output_file)
 
 
+def _zip_lock(zip_id: str) -> threading.Lock:
+    with zip_locks_guard:
+        lock = zip_locks.get(zip_id)
+        if lock is None:
+            lock = threading.Lock()
+            zip_locks[zip_id] = lock
+        return lock
+
+
+def _download_url_to_cache(download_url: str, target_path: Path) -> None:
+    parsed = urllib.parse.urlparse(download_url)
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=400, detail="download_url must be http or https")
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = target_path.with_suffix(target_path.suffix + f".{uuid.uuid4().hex}.tmp")
+    request = urllib.request.Request(download_url, headers={"User-Agent": "model-plaza-gpu-worker/1.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=int(os.environ.get("MODEL_PLAZA_GPU_ZIP_SOURCE_DOWNLOAD_TIMEOUT", "900"))) as response:
+            with temp_path.open("wb") as output_file:
+                shutil.copyfileobj(response, output_file)
+        temp_path.replace(target_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _source_path_for_zip_entry(entry: dict) -> Path:
+    storage_key = str(entry.get("storage_key") or "")
+    download_url = str(entry.get("download_url") or "")
+    try:
+        source_path = _result_cache_path(storage_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if source_path.exists() and source_path.is_file():
+        os.utime(source_path, None)
+        return source_path
+    if not download_url:
+        raise HTTPException(status_code=404, detail=f"missing cached result and download_url: {storage_key}")
+    _download_url_to_cache(download_url, source_path)
+    return source_path
+
+
+def _safe_zip_id(value: str) -> str:
+    safe = Path(value or uuid.uuid4().hex).name
+    return "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in safe)[:180] or uuid.uuid4().hex
+
+
+def _create_internal_batch_zip_on_gpu(payload: dict) -> dict:
+    zip_id = _safe_zip_id(str(payload.get("zip_id") or ""))
+    filename = Path(str(payload.get("filename") or f"{zip_id}.zip")).name
+    zip_storage_key = str(payload.get("zip_storage_key") or f"model-plaza/output/zips/{zip_id}.zip").strip("/")
+    entries = payload.get("entries") or []
+    summary = payload.get("summary") or {}
+    summary_name = Path(str(payload.get("summary_name") or "_batch-summary.json")).name
+    if not isinstance(entries, list) or not entries:
+        raise HTTPException(status_code=400, detail="entries must be a non-empty list")
+    if not _tos_enabled():
+        raise HTTPException(status_code=503, detail="TOS is not configured on GPU worker")
+
+    zip_dir = RESULTS_ROOT / "internal-batch-zips"
+    zip_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = zip_dir / filename
+    with _zip_lock(zip_id):
+        if not zip_path.exists() or zip_path.stat().st_size <= 0:
+            temp_zip_path = zip_path.with_suffix(zip_path.suffix + f".{uuid.uuid4().hex}.tmp")
+            try:
+                with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_STORED) as archive:
+                    archive.writestr(summary_name, json.dumps(summary, ensure_ascii=False, indent=2))
+                    for entry in entries:
+                        zip_name = Path(str(entry.get("zip_name") or "")).name
+                        if not zip_name:
+                            raise HTTPException(status_code=400, detail="zip_name is required")
+                        archive.write(_source_path_for_zip_entry(entry), zip_name)
+                temp_zip_path.replace(zip_path)
+            finally:
+                temp_zip_path.unlink(missing_ok=True)
+        uploaded = _upload_file_to_tos(zip_storage_key, zip_path)
+        if not uploaded:
+            raise HTTPException(status_code=503, detail="TOS upload is not available")
+    _cleanup_result_cache_for_watermark()
+    return {
+        "zip_id": zip_id,
+        "filename": filename,
+        "storage_key": uploaded["storage_key"],
+        "url": uploaded["url"],
+        "size_bytes": uploaded["size_bytes"],
+        "local_path": str(zip_path),
+    }
+
+
 @app.on_event("startup")
 def recover_incomplete_jobs_on_startup() -> None:
     # 启动恢复可能包含大文件补传，不能阻塞 /health 和新任务提交。
@@ -1086,6 +1275,12 @@ def metrics(x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None) 
 def run_cleanup(x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None) -> dict:
     _check_auth(x_api_key)
     return _cleanup_once()
+
+
+@app.post("/internal-batch-zips")
+def create_internal_batch_zip(payload: dict, x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None) -> dict:
+    _check_auth(x_api_key)
+    return _create_internal_batch_zip_on_gpu(payload)
 
 
 @app.post("/jobs", status_code=202)

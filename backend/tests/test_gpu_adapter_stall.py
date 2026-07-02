@@ -170,3 +170,16 @@ def test_gpu_api_server_watchdog_treats_log_mtime_as_activity(tmp_path, monkeypa
 
     assert result["stalled_jobs_cancelled"] == []
     assert module.running_progress_snapshots[job_id][1] == 100.0
+
+
+def test_gpu_api_server_rejects_unsafe_result_cache_paths() -> None:
+    module = _load_script_module("propainter_api_server_cache_path_test", "scripts/gpu/propainter_api_server.py")
+
+    assert module._safe_relative_path("model-plaza/output/videos/result.mp4").parts == (
+        "model-plaza",
+        "output",
+        "videos",
+        "result.mp4",
+    )
+    with pytest.raises(ValueError):
+        module._safe_relative_path("../result.mp4")

@@ -8,13 +8,21 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models import Asset, Task
 from app.queue import enqueue_provider_job, redis_connection, task_queue
-from app.services import provider_callback
+from app.services import create_internal_batch_zip, provider_callback
 from app.video.enhance import process_video_enhance
 from app.video.translate import process_video_translate
 from app.video.watermark import GpuUnavailableError, VideoProcessingError, process_subtitle_removal, process_watermark_removal
 from app.video.workflow import process_subtitle_translate_workflow
 
 logger = logging.getLogger("model_plaza.worker")
+
+
+def prepare_internal_batch_zip(user_id: str, batch_id: str) -> None:
+    with SessionLocal() as db:
+        try:
+            create_internal_batch_zip(db, user_id, batch_id)
+        except Exception:
+            logger.exception("Failed to auto-prepare internal batch zip %s for user %s", batch_id, user_id)
 
 
 def process_provider_job(task_id: str) -> None:

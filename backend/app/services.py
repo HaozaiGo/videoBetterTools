@@ -1,9 +1,12 @@
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 from pathlib import Path
 import shutil
 import threading
+import urllib.error
+import urllib.request
 from urllib.parse import quote
 from uuid import uuid4
 import zipfile
@@ -21,7 +24,7 @@ from app.auth import hash_password
 from app.config import settings
 from app.models import Asset, ProcessedCallback, Task, User, Wallet, WalletLedger
 from app.pricing import estimate_credits
-from app.queue import enqueue_provider_job
+from app.queue import enqueue_internal_batch_zip, enqueue_provider_job
 from app.storage import object_key_for_upload, safe_storage_name, storage
 from app.tool_config import CATEGORIES, TOOLS, get_tool
 
@@ -30,6 +33,7 @@ MAX_PAGE_SIZE = 100
 INTERNAL_BATCH_ZIP_SUMMARY_NAME = "_batch-summary.json"
 _INTERNAL_BATCH_ZIP_LOCKS: dict[str, threading.Lock] = {}
 _INTERNAL_BATCH_ZIP_LOCKS_GUARD = threading.Lock()
+logger = logging.getLogger("model_plaza.services")
 
 
 def now() -> datetime:
@@ -403,7 +407,7 @@ def _internal_batch_zip_parts(batch: dict, entries: list[dict]) -> list[dict]:
                 "path": zip_path,
                 "filename": download_filename,
                 "index": part_index,
-                "sizeBytes": zip_path.stat().st_size if zip_path.exists() and zip_path.is_file() else 0,
+                "sizeBytes": _internal_batch_zip_size_bytes(zip_path),
                 "estimatedSizeBytes": sum(int(entry["size"]) for entry in part_entries),
                 "entries": part_entries,
                 "partCount": part_count,
@@ -414,6 +418,30 @@ def _internal_batch_zip_parts(batch: dict, entries: list[dict]) -> list[dict]:
 
 def _internal_batch_zip_exists(zip_path: Path) -> bool:
     return zip_path.exists() and zip_path.is_file() and zip_path.stat().st_size > 0
+
+
+def _internal_batch_zip_remote_marker_path(zip_path: Path) -> Path:
+    return zip_path.with_suffix(zip_path.suffix + ".remote.json")
+
+
+def _read_internal_batch_zip_remote_marker(zip_path: Path) -> dict | None:
+    marker_path = _internal_batch_zip_remote_marker_path(zip_path)
+    if not marker_path.exists():
+        return None
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not marker.get("url") or int(marker.get("sizeBytes") or 0) <= 0:
+        return None
+    return marker
+
+
+def _internal_batch_zip_size_bytes(zip_path: Path) -> int:
+    if zip_path.exists() and zip_path.is_file():
+        return zip_path.stat().st_size
+    marker = _read_internal_batch_zip_remote_marker(zip_path)
+    return int(marker.get("sizeBytes") or 0) if marker else 0
 
 
 def _internal_batch_zip_process_lock(lock_path: Path) -> threading.Lock:
@@ -448,11 +476,128 @@ def plan_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
     return {"parts": parts, "partCount": len(parts)}
 
 
+def _remote_internal_batch_zip_enabled() -> bool:
+    return bool(settings.internal_batch_zip_gpu_enabled and settings.model_plaza_gpu_api_url and storage.is_remote)
+
+
+def _completed_internal_batch_id_for_auto_zip(db: Session, task: Task) -> str | None:
+    if not settings.internal_batch_zip_auto_prepare_enabled or not _remote_internal_batch_zip_enabled():
+        return None
+    if task.tool_slug != "subtitle-translate-workflow" or not isinstance(task.params, dict):
+        return None
+    batch_id = str(task.params.get("internalBatchId") or "").strip()
+    if not batch_id:
+        return None
+    tasks = _internal_batch_tasks(db, task.user_id, batch_id)
+    if not tasks or not any(item.status == "succeeded" for item in tasks):
+        return None
+    terminal_statuses = {"succeeded", "failed", "cancelled"}
+    if any(item.status not in terminal_statuses for item in tasks):
+        return None
+    return batch_id
+
+
+def _enqueue_internal_batch_zip_after_commit(user_id: str, batch_id: str) -> None:
+    try:
+        enqueue_internal_batch_zip(user_id, batch_id)
+    except Exception:
+        logger.exception("Failed to enqueue internal batch zip %s for user %s", batch_id, user_id)
+
+
+def _internal_batch_zip_summary(batch: dict, task_summaries: list[dict], selected_part: dict) -> dict:
+    return {
+        "id": batch["id"],
+        "name": batch["name"],
+        "total": batch["total"],
+        "succeeded": batch["succeeded"],
+        "failed": batch["failed"],
+        "cancelled": batch["cancelled"],
+        "processing": batch["processing"],
+        "partIndex": selected_part["index"],
+        "partCount": selected_part["partCount"],
+        "partMaxBytes": max(1, int(settings.internal_batch_zip_part_max_bytes)),
+        "partMaxFiles": max(1, int(settings.internal_batch_zip_part_max_files)),
+        "includedTaskIds": [entry["task_id"] for entry in selected_part["entries"]],
+        "skippedTasks": [task for task in task_summaries if task["status"] != "succeeded"],
+    }
+
+
+def _remote_internal_batch_zip_payload(batch: dict, task_summaries: list[dict], selected_part: dict) -> dict | None:
+    entries = []
+    for entry in selected_part["entries"]:
+        storage_key = entry.get("storage_key")
+        if not storage_key:
+            return None
+        entries.append(
+            {
+                "task_id": entry["task_id"],
+                "storage_key": storage_key,
+                "zip_name": entry["zip_name"],
+                "size": int(entry.get("size") or 0),
+                "download_url": storage.presign_download(storage_key, entry["zip_name"]),
+            }
+        )
+    zip_path = Path(selected_part["path"])
+    return {
+        "zip_id": zip_path.stem,
+        "filename": selected_part["filename"],
+        "zip_storage_key": f"model-plaza/output/zips/{str(batch['id'])[:8]}/{zip_path.name}",
+        "summary_name": INTERNAL_BATCH_ZIP_SUMMARY_NAME,
+        "summary": _internal_batch_zip_summary(batch, task_summaries, selected_part),
+        "entries": entries,
+    }
+
+
+def _request_remote_internal_batch_zip(payload: dict) -> dict:
+    base_url = settings.model_plaza_gpu_api_url.rstrip("/")
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Content-Length": str(len(body))}
+    if settings.model_plaza_gpu_api_key:
+        headers["X-API-Key"] = settings.model_plaza_gpu_api_key
+    request = urllib.request.Request(f"{base_url}/internal-batch-zips", data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=settings.internal_batch_zip_gpu_timeout_seconds) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise HTTPException(status_code=502, detail=f"GPU zip failed: HTTP {exc.code}: {detail}") from exc
+    except (TimeoutError, urllib.error.URLError, OSError) as exc:
+        raise HTTPException(status_code=502, detail=f"GPU zip failed: {exc}") from exc
+
+
+def _create_remote_internal_batch_zip(batch: dict, task_summaries: list[dict], selected_part: dict) -> bool:
+    if not _remote_internal_batch_zip_enabled():
+        return False
+    zip_path = Path(selected_part["path"])
+    if _read_internal_batch_zip_remote_marker(zip_path):
+        return True
+    payload = _remote_internal_batch_zip_payload(batch, task_summaries, selected_part)
+    if payload is None:
+        return False
+    with _locked_internal_batch_zip(zip_path):
+        if _read_internal_batch_zip_remote_marker(zip_path) or _internal_batch_zip_exists(zip_path):
+            return True
+        result = _request_remote_internal_batch_zip(payload)
+        marker = {
+            "url": str(result.get("url") or ""),
+            "storageKey": str(result.get("storage_key") or payload["zip_storage_key"]),
+            "sizeBytes": int(result.get("size_bytes") or 0),
+            "filename": selected_part["filename"],
+        }
+        if not marker["url"] or marker["sizeBytes"] <= 0:
+            raise HTTPException(status_code=502, detail="GPU zip returned an invalid result")
+        marker_path = _internal_batch_zip_remote_marker_path(zip_path)
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text(json.dumps(marker, ensure_ascii=False, indent=2), encoding="utf-8")
+        selected_part["sizeBytes"] = marker["sizeBytes"]
+        selected_part["remoteUrl"] = marker["url"]
+        selected_part["storageKey"] = marker["storageKey"]
+        return True
+
+
 def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: int | None = None) -> dict:
     batch, task_summaries, entries = _internal_batch_zip_entries(db, user_id, batch_id)
     parts = _internal_batch_zip_parts(batch, entries)
-    max_part_bytes = max(1, int(settings.internal_batch_zip_part_max_bytes))
-    max_part_files = max(1, int(settings.internal_batch_zip_part_max_files))
     if part is not None and (part < 1 or part > len(parts)):
         raise HTTPException(status_code=404, detail="download part not found")
 
@@ -460,24 +605,12 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: in
     db.close()
     for selected_part in selected_parts:
         zip_path = selected_part["path"]
-        if not _internal_batch_zip_exists(zip_path):
+        if not _internal_batch_zip_exists(zip_path) and not _read_internal_batch_zip_remote_marker(zip_path):
+            if _create_remote_internal_batch_zip(batch, task_summaries, selected_part):
+                continue
             with _locked_internal_batch_zip(zip_path):
                 if not _internal_batch_zip_exists(zip_path):
-                    summary = {
-                        "id": batch["id"],
-                        "name": batch["name"],
-                        "total": batch["total"],
-                        "succeeded": batch["succeeded"],
-                        "failed": batch["failed"],
-                        "cancelled": batch["cancelled"],
-                        "processing": batch["processing"],
-                        "partIndex": selected_part["index"],
-                        "partCount": selected_part["partCount"],
-                        "partMaxBytes": max_part_bytes,
-                        "partMaxFiles": max_part_files,
-                        "includedTaskIds": [entry["task_id"] for entry in selected_part["entries"]],
-                        "skippedTasks": [task for task in task_summaries if task["status"] != "succeeded"],
-                    }
+                    summary = _internal_batch_zip_summary(batch, task_summaries, selected_part)
                     temp_zip_path = zip_path.with_suffix(f".{uuid4().hex}.tmp")
                     try:
                         with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_STORED) as archive:
@@ -494,7 +627,13 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: in
                     finally:
                         if temp_zip_path.exists():
                             temp_zip_path.unlink()
-        selected_part["sizeBytes"] = zip_path.stat().st_size
+        marker = _read_internal_batch_zip_remote_marker(zip_path)
+        if marker:
+            selected_part["sizeBytes"] = int(marker["sizeBytes"])
+            selected_part["remoteUrl"] = str(marker["url"])
+            selected_part["storageKey"] = str(marker.get("storageKey") or "")
+        else:
+            selected_part["sizeBytes"] = zip_path.stat().st_size
 
     first_part = selected_parts[0]
     return {"path": first_part["path"], "filename": first_part["filename"], "parts": parts, "partCount": len(parts)}
@@ -1064,6 +1203,7 @@ def provider_callback(
     db.add(ProcessedCallback(callback_id=callback_id, provider_job_id=provider_job_id))
     wallet = get_wallet(db, task.user_id, lock=True)
     tool = get_tool(task.tool_slug) or {"name": task.tool_slug}
+    auto_zip_batch_id: str | None = None
 
     if progress_percent is not None:
         normalized_progress = max(0, min(100, progress_percent))
@@ -1116,6 +1256,7 @@ def provider_callback(
         wallet.frozen_credits = max(0, wallet.frozen_credits - task.frozen_credits)
         wallet.credits = max(0, wallet.credits - charge)
         add_ledger(db, task.user_id, "charge", -charge, f"{tool['name']} 扣费完成", task.id)
+        auto_zip_batch_id = _completed_internal_batch_id_for_auto_zip(db, task)
 
     if status == "failed" and task.status not in {"succeeded", "failed", "cancelled"}:
         task.status = "failed"
@@ -1128,4 +1269,6 @@ def provider_callback(
 
     db.commit()
     db.refresh(task)
+    if auto_zip_batch_id:
+        _enqueue_internal_batch_zip_after_commit(task.user_id, auto_zip_batch_id)
     return False, task

@@ -275,6 +275,8 @@ def internal_batch_download_endpoint(batch_id: str, part: int = Query(1, ge=1), 
         raise HTTPException(status_code=404, detail="download part not found")
     selected = parts[part - 1]
     db.close()
+    if selected.get("remoteUrl"):
+        return RedirectResponse(str(selected["remoteUrl"]), status_code=302)
     return FileResponse(selected["path"], media_type="application/zip", filename=selected["filename"], content_disposition_type="attachment")
 
 
