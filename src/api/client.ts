@@ -100,6 +100,12 @@ export function retryInternalBatchTasks(batchId: string) {
   });
 }
 
+export function retryTaskSingleGpu(taskId: string) {
+  return request<{ task: Task; state: BootstrapState }>(`/api/tasks/${encodeURIComponent(taskId)}/retry-single-gpu`, {
+    method: "POST",
+  });
+}
+
 export type InternalBatchDownloadPart = {
   index: number;
   filename: string;
