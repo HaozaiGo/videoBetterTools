@@ -311,7 +311,7 @@ def internal_batch_status(db: Session, user_id: str, batch_id: str) -> dict:
     }
 
 
-def _internal_batch_zip_entries(db: Session, user_id: str, batch_id: str) -> tuple[dict, list[Task], list[dict]]:
+def _internal_batch_zip_entries(db: Session, user_id: str, batch_id: str) -> tuple[dict, list[dict], list[dict]]:
     batch = internal_batch_status(db, user_id, batch_id)
     if not batch["downloadReady"]:
         raise HTTPException(status_code=409, detail=f"batch has no succeeded tasks: {batch['succeeded']}/{batch['total']} succeeded")
@@ -349,8 +349,26 @@ def _internal_batch_zip_entries(db: Session, user_id: str, batch_id: str) -> tup
             zip_name = f"{index:03d}-{task.id[:8]}-{duplicate_index}-{base_name}"
             duplicate_index += 1
         used_names.add(zip_name)
-        entries.append({"task": task, "source_path": source_path, "storage_key": storage_key, "zip_name": zip_name, "size": entry_size})
-    return batch, tasks, entries
+        entries.append(
+            {
+                "task_id": task.id,
+                "source_path": source_path,
+                "storage_key": storage_key,
+                "zip_name": zip_name,
+                "size": entry_size,
+            }
+        )
+    task_summaries = [
+        {
+            "id": task.id,
+            "status": task.status,
+            "errorCode": task.error_code,
+            "progressPercent": task.progress_percent,
+            "progressStage": task.progress_stage,
+        }
+        for task in tasks
+    ]
+    return batch, task_summaries, entries
 
 
 def _internal_batch_zip_parts(batch: dict, entries: list[dict]) -> list[dict]:
@@ -431,7 +449,7 @@ def plan_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
 
 
 def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: int | None = None) -> dict:
-    batch, tasks, entries = _internal_batch_zip_entries(db, user_id, batch_id)
+    batch, task_summaries, entries = _internal_batch_zip_entries(db, user_id, batch_id)
     parts = _internal_batch_zip_parts(batch, entries)
     max_part_bytes = max(1, int(settings.internal_batch_zip_part_max_bytes))
     max_part_files = max(1, int(settings.internal_batch_zip_part_max_files))
@@ -439,6 +457,7 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: in
         raise HTTPException(status_code=404, detail="download part not found")
 
     selected_parts = parts if part is None else [parts[part - 1]]
+    db.close()
     for selected_part in selected_parts:
         zip_path = selected_part["path"]
         if not _internal_batch_zip_exists(zip_path):
@@ -456,18 +475,8 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: in
                         "partCount": selected_part["partCount"],
                         "partMaxBytes": max_part_bytes,
                         "partMaxFiles": max_part_files,
-                        "includedTaskIds": [entry["task"].id for entry in selected_part["entries"]],
-                        "skippedTasks": [
-                            {
-                                "id": task.id,
-                                "status": task.status,
-                                "errorCode": task.error_code,
-                                "progressPercent": task.progress_percent,
-                                "progressStage": task.progress_stage,
-                            }
-                            for task in tasks
-                            if task.status != "succeeded"
-                        ],
+                        "includedTaskIds": [entry["task_id"] for entry in selected_part["entries"]],
+                        "skippedTasks": [task for task in task_summaries if task["status"] != "succeeded"],
                     }
                     temp_zip_path = zip_path.with_suffix(f".{uuid4().hex}.tmp")
                     try:
@@ -479,7 +488,7 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: in
                                     try:
                                         source_path = storage.ensure_local(entry["storage_key"])
                                     except FileNotFoundError as exc:
-                                        raise HTTPException(status_code=404, detail=f"task result not ready: {entry['task'].id}") from exc
+                                        raise HTTPException(status_code=404, detail=f"task result not ready: {entry['task_id']}") from exc
                                 archive.write(source_path, entry["zip_name"])
                         temp_zip_path.replace(zip_path)
                     finally:

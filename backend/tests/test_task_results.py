@@ -165,6 +165,75 @@ def test_internal_batch_zip_includes_succeeded_tasks_when_batch_is_partial(tmp_p
     assert {task["id"] for task in summary["skippedTasks"]} == {"task-2", "task-3"}
 
 
+def test_internal_batch_zip_releases_db_before_materializing_remote_files(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path))
+
+    source_path = tmp_path / "remote-result.mp4"
+    source_path.write_bytes(b"remote-video")
+
+    with Session(engine) as db:
+        class AssertClosedStorage:
+            def ensure_local(self, storage_key: str):
+                assert storage_key == "remote-result.mp4"
+                assert not db.in_transaction()
+                return source_path
+
+        monkeypatch.setattr(services, "storage", AssertClosedStorage())
+
+        user = User(id="user-remote-zip", email="remote-zip@example.com", name="Remote Zip User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        input_asset = Asset(
+            id="remote-input-asset",
+            user_id=user.id,
+            kind="video",
+            original_name="remote.mp4",
+            mime_type="video/mp4",
+            storage_key="remote-input.mp4",
+            url="/uploads/remote-input.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        output_asset = Asset(
+            id="remote-output-asset",
+            user_id=user.id,
+            kind="video",
+            original_name="remote-result.mp4",
+            mime_type="video/mp4",
+            storage_key="remote-result.mp4",
+            url="https://example.test/remote-result.mp4",
+            size_bytes=12,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="remote-zip-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=input_asset.id,
+            output_asset_id=output_asset.id,
+            status="succeeded",
+            params={"internalBatchId": "remote-zip-batch", "internalBatchName": "remote zip"},
+            estimated_credits=0,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="remote-provider",
+            output_url="",
+            progress_percent=100,
+            progress_stage="处理完成",
+        )
+        db.add_all([user, wallet, input_asset, output_asset, task])
+        db.commit()
+
+        archive = create_internal_batch_zip(db, user.id, "remote-zip-batch")
+
+    with zipfile.ZipFile(archive["path"]) as zip_file:
+        assert zip_file.read("001-remote-remote-z.mp4") == b"remote-video"
+
+
 def test_internal_batch_retry_resets_failed_and_cancelled_tasks(tmp_path, monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
