@@ -21,6 +21,15 @@ const taskStatusFilters = [
   { value: "cancelled", label: "已取消" },
 ];
 
+function completedDateBoundary(value: string, boundary: "start" | "end") {
+  if (!value) return "";
+  const date = new Date(`${value}T00:00:00`);
+  if (boundary === "end") {
+    date.setDate(date.getDate() + 1);
+  }
+  return date.toISOString();
+}
+
 function failureReason(task: Task) {
   if (task.status !== "failed") return "";
   if (task.failureReason) return task.failureReason;
@@ -161,10 +170,20 @@ export function TasksPage() {
   const [pageInput, setPageInput] = useState("1");
   const [pageMessage, setPageMessage] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  const [completedFromFilter, setCompletedFromFilter] = useState("");
+  const [completedToFilter, setCompletedToFilter] = useState("");
+  const [batchNameFilter, setBatchNameFilter] = useState("");
+  const taskFilters = {
+    status: statusFilter,
+    completedFrom: completedDateBoundary(completedFromFilter, "start"),
+    completedTo: completedDateBoundary(completedToFilter, "end"),
+    batchName: batchNameFilter,
+  };
+  const hasTaskFilters = Boolean(statusFilter || completedFromFilter || completedToFilter || batchNameFilter.trim());
   const tasksQuery = useQuery({
-    queryKey: ["tasks", currentPage, statusFilter],
-    queryFn: () => getTasksPage(currentPage, pageSize, statusFilter),
-    initialData: currentPage === 1 && !statusFilter ? { items: data.tasks, page: data.taskPage } : undefined,
+    queryKey: ["tasks", currentPage, taskFilters],
+    queryFn: () => getTasksPage(currentPage, pageSize, taskFilters),
+    initialData: currentPage === 1 && !hasTaskFilters ? { items: data.tasks, page: data.taskPage } : undefined,
     refetchInterval: (query) => {
       const state = query.state.data;
       return state?.items.some((task) => ["queued", "processing"].includes(task.status)) ? taskListRefetchIntervalMs : false;
@@ -194,6 +213,20 @@ export function TasksPage() {
     setCurrentPage(1);
     setPageInput("1");
     setExpandedTaskIds(new Set());
+  };
+
+  const resetTaskListPage = () => {
+    setCurrentPage(1);
+    setPageInput("1");
+    setExpandedTaskIds(new Set());
+  };
+
+  const resetTaskFilters = () => {
+    setStatusFilter("");
+    setCompletedFromFilter("");
+    setCompletedToFilter("");
+    setBatchNameFilter("");
+    resetTaskListPage();
   };
 
   const cancelMutation = useMutation({
@@ -336,6 +369,48 @@ export function TasksPage() {
               ))}
             </select>
           </label>
+          <label>
+            <span>完成时间</span>
+            <input
+              type="date"
+              value={completedFromFilter}
+              onChange={(event) => {
+                setCompletedFromFilter(event.target.value);
+                resetTaskListPage();
+              }}
+              disabled={tasksQuery.isFetching}
+            />
+          </label>
+          <label>
+            <span>至</span>
+            <input
+              type="date"
+              value={completedToFilter}
+              onChange={(event) => {
+                setCompletedToFilter(event.target.value);
+                resetTaskListPage();
+              }}
+              disabled={tasksQuery.isFetching}
+            />
+          </label>
+          <label>
+            <span>批次名称</span>
+            <input
+              type="search"
+              placeholder="搜索批次名称"
+              value={batchNameFilter}
+              onChange={(event) => {
+                setBatchNameFilter(event.target.value);
+                resetTaskListPage();
+              }}
+              disabled={tasksQuery.isFetching}
+            />
+          </label>
+          {hasTaskFilters ? (
+            <button className="ghost compact" type="button" onClick={resetTaskFilters} disabled={tasksQuery.isFetching}>
+              清空
+            </button>
+          ) : null}
           <button
             className="ghost compact"
             onClick={() => {

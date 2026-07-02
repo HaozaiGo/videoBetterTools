@@ -6,6 +6,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://jason@127.0.0.1:5432/model_plaza"
+    database_pool_size: int = 20
+    database_max_overflow: int = 20
+    database_pool_timeout_seconds: int = 10
+    database_pool_recycle_seconds: int = 1800
     redis_url: str = "redis://127.0.0.1:6379/0"
     task_job_timeout_seconds: int = 7200
     upload_dir: str = "../data/uploads"

@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.admin import admin_gpu_metrics, admin_ledger, admin_summary, admin_tasks, admin_users
 from app.auth import admin_user, create_token, current_user, find_user_by_email, verify_password
 from app.config import settings
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.models import User
 from app.schemas import AssetComplete, LoginRequest, MultipartUploadInit, ProviderCallback, RechargeCreate, TaskCreate, UserCreate, UserRecharge
 from app.services import (
@@ -118,10 +118,22 @@ def list_tasks(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, alias="perPage", ge=1, le=100),
     status: str | None = Query(None),
+    completed_from: str | None = Query(None, alias="completedFrom"),
+    completed_to: str | None = Query(None, alias="completedTo"),
+    batch_name: str | None = Query(None, alias="batchName"),
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
 ) -> dict:
-    return paginated_tasks(db, user.id, page=page, per_page=per_page, status=status)
+    return paginated_tasks(
+        db,
+        user.id,
+        page=page,
+        per_page=per_page,
+        status=status,
+        completed_from=completed_from,
+        completed_to=completed_to,
+        batch_name=batch_name,
+    )
 
 
 @app.get("/api/ledger")
@@ -229,6 +241,7 @@ def retry_task_single_gpu_endpoint(task_id: str, db: Session = Depends(get_db), 
 @app.get("/api/tasks/{task_id}/preview-result")
 def preview_task_result(task_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     access = get_task_result_access(db, user.id, task_id)
+    db.close()
     if access["mode"] == "redirect":
         return RedirectResponse(str(access["url"]), status_code=302)
     preview_path = access["path"]
@@ -238,6 +251,7 @@ def preview_task_result(task_id: str, db: Session = Depends(get_db), user: User 
 @app.get("/api/tasks/{task_id}/result/{filename}")
 def task_result_file(task_id: str, filename: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     access = get_task_result_access(db, user.id, task_id)
+    db.close()
     if access["mode"] == "redirect":
         return RedirectResponse(str(access["url"]), status_code=302)
     return FileResponse(access["path"], media_type=access.get("mime_type", "video/mp4"), filename=access["filename"], content_disposition_type="inline")
@@ -260,7 +274,47 @@ def internal_batch_download_endpoint(batch_id: str, part: int = Query(1, ge=1), 
     if part > len(parts):
         raise HTTPException(status_code=404, detail="download part not found")
     selected = parts[part - 1]
+    db.close()
     return FileResponse(selected["path"], media_type="application/zip", filename=selected["filename"], content_disposition_type="attachment")
+
+
+def _prepare_internal_batch_zip_background(user_id: str, batch_id: str, part: int) -> None:
+    db = SessionLocal()
+    try:
+        create_internal_batch_zip(db, user_id, batch_id, part=part)
+    except Exception:
+        logger.exception("Failed to prepare internal batch zip %s part %s", batch_id, part)
+    finally:
+        db.close()
+
+
+@app.post("/api/internal/batches/{batch_id}/download/prepare")
+def internal_batch_download_prepare_endpoint(
+    batch_id: str,
+    background_tasks: BackgroundTasks,
+    part: int = Query(1, ge=1),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+) -> dict:
+    archive = plan_internal_batch_zip(db, user.id, batch_id)
+    parts = archive.get("parts") or [archive]
+    if part > len(parts):
+        raise HTTPException(status_code=404, detail="download part not found")
+    selected = parts[part - 1]
+    status = "ready" if selected["sizeBytes"] > 0 else "preparing"
+    if status == "preparing":
+        background_tasks.add_task(_prepare_internal_batch_zip_background, user.id, batch_id, part)
+    return {
+        "status": status,
+        "partCount": len(parts),
+        "part": {
+            "index": selected["index"],
+            "filename": selected["filename"],
+            "sizeBytes": selected["sizeBytes"],
+            "estimatedSizeBytes": selected.get("estimatedSizeBytes", 0),
+            "url": f"/api/internal/batches/{batch_id}/download?part={selected['index']}",
+        },
+    }
 
 
 @app.post("/api/internal/batches/{batch_id}/download-manifest")

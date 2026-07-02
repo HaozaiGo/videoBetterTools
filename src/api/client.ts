@@ -38,10 +38,26 @@ export function getBootstrap() {
   return request<BootstrapState>("/api/bootstrap");
 }
 
-export function getTasksPage(page = 1, perPage = 50, status = "") {
+export type TaskPageFilters = {
+  status?: string;
+  completedFrom?: string;
+  completedTo?: string;
+  batchName?: string;
+};
+
+export function getTasksPage(page = 1, perPage = 50, filters: TaskPageFilters = {}) {
   const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
-  if (status) {
-    params.set("status", status);
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
+  if (filters.completedFrom) {
+    params.set("completedFrom", filters.completedFrom);
+  }
+  if (filters.completedTo) {
+    params.set("completedTo", filters.completedTo);
+  }
+  if (filters.batchName?.trim()) {
+    params.set("batchName", filters.batchName.trim());
   }
   return request<PaginatedTasks>(`/api/tasks?${params.toString()}`);
 }
@@ -122,6 +138,12 @@ export type InternalBatchDownloadManifest = {
   parts: InternalBatchDownloadPart[];
 };
 
+export type InternalBatchDownloadPrepareResult = {
+  status: "ready" | "preparing";
+  partCount: number;
+  part: InternalBatchDownloadPart;
+};
+
 function triggerInternalBatchPartDownload(part: InternalBatchDownloadPart, fallbackName: string, token: string | null) {
   const url = new URL(part.url, window.location.origin);
   if (token) {
@@ -137,6 +159,10 @@ function triggerInternalBatchPartDownload(part: InternalBatchDownloadPart, fallb
 
 export function getInternalBatchDownloadManifest(batchId: string) {
   return request<InternalBatchDownloadManifest>(`/api/internal/batches/${encodeURIComponent(batchId)}/download-manifest`, { method: "POST" });
+}
+
+export function prepareInternalBatchZipPart(batchId: string, partIndex: number) {
+  return request<InternalBatchDownloadPrepareResult>(`/api/internal/batches/${encodeURIComponent(batchId)}/download/prepare?part=${partIndex}`, { method: "POST" });
 }
 
 export function downloadInternalBatchZipPart(part: InternalBatchDownloadPart, batchName: string) {
