@@ -38,10 +38,26 @@ export function getBootstrap() {
   return request<BootstrapState>("/api/bootstrap");
 }
 
-export function getTasksPage(page = 1, perPage = 50, status = "") {
+export type TaskPageFilters = {
+  status?: string;
+  completedFrom?: string;
+  completedTo?: string;
+  batchName?: string;
+};
+
+export function getTasksPage(page = 1, perPage = 50, filters: TaskPageFilters = {}) {
   const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
-  if (status) {
-    params.set("status", status);
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
+  if (filters.completedFrom) {
+    params.set("completedFrom", filters.completedFrom);
+  }
+  if (filters.completedTo) {
+    params.set("completedTo", filters.completedTo);
+  }
+  if (filters.batchName?.trim()) {
+    params.set("batchName", filters.batchName.trim());
   }
   return request<PaginatedTasks>(`/api/tasks?${params.toString()}`);
 }

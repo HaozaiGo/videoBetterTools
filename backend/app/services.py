@@ -635,13 +635,43 @@ def page_info(total: int, page: int, per_page: int) -> dict:
 TASK_STATUS_FILTERS = {"queued", "processing", "succeeded", "failed", "cancelled"}
 
 
-def paginated_tasks(db: Session, user_id: str, page: int = 1, per_page: int = DEFAULT_PAGE_SIZE, status: str | None = None) -> dict:
+def parse_task_filter_datetime(value: str | None, field_name: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid {field_name}") from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def paginated_tasks(
+    db: Session,
+    user_id: str,
+    page: int = 1,
+    per_page: int = DEFAULT_PAGE_SIZE,
+    status: str | None = None,
+    completed_from: str | None = None,
+    completed_to: str | None = None,
+    batch_name: str | None = None,
+) -> dict:
     page, per_page = normalize_pagination(page, per_page)
     filters = [Task.user_id == user_id]
     if status:
         if status not in TASK_STATUS_FILTERS:
             raise HTTPException(status_code=400, detail="invalid task status filter")
         filters.append(Task.status == status)
+    completed_from_datetime = parse_task_filter_datetime(completed_from, "completedFrom")
+    completed_to_datetime = parse_task_filter_datetime(completed_to, "completedTo")
+    if completed_from_datetime is not None:
+        filters.append(Task.completed_at >= completed_from_datetime)
+    if completed_to_datetime is not None:
+        filters.append(Task.completed_at < completed_to_datetime)
+    normalized_batch_name = (batch_name or "").strip()
+    if normalized_batch_name:
+        filters.append(Task.params["internalBatchName"].as_string().ilike(f"%{normalized_batch_name}%"))
     total = db.execute(select(func.count()).select_from(Task).where(*filters)).scalar_one()
     tasks = db.execute(
         select(Task)

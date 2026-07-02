@@ -273,6 +273,11 @@ def test_paginated_tasks_filters_by_status() -> None:
         db.add_all([user, wallet])
 
         for index, status in enumerate(["failed", "succeeded", "failed"], start=1):
+            completed_at = None
+            batch_name = "普通批次"
+            if index == 2:
+                completed_at = now() - timedelta(hours=2)
+                batch_name = "64.仙王开局威压诸天万古（60集）AI短剧"
             asset = Asset(
                 id=f"filter-asset-{index}",
                 user_id=user.id,
@@ -291,7 +296,7 @@ def test_paginated_tasks_filters_by_status() -> None:
                 tool_slug="remove-subtitle",
                 input_asset_id=asset.id,
                 status=status,
-                params={},
+                params={"internalBatchName": batch_name},
                 estimated_credits=1,
                 frozen_credits=0,
                 charged_credits=0,
@@ -299,15 +304,26 @@ def test_paginated_tasks_filters_by_status() -> None:
                 provider_job_id=f"filter-provider-{index}",
                 error_code="VIDEO_PROCESSING_FAILED" if status == "failed" else None,
                 progress_stage="CUDA_OUT_OF_MEMORY" if status == "failed" else "处理完成",
+                completed_at=completed_at,
             )
             db.add_all([asset, task])
         db.commit()
 
         page = paginated_tasks(db, user.id, status="failed")
+        completed_page = paginated_tasks(
+            db,
+            user.id,
+            status="succeeded",
+            completed_from=(now() - timedelta(days=1)).isoformat(),
+            completed_to=(now() + timedelta(days=1)).isoformat(),
+            batch_name="仙王开局",
+        )
 
     assert page["page"]["total"] == 2
     assert {task["id"] for task in page["items"]} == {"filter-task-1", "filter-task-3"}
     assert {task["status"] for task in page["items"]} == {"failed"}
+    assert completed_page["page"]["total"] == 1
+    assert [task["id"] for task in completed_page["items"]] == ["filter-task-2"]
 
 
 def test_retry_failed_task_single_gpu_marks_exclusive_retry(tmp_path, monkeypatch) -> None:

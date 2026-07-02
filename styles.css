@@ -1236,6 +1236,8 @@ dd {
 .task-toolbar {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
@@ -1250,6 +1252,14 @@ dd {
 
 .task-toolbar select {
   min-width: 128px;
+}
+
+.task-toolbar input[type="date"] {
+  min-width: 150px;
+}
+
+.task-toolbar input[type="search"] {
+  min-width: 220px;
 }
 
 .admin-stats {

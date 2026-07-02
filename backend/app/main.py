@@ -118,10 +118,22 @@ def list_tasks(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, alias="perPage", ge=1, le=100),
     status: str | None = Query(None),
+    completed_from: str | None = Query(None, alias="completedFrom"),
+    completed_to: str | None = Query(None, alias="completedTo"),
+    batch_name: str | None = Query(None, alias="batchName"),
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
 ) -> dict:
-    return paginated_tasks(db, user.id, page=page, per_page=per_page, status=status)
+    return paginated_tasks(
+        db,
+        user.id,
+        page=page,
+        per_page=per_page,
+        status=status,
+        completed_from=completed_from,
+        completed_to=completed_to,
+        batch_name=batch_name,
+    )
 
 
 @app.get("/api/ledger")
@@ -229,6 +241,7 @@ def retry_task_single_gpu_endpoint(task_id: str, db: Session = Depends(get_db), 
 @app.get("/api/tasks/{task_id}/preview-result")
 def preview_task_result(task_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     access = get_task_result_access(db, user.id, task_id)
+    db.close()
     if access["mode"] == "redirect":
         return RedirectResponse(str(access["url"]), status_code=302)
     preview_path = access["path"]
@@ -238,6 +251,7 @@ def preview_task_result(task_id: str, db: Session = Depends(get_db), user: User 
 @app.get("/api/tasks/{task_id}/result/{filename}")
 def task_result_file(task_id: str, filename: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     access = get_task_result_access(db, user.id, task_id)
+    db.close()
     if access["mode"] == "redirect":
         return RedirectResponse(str(access["url"]), status_code=302)
     return FileResponse(access["path"], media_type=access.get("mime_type", "video/mp4"), filename=access["filename"], content_disposition_type="inline")
@@ -260,6 +274,7 @@ def internal_batch_download_endpoint(batch_id: str, part: int = Query(1, ge=1), 
     if part > len(parts):
         raise HTTPException(status_code=404, detail="download part not found")
     selected = parts[part - 1]
+    db.close()
     return FileResponse(selected["path"], media_type="application/zip", filename=selected["filename"], content_disposition_type="attachment")
 
 
