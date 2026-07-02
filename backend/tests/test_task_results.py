@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 import app.services as services
 from app.models import Asset, Base, Task, User, Wallet
-from app.services import create_internal_batch_zip, get_task_result_access, get_task_result_url, internal_batch_status, now, plan_internal_batch_zip, retry_failed_task_single_gpu, retry_internal_batch_tasks, task_to_dict
+from app.services import create_internal_batch_zip, get_task_result_access, get_task_result_url, internal_batch_status, now, paginated_tasks, plan_internal_batch_zip, retry_failed_task_single_gpu, retry_internal_batch_tasks, task_to_dict
 
 
 class FakeLocalStorage:
@@ -259,6 +259,53 @@ def test_failed_task_serializes_specific_failure_reason() -> None:
     payload = task_to_dict(task)
 
     assert payload["failureReason"] == "GPU 显存不足导致模型退出。建议点击“单卡重跑”，或降低并发后重试。"
+
+
+def test_paginated_tasks_filters_by_status() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        user = User(id="user-filter", email="filter@example.com", name="Filter User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+
+        for index, status in enumerate(["failed", "succeeded", "failed"], start=1):
+            asset = Asset(
+                id=f"filter-asset-{index}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"filter-{index}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"filter-{index}.mp4",
+                url=f"/uploads/filter-{index}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=f"filter-task-{index}",
+                user_id=user.id,
+                tool_slug="remove-subtitle",
+                input_asset_id=asset.id,
+                status=status,
+                params={},
+                estimated_credits=1,
+                frozen_credits=0,
+                charged_credits=0,
+                provider="mock",
+                provider_job_id=f"filter-provider-{index}",
+                error_code="VIDEO_PROCESSING_FAILED" if status == "failed" else None,
+                progress_stage="CUDA_OUT_OF_MEMORY" if status == "failed" else "处理完成",
+            )
+            db.add_all([asset, task])
+        db.commit()
+
+        page = paginated_tasks(db, user.id, status="failed")
+
+    assert page["page"]["total"] == 2
+    assert {task["id"] for task in page["items"]} == {"filter-task-1", "filter-task-3"}
+    assert {task["status"] for task in page["items"]} == {"failed"}
 
 
 def test_retry_failed_task_single_gpu_marks_exclusive_retry(tmp_path, monkeypatch) -> None:

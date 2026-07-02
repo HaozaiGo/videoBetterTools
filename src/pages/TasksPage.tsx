@@ -12,6 +12,14 @@ const columnHelper = createColumnHelper<Task>();
 const pageSize = 50;
 const taskListRefetchIntervalMs = 10_000;
 const internalBatchRefetchIntervalMs = 5_000;
+const taskStatusFilters = [
+  { value: "", label: "全部状态" },
+  { value: "failed", label: "失败" },
+  { value: "processing", label: "处理中" },
+  { value: "queued", label: "排队中" },
+  { value: "succeeded", label: "已完成" },
+  { value: "cancelled", label: "已取消" },
+];
 
 function failureReason(task: Task) {
   if (task.status !== "failed") return "";
@@ -152,10 +160,11 @@ export function TasksPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [pageInput, setPageInput] = useState("1");
   const [pageMessage, setPageMessage] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
   const tasksQuery = useQuery({
-    queryKey: ["tasks", currentPage],
-    queryFn: () => getTasksPage(currentPage, pageSize),
-    initialData: currentPage === 1 ? { items: data.tasks, page: data.taskPage } : undefined,
+    queryKey: ["tasks", currentPage, statusFilter],
+    queryFn: () => getTasksPage(currentPage, pageSize, statusFilter),
+    initialData: currentPage === 1 && !statusFilter ? { items: data.tasks, page: data.taskPage } : undefined,
     refetchInterval: (query) => {
       const state = query.state.data;
       return state?.items.some((task) => ["queued", "processing"].includes(task.status)) ? taskListRefetchIntervalMs : false;
@@ -178,6 +187,13 @@ export function TasksPage() {
       return;
     }
     goToPage(nextPage);
+  };
+
+  const handleStatusFilterChange = (nextStatus: string) => {
+    setStatusFilter(nextStatus);
+    setCurrentPage(1);
+    setPageInput("1");
+    setExpandedTaskIds(new Set());
   };
 
   const cancelMutation = useMutation({
@@ -309,15 +325,27 @@ export function TasksPage() {
           <h1>任务列表</h1>
           <p>查看任务进度、失败原因和结果下载。</p>
         </div>
-        <button
-          className="ghost compact"
-          onClick={() => {
-            queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
-            queryClient.invalidateQueries({ queryKey: ["tasks"] });
-          }}
-        >
-          刷新
-        </button>
+        <div className="task-toolbar">
+          <label>
+            <span>状态</span>
+            <select value={statusFilter} onChange={(event) => handleStatusFilterChange(event.target.value)} disabled={tasksQuery.isFetching}>
+              {taskStatusFilters.map((item) => (
+                <option key={item.value || "all"} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="ghost compact"
+            onClick={() => {
+              queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+              queryClient.invalidateQueries({ queryKey: ["tasks"] });
+            }}
+          >
+            刷新
+          </button>
+        </div>
       </div>
       {pageMessage ? <p className="page-message">{pageMessage}</p> : null}
       <div className="task-metrics">

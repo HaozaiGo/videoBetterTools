@@ -591,12 +591,20 @@ def page_info(total: int, page: int, per_page: int) -> dict:
     }
 
 
-def paginated_tasks(db: Session, user_id: str, page: int = 1, per_page: int = DEFAULT_PAGE_SIZE) -> dict:
+TASK_STATUS_FILTERS = {"queued", "processing", "succeeded", "failed", "cancelled"}
+
+
+def paginated_tasks(db: Session, user_id: str, page: int = 1, per_page: int = DEFAULT_PAGE_SIZE, status: str | None = None) -> dict:
     page, per_page = normalize_pagination(page, per_page)
-    total = db.execute(select(func.count()).select_from(Task).where(Task.user_id == user_id)).scalar_one()
+    filters = [Task.user_id == user_id]
+    if status:
+        if status not in TASK_STATUS_FILTERS:
+            raise HTTPException(status_code=400, detail="invalid task status filter")
+        filters.append(Task.status == status)
+    total = db.execute(select(func.count()).select_from(Task).where(*filters)).scalar_one()
     tasks = db.execute(
         select(Task)
-        .where(Task.user_id == user_id)
+        .where(*filters)
         .options(selectinload(Task.input_asset))
         .order_by(Task.created_at.desc())
         .offset((page - 1) * per_page)
