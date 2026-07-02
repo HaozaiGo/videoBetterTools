@@ -117,10 +117,11 @@ def bootstrap(db: Session = Depends(get_db), user: User = Depends(current_user))
 def list_tasks(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, alias="perPage", ge=1, le=100),
+    status: str | None = Query(None),
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
 ) -> dict:
-    return paginated_tasks(db, user.id, page=page, per_page=per_page)
+    return paginated_tasks(db, user.id, page=page, per_page=per_page, status=status)
 
 
 @app.get("/api/ledger")

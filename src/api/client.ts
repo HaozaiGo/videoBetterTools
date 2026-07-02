@@ -38,8 +38,11 @@ export function getBootstrap() {
   return request<BootstrapState>("/api/bootstrap");
 }
 
-export function getTasksPage(page = 1, perPage = 50) {
+export function getTasksPage(page = 1, perPage = 50, status = "") {
   const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
+  if (status) {
+    params.set("status", status);
+  }
   return request<PaginatedTasks>(`/api/tasks?${params.toString()}`);
 }
 
