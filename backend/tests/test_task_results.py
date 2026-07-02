@@ -1,5 +1,7 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 import json
+import time
 import zipfile
 
 from sqlalchemy import create_engine
@@ -427,10 +429,86 @@ def test_internal_batch_zip_splits_large_batches_into_parts(tmp_path, monkeypatc
         with zipfile.ZipFile(part["path"]) as zip_file:
             summary = json.loads(zip_file.read("_batch-summary.json"))
             video_names = [name for name in zip_file.namelist() if name.endswith(".mp4")]
+            compression_types = {item.compress_type for item in zip_file.infolist()}
         assert summary["partIndex"] == index
         assert summary["partCount"] == 3
         assert summary["includedTaskIds"] == [f"split-task-{index}"]
         assert len(video_names) == 1
+        assert compression_types == {zipfile.ZIP_STORED}
+
+
+def test_internal_batch_zip_lock_prevents_duplicate_tmp_generation(tmp_path, monkeypatch) -> None:
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'batch-lock.db'}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path))
+
+    batch_id = "batch-lock"
+    batch_name = "lock batch"
+
+    with Session(engine) as db:
+        user = User(id="user-lock", email="lock@example.com", name="Lock User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        asset = Asset(
+            id="lock-asset",
+            user_id=user.id,
+            kind="video",
+            original_name="lock.mp4",
+            mime_type="video/mp4",
+            storage_key="lock-input.mp4",
+            url="/uploads/lock-input.mp4",
+            size_bytes=20,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="lock-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=asset.id,
+            output_asset_id=None,
+            status="succeeded",
+            params={"internalBatchId": batch_id, "internalBatchName": batch_name},
+            estimated_credits=0,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="lock-provider",
+            output_url="",
+            progress_percent=100,
+            progress_stage="处理完成",
+        )
+        db.add_all([user, wallet, asset, task])
+        db.flush()
+        (tmp_path / services.task_result_output_key(task)).write_bytes(b"fake-video")
+        db.commit()
+
+    original_zip_file = zipfile.ZipFile
+    zip_creations = 0
+
+    class SlowZipFile(original_zip_file):
+        def __init__(self, *args, **kwargs):
+            nonlocal zip_creations
+            if len(args) > 1 and args[1] == "w":
+                zip_creations += 1
+                time.sleep(0.2)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(services.zipfile, "ZipFile", SlowZipFile)
+
+    def build_zip() -> dict:
+        with Session(engine) as thread_db:
+            return create_internal_batch_zip(thread_db, "user-lock", batch_id, part=1)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: build_zip(), range(2)))
+
+    zip_paths = sorted((tmp_path / "internal-batch-zips").glob("*.zip"))
+    tmp_paths = sorted((tmp_path / "internal-batch-zips").glob("*.tmp"))
+
+    assert len(zip_paths) == 1
+    assert not tmp_paths
+    assert zip_creations == 1
+    assert {result["path"] for result in results} == {zip_paths[0]}
 
 
 def test_internal_batch_zip_manifest_plans_parts_without_creating_archives(tmp_path, monkeypatch) -> None:

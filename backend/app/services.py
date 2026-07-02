@@ -1,10 +1,17 @@
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import shutil
+import threading
 from urllib.parse import quote
 from uuid import uuid4
 import zipfile
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - production runs on Linux, tests may run elsewhere.
+    fcntl = None
 
 from fastapi import HTTPException, UploadFile
 from sqlalchemy import func, select
@@ -21,6 +28,8 @@ from app.tool_config import CATEGORIES, TOOLS, get_tool
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 100
 INTERNAL_BATCH_ZIP_SUMMARY_NAME = "_batch-summary.json"
+_INTERNAL_BATCH_ZIP_LOCKS: dict[str, threading.Lock] = {}
+_INTERNAL_BATCH_ZIP_LOCKS_GUARD = threading.Lock()
 
 
 def now() -> datetime:
@@ -385,6 +394,36 @@ def _internal_batch_zip_parts(batch: dict, entries: list[dict]) -> list[dict]:
     return parts
 
 
+def _internal_batch_zip_exists(zip_path: Path) -> bool:
+    return zip_path.exists() and zip_path.is_file() and zip_path.stat().st_size > 0
+
+
+def _internal_batch_zip_process_lock(lock_path: Path) -> threading.Lock:
+    lock_key = str(lock_path)
+    with _INTERNAL_BATCH_ZIP_LOCKS_GUARD:
+        lock = _INTERNAL_BATCH_ZIP_LOCKS.get(lock_key)
+        if lock is None:
+            lock = threading.Lock()
+            _INTERNAL_BATCH_ZIP_LOCKS[lock_key] = lock
+        return lock
+
+
+@contextmanager
+def _locked_internal_batch_zip(zip_path: Path):
+    lock_path = zip_path.with_suffix(zip_path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    process_lock = _internal_batch_zip_process_lock(lock_path)
+    with process_lock:
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def plan_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
     batch, _tasks, entries = _internal_batch_zip_entries(db, user_id, batch_id)
     parts = _internal_batch_zip_parts(batch, entries)
@@ -402,48 +441,50 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: in
     selected_parts = parts if part is None else [parts[part - 1]]
     for selected_part in selected_parts:
         zip_path = selected_part["path"]
-        if not (zip_path.exists() and zip_path.is_file() and zip_path.stat().st_size > 0):
-            summary = {
-                "id": batch["id"],
-                "name": batch["name"],
-                "total": batch["total"],
-                "succeeded": batch["succeeded"],
-                "failed": batch["failed"],
-                "cancelled": batch["cancelled"],
-                "processing": batch["processing"],
-                "partIndex": selected_part["index"],
-                "partCount": selected_part["partCount"],
-                "partMaxBytes": max_part_bytes,
-                "partMaxFiles": max_part_files,
-                "includedTaskIds": [entry["task"].id for entry in selected_part["entries"]],
-                "skippedTasks": [
-                    {
-                        "id": task.id,
-                        "status": task.status,
-                        "errorCode": task.error_code,
-                        "progressPercent": task.progress_percent,
-                        "progressStage": task.progress_stage,
+        if not _internal_batch_zip_exists(zip_path):
+            with _locked_internal_batch_zip(zip_path):
+                if not _internal_batch_zip_exists(zip_path):
+                    summary = {
+                        "id": batch["id"],
+                        "name": batch["name"],
+                        "total": batch["total"],
+                        "succeeded": batch["succeeded"],
+                        "failed": batch["failed"],
+                        "cancelled": batch["cancelled"],
+                        "processing": batch["processing"],
+                        "partIndex": selected_part["index"],
+                        "partCount": selected_part["partCount"],
+                        "partMaxBytes": max_part_bytes,
+                        "partMaxFiles": max_part_files,
+                        "includedTaskIds": [entry["task"].id for entry in selected_part["entries"]],
+                        "skippedTasks": [
+                            {
+                                "id": task.id,
+                                "status": task.status,
+                                "errorCode": task.error_code,
+                                "progressPercent": task.progress_percent,
+                                "progressStage": task.progress_stage,
+                            }
+                            for task in tasks
+                            if task.status != "succeeded"
+                        ],
                     }
-                    for task in tasks
-                    if task.status != "succeeded"
-                ],
-            }
-            temp_zip_path = zip_path.with_suffix(f".{uuid4().hex}.tmp")
-            try:
-                with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                    archive.writestr(INTERNAL_BATCH_ZIP_SUMMARY_NAME, json.dumps(summary, ensure_ascii=False, indent=2))
-                    for entry in selected_part["entries"]:
-                        source_path = entry.get("source_path")
-                        if source_path is None:
-                            try:
-                                source_path = storage.ensure_local(entry["storage_key"])
-                            except FileNotFoundError as exc:
-                                raise HTTPException(status_code=404, detail=f"task result not ready: {entry['task'].id}") from exc
-                        archive.write(source_path, entry["zip_name"])
-                temp_zip_path.replace(zip_path)
-            finally:
-                if temp_zip_path.exists():
-                    temp_zip_path.unlink()
+                    temp_zip_path = zip_path.with_suffix(f".{uuid4().hex}.tmp")
+                    try:
+                        with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_STORED) as archive:
+                            archive.writestr(INTERNAL_BATCH_ZIP_SUMMARY_NAME, json.dumps(summary, ensure_ascii=False, indent=2))
+                            for entry in selected_part["entries"]:
+                                source_path = entry.get("source_path")
+                                if source_path is None:
+                                    try:
+                                        source_path = storage.ensure_local(entry["storage_key"])
+                                    except FileNotFoundError as exc:
+                                        raise HTTPException(status_code=404, detail=f"task result not ready: {entry['task'].id}") from exc
+                                archive.write(source_path, entry["zip_name"])
+                        temp_zip_path.replace(zip_path)
+                    finally:
+                        if temp_zip_path.exists():
+                            temp_zip_path.unlink()
         selected_part["sizeBytes"] = zip_path.stat().st_size
 
     first_part = selected_parts[0]

@@ -122,6 +122,12 @@ export type InternalBatchDownloadManifest = {
   parts: InternalBatchDownloadPart[];
 };
 
+export type InternalBatchDownloadPrepareResult = {
+  status: "ready" | "preparing";
+  partCount: number;
+  part: InternalBatchDownloadPart;
+};
+
 function triggerInternalBatchPartDownload(part: InternalBatchDownloadPart, fallbackName: string, token: string | null) {
   const url = new URL(part.url, window.location.origin);
   if (token) {
@@ -137,6 +143,10 @@ function triggerInternalBatchPartDownload(part: InternalBatchDownloadPart, fallb
 
 export function getInternalBatchDownloadManifest(batchId: string) {
   return request<InternalBatchDownloadManifest>(`/api/internal/batches/${encodeURIComponent(batchId)}/download-manifest`, { method: "POST" });
+}
+
+export function prepareInternalBatchZipPart(batchId: string, partIndex: number) {
+  return request<InternalBatchDownloadPrepareResult>(`/api/internal/batches/${encodeURIComponent(batchId)}/download/prepare?part=${partIndex}`, { method: "POST" });
 }
 
 export function downloadInternalBatchZipPart(part: InternalBatchDownloadPart, batchName: string) {

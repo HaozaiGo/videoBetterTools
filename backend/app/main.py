@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.admin import admin_gpu_metrics, admin_ledger, admin_summary, admin_tasks, admin_users
 from app.auth import admin_user, create_token, current_user, find_user_by_email, verify_password
 from app.config import settings
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.models import User
 from app.schemas import AssetComplete, LoginRequest, MultipartUploadInit, ProviderCallback, RechargeCreate, TaskCreate, UserCreate, UserRecharge
 from app.services import (
@@ -261,6 +261,45 @@ def internal_batch_download_endpoint(batch_id: str, part: int = Query(1, ge=1), 
         raise HTTPException(status_code=404, detail="download part not found")
     selected = parts[part - 1]
     return FileResponse(selected["path"], media_type="application/zip", filename=selected["filename"], content_disposition_type="attachment")
+
+
+def _prepare_internal_batch_zip_background(user_id: str, batch_id: str, part: int) -> None:
+    db = SessionLocal()
+    try:
+        create_internal_batch_zip(db, user_id, batch_id, part=part)
+    except Exception:
+        logger.exception("Failed to prepare internal batch zip %s part %s", batch_id, part)
+    finally:
+        db.close()
+
+
+@app.post("/api/internal/batches/{batch_id}/download/prepare")
+def internal_batch_download_prepare_endpoint(
+    batch_id: str,
+    background_tasks: BackgroundTasks,
+    part: int = Query(1, ge=1),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+) -> dict:
+    archive = plan_internal_batch_zip(db, user.id, batch_id)
+    parts = archive.get("parts") or [archive]
+    if part > len(parts):
+        raise HTTPException(status_code=404, detail="download part not found")
+    selected = parts[part - 1]
+    status = "ready" if selected["sizeBytes"] > 0 else "preparing"
+    if status == "preparing":
+        background_tasks.add_task(_prepare_internal_batch_zip_background, user.id, batch_id, part)
+    return {
+        "status": status,
+        "partCount": len(parts),
+        "part": {
+            "index": selected["index"],
+            "filename": selected["filename"],
+            "sizeBytes": selected["sizeBytes"],
+            "estimatedSizeBytes": selected.get("estimatedSizeBytes", 0),
+            "url": f"/api/internal/batches/{batch_id}/download?part={selected['index']}",
+        },
+    }
 
 
 @app.post("/api/internal/batches/{batch_id}/download-manifest")
