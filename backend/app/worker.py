@@ -152,8 +152,9 @@ def run_worker() -> None:
     worker_class = SimpleWorker if os.environ.get("MODEL_PLAZA_WORKER_MODE") == "simple" else Worker
     queue_names = [name.strip() for name in os.environ.get("MODEL_PLAZA_WORKER_QUEUES", "").split(",") if name.strip()]
     queues = [named_queue(name) for name in queue_names] if queue_names else [task_queue()]
+    with_scheduler = os.environ.get("MODEL_PLAZA_WORKER_WITH_SCHEDULER", "0").lower() in {"1", "true", "yes"}
     worker = worker_class(queues, connection=redis_connection())
-    worker.work()
+    worker.work(with_scheduler=with_scheduler)
 
 
 if __name__ == "__main__":

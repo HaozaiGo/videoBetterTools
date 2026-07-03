@@ -519,14 +519,93 @@ def _upload_file_to_tos(object_key: str, local_path: Path) -> dict | None:
     import tos
 
     config = _tos_config()
-    client = tos.TosClientV2(config["ak"], config["sk"], config["endpoint"], config["region"])
-    client.put_object_from_file(config["bucket"], object_key, str(local_path))
+    local_size = local_path.stat().st_size
+    client = tos.TosClientV2(
+        config["ak"],
+        config["sk"],
+        config["endpoint"],
+        config["region"],
+        max_retry_count=max(1, _env_int("MODEL_PLAZA_TOS_SDK_RETRIES", 3)),
+        request_timeout=max(10, _env_int("MODEL_PLAZA_TOS_REQUEST_TIMEOUT", 60)),
+        connection_time=max(3, _env_int("MODEL_PLAZA_TOS_CONNECT_TIMEOUT", 10)),
+        socket_timeout=max(10, _env_int("MODEL_PLAZA_TOS_SOCKET_TIMEOUT", 60)),
+    )
+    threshold = max(1, _env_int("MODEL_PLAZA_TOS_MULTIPART_THRESHOLD_BYTES", 128 * 1024 * 1024))
+    attempts = max(1, _env_int("MODEL_PLAZA_TOS_UPLOAD_ATTEMPTS", 3))
+    part_size = max(5 * 1024 * 1024, _env_int("MODEL_PLAZA_TOS_UPLOAD_PART_SIZE_BYTES", 64 * 1024 * 1024))
+    task_num = max(1, _env_int("MODEL_PLAZA_TOS_UPLOAD_TASK_NUM", 4))
+    checkpoint_root = RESULTS_ROOT / ".tos-upload-checkpoints"
+    checkpoint_root.mkdir(parents=True, exist_ok=True)
+    checkpoint_file = checkpoint_root / f"{_safe_zip_id(object_key)}.checkpoint"
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            try:
+                head = client.head_object(config["bucket"], object_key)
+                remote_size = int(getattr(head, "content_length", 0) or getattr(head, "contentLength", 0) or 0)
+                if remote_size == local_size:
+                    checkpoint_file.unlink(missing_ok=True)
+                    break
+            except Exception:
+                pass
+            if local_size >= threshold:
+                client.upload_file(
+                    config["bucket"],
+                    object_key,
+                    str(local_path),
+                    part_size=part_size,
+                    task_num=task_num,
+                    enable_checkpoint=True,
+                    checkpoint_file=str(checkpoint_file),
+                )
+            else:
+                client.put_object_from_file(config["bucket"], object_key, str(local_path))
+            head = client.head_object(config["bucket"], object_key)
+            remote_size = int(getattr(head, "content_length", 0) or getattr(head, "contentLength", 0) or 0)
+            if remote_size and remote_size != local_size:
+                raise RuntimeError(f"TOS upload size mismatch: local={local_size} remote={remote_size}")
+            checkpoint_file.unlink(missing_ok=True)
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts:
+                raise
+            time.sleep(min(60, max(1, _env_int("MODEL_PLAZA_TOS_UPLOAD_RETRY_BACKOFF_SECONDS", 5)) * attempt))
+    if last_error is not None and attempts <= 0:
+        raise last_error
     encoded_key = quote(object_key, safe="/")
     return {
         "storage_key": object_key,
         "url": f"{config['public_base_url']}/{encoded_key}",
-        "size_bytes": local_path.stat().st_size,
+        "size_bytes": local_size,
     }
+
+
+def _upload_file_to_tos_worker(object_key: str, local_path: str, queue) -> None:
+    try:
+        queue.put({"ok": True, "result": _upload_file_to_tos(object_key, Path(local_path))})
+    except Exception as exc:
+        queue.put({"ok": False, "error": str(exc)})
+
+
+def _upload_file_to_tos_with_deadline(object_key: str, local_path: Path, timeout_env: str, default_timeout: int = 900) -> dict | None:
+    timeout = int(os.environ.get(timeout_env, str(default_timeout)))
+    context = get_context("spawn")
+    queue = context.Queue()
+    process = context.Process(target=_upload_file_to_tos_worker, args=(object_key, str(local_path), queue))
+    process.start()
+    process.join(timeout)
+    if process.is_alive():
+        process.terminate()
+        process.join(10)
+        raise RuntimeError(f"TOS upload exceeded total timeout {timeout}s")
+    if queue.empty():
+        raise RuntimeError("TOS upload worker exited without a result")
+    payload = queue.get()
+    if not payload.get("ok"):
+        raise RuntimeError(str(payload.get("error") or "TOS upload failed"))
+    result = payload.get("result")
+    return dict(result) if result else None
 
 
 def _upload_result_to_tos(job_id: str, output_path: Path) -> dict | None:
@@ -1215,7 +1294,7 @@ def _create_internal_batch_zip_on_gpu(payload: dict) -> dict:
                 temp_zip_path.replace(zip_path)
             finally:
                 temp_zip_path.unlink(missing_ok=True)
-        uploaded = _upload_file_to_tos(zip_storage_key, zip_path)
+        uploaded = _upload_file_to_tos_with_deadline(zip_storage_key, zip_path, "MODEL_PLAZA_GPU_ZIP_UPLOAD_TOTAL_TIMEOUT", 900)
         if not uploaded:
             raise HTTPException(status_code=503, detail="TOS upload is not available")
     _cleanup_result_cache_for_watermark()
