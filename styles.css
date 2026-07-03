@@ -1757,6 +1757,42 @@ th {
   background: var(--panel);
 }
 
+.zip-storage-layout {
+  display: grid;
+  gap: 18px;
+}
+
+.zip-storage-panel {
+  display: grid;
+}
+
+.zip-storage-table {
+  min-width: 980px;
+}
+
+.zip-storage-table td:first-child,
+.zip-storage-table td:nth-child(2) {
+  max-width: 320px;
+}
+
+.zip-storage-table td:first-child strong,
+.zip-storage-table td:nth-child(2) strong,
+.zip-storage-table .subtle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zip-source.local {
+  background: rgba(49, 92, 255, 0.12);
+  color: var(--accent);
+}
+
+.zip-source.tos {
+  background: rgba(21, 183, 158, 0.12);
+  color: var(--good);
+}
+
 .login-page {
   display: grid;
   min-height: 100vh;

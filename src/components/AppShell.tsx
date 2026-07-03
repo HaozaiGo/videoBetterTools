@@ -7,6 +7,8 @@ import type { BootstrapState } from "../types";
 
 function isActive(pathname: string, target: string) {
   if (target === "/tools") return pathname === "/tools" || pathname.startsWith("/tools/");
+  if (target === "/admin") return pathname === "/admin";
+  if (target === "/admin/zips") return pathname === "/admin/zips";
   if (target === "/billing") return pathname === "/billing";
   return pathname === target;
 }
@@ -16,6 +18,7 @@ const navItems = [
   { to: "/tasks", label: "任务列表", icon: "☑" },
   { to: "/billing", label: "充值消耗", icon: "¥" },
   { to: "/admin", label: "后台管理", icon: "⚙", adminOnly: true },
+  { to: "/admin/zips", label: "ZIP储存", icon: "▣", adminOnly: true },
 ] as const;
 
 export function AppShell({ children }: { children: React.ReactNode }) {

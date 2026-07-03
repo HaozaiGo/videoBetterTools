@@ -4,6 +4,7 @@ import { getBootstrap } from "./api/client";
 import { AppShell } from "./components/AppShell";
 import { BillingPage } from "./pages/BillingPage";
 import { AdminPage } from "./pages/AdminPage";
+import { AdminZipStoragePage } from "./pages/AdminZipStoragePage";
 import { TasksPage } from "./pages/TasksPage";
 import { ToolPage } from "./pages/ToolPage";
 import { ToolsPage } from "./pages/ToolsPage";
@@ -78,13 +79,25 @@ const adminRoute = createRoute({
   component: AdminPage,
 });
 
+const adminZipStorageRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/admin/zips",
+  beforeLoad: async ({ context }) => {
+    const state = await context.queryClient.ensureQueryData({ queryKey: ["bootstrap"], queryFn: getBootstrap });
+    if (state.account.role !== "admin") {
+      throw redirect({ to: "/tools" });
+    }
+  },
+  component: AdminZipStoragePage,
+});
+
 const internalBatchWorkflowRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/internal/batch-workflow",
   component: InternalBatchWorkflowPage,
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, loginRoute, toolsRoute, videoToolRoute, imageToolRoute, tasksRoute, billingRoute, adminRoute, internalBatchWorkflowRoute]);
+const routeTree = rootRoute.addChildren([indexRoute, loginRoute, toolsRoute, videoToolRoute, imageToolRoute, tasksRoute, billingRoute, adminRoute, adminZipStorageRoute, internalBatchWorkflowRoute]);
 
 export const router = new Router({
   routeTree,

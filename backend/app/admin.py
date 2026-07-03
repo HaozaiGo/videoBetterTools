@@ -2,6 +2,8 @@ import json
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
+from urllib.parse import quote
 from urllib.parse import urljoin, urlparse
 
 from sqlalchemy import func, select
@@ -9,7 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
 from app.models import Asset, Task, User, Wallet, WalletLedger
-from app.services import normalize_pagination, page_info, ledger_to_dict, task_to_dict
+from app.services import normalize_pagination, page_info, ledger_to_dict, plan_internal_batch_zip, task_to_dict
 
 
 def admin_summary(db: Session) -> dict:
@@ -55,6 +57,96 @@ def admin_tasks(db: Session, page: int = 1, per_page: int = 50) -> dict:
         .limit(per_page)
     ).scalars()
     return {"items": [task_to_dict(task) for task in tasks], "page": page_info(total, page, per_page)}
+
+
+def _batch_id_for_task(task: Task) -> str:
+    params = task.params if isinstance(task.params, dict) else {}
+    return str(params.get("internalBatchId") or "").strip()
+
+
+def _batch_name_for_task(task: Task, batch_id: str) -> str:
+    params = task.params if isinstance(task.params, dict) else {}
+    return str(params.get("internalBatchName") or batch_id or "内部批量任务")
+
+
+def _zip_part_source(part: dict) -> str:
+    path = Path(str(part.get("path") or ""))
+    if path.with_suffix(path.suffix + ".remote.json").exists():
+        return "tos"
+    if path.exists() and path.is_file() and path.stat().st_size > 0:
+        return "local"
+    return ""
+
+
+def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50) -> dict:
+    page, per_page = normalize_pagination(page, per_page)
+    tasks = db.execute(select(Task).order_by(Task.created_at.desc())).scalars().all()
+    batches: dict[tuple[str, str], dict] = {}
+    for task in tasks:
+        batch_id = _batch_id_for_task(task)
+        if not batch_id:
+            continue
+        key = (task.user_id, batch_id)
+        batch = batches.get(key)
+        created_at_ms = int(task.created_at.timestamp() * 1000)
+        completed_at_ms = int(task.completed_at.timestamp() * 1000) if task.completed_at else None
+        if batch is None:
+            batch = {
+                "userId": task.user_id,
+                "batchId": batch_id,
+                "batchName": _batch_name_for_task(task, batch_id),
+                "total": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "cancelled": 0,
+                "processing": 0,
+                "createdAt": created_at_ms,
+                "updatedAt": completed_at_ms or created_at_ms,
+            }
+            batches[key] = batch
+        batch["createdAt"] = min(int(batch["createdAt"]), created_at_ms)
+        batch["updatedAt"] = max(int(batch["updatedAt"]), completed_at_ms or created_at_ms)
+        batch["total"] += 1
+        if task.status == "succeeded":
+            batch["succeeded"] += 1
+        elif task.status == "failed":
+            batch["failed"] += 1
+        elif task.status == "cancelled":
+            batch["cancelled"] += 1
+        elif task.status in {"queued", "processing"}:
+            batch["processing"] += 1
+
+    items: list[dict] = []
+    for batch in batches.values():
+        try:
+            archive = plan_internal_batch_zip(db, str(batch["userId"]), str(batch["batchId"]))
+        except Exception:
+            continue
+        for part in archive["parts"]:
+            source = _zip_part_source(part)
+            size_bytes = int(part.get("sizeBytes") or 0)
+            if not source or size_bytes <= 0:
+                continue
+            part_index = int(part["index"])
+            batch_id = str(batch["batchId"])
+            user_id = str(batch["userId"])
+            items.append(
+                {
+                    **batch,
+                    "partIndex": part_index,
+                    "partCount": int(archive["partCount"]),
+                    "filename": part["filename"],
+                    "sizeBytes": size_bytes,
+                    "source": source,
+                    "storageKey": str(part.get("storageKey") or ""),
+                    "downloadUrl": f"/api/admin/internal-batch-zips/{quote(batch_id, safe='')}/download?userId={quote(user_id, safe='')}&part={part_index}",
+                }
+            )
+
+    items.sort(key=lambda item: (int(item["updatedAt"]), str(item["batchId"]), int(item["partIndex"])), reverse=True)
+    total = len(items)
+    start = (page - 1) * per_page
+    return {"items": items[start : start + per_page], "page": page_info(total, page, per_page)}
 
 
 def admin_ledger(db: Session) -> list[dict]:

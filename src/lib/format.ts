@@ -9,6 +9,18 @@ export function formatDate(value: number | null | undefined) {
   return new Date(value).toLocaleString("zh-CN");
 }
 
+export function formatBytes(bytes: number | null | undefined) {
+  if (!bytes || bytes <= 0) return "0 MB";
+  let value = bytes;
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
 export function statusLabel(status: TaskStatus) {
   return {
     queued: "排队中",

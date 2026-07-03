@@ -1,4 +1,4 @@
-import type { AdminSummary, AdminUser, Asset, AuthUser, BootstrapState, GpuMetrics, InternalBatchStatus, PaginatedLedger, PaginatedTasks, Task, UserCreateInput } from "../types";
+import type { AdminInternalBatchZip, AdminSummary, AdminUser, Asset, AuthUser, BootstrapState, GpuMetrics, InternalBatchStatus, PaginatedAdminInternalBatchZips, PaginatedLedger, PaginatedTasks, Task, UserCreateInput } from "../types";
 
 const tokenKey = "model_plaza_auth_token";
 
@@ -168,6 +168,10 @@ export function prepareInternalBatchZipPart(batchId: string, partIndex: number) 
 export function downloadInternalBatchZipPart(part: InternalBatchDownloadPart, batchName: string) {
   const fallbackName = `${batchName || "内部批量任务"}.zip`;
   triggerInternalBatchPartDownload(part, fallbackName, getAuthToken());
+}
+
+export function downloadAdminInternalBatchZip(zip: AdminInternalBatchZip) {
+  triggerInternalBatchPartDownload({ index: zip.partIndex, filename: zip.filename, sizeBytes: zip.sizeBytes, url: zip.downloadUrl }, zip.filename, getAuthToken());
 }
 
 export function uploadAsset(input: UploadAssetInput) {
@@ -518,6 +522,11 @@ export function getAdminUsers() {
 export function getAdminTasks(page = 1, perPage = 50) {
   const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
   return request<PaginatedTasks>(`/api/admin/tasks?${params.toString()}`);
+}
+
+export function getAdminInternalBatchZips(page = 1, perPage = 50) {
+  const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
+  return request<PaginatedAdminInternalBatchZips>(`/api/admin/internal-batch-zips?${params.toString()}`);
 }
 
 export function getAdminGpuMetrics() {

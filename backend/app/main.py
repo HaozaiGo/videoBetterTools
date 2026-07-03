@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from app.admin import admin_gpu_metrics, admin_ledger, admin_summary, admin_tasks, admin_users
+from app.admin import admin_gpu_metrics, admin_internal_batch_zips, admin_ledger, admin_summary, admin_tasks, admin_users
 from app.auth import admin_user, create_token, current_user, find_user_by_email, verify_password
 from app.config import settings
 from app.database import SessionLocal, get_db
@@ -399,6 +399,34 @@ def admin_tasks_endpoint(
     _admin: User = Depends(admin_user),
 ) -> dict:
     return admin_tasks(db, page=page, per_page=per_page)
+
+
+@app.get("/api/admin/internal-batch-zips")
+def admin_internal_batch_zips_endpoint(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, alias="perPage", ge=1, le=100),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> dict:
+    return admin_internal_batch_zips(db, page=page, per_page=per_page)
+
+
+@app.get("/api/admin/internal-batch-zips/{batch_id}/download")
+def admin_internal_batch_zip_download_endpoint(
+    batch_id: str,
+    user_id: str = Query(..., alias="userId"),
+    part: int = Query(1, ge=1),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+):
+    archive = create_internal_batch_zip(db, user_id, batch_id, part=part)
+    selected = next((item for item in archive["parts"] if item["index"] == part), None)
+    if selected is None:
+        raise HTTPException(status_code=404, detail="download part not found")
+    remote_url = selected.get("remoteUrl")
+    if remote_url:
+        return RedirectResponse(str(remote_url), status_code=302)
+    return FileResponse(selected["path"], media_type="application/zip", filename=selected["filename"], content_disposition_type="attachment")
 
 
 @app.get("/api/admin/gpu")

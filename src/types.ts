@@ -174,6 +174,31 @@ export type PaginatedTasks = {
   page: PageInfo;
 };
 
+export type AdminInternalBatchZip = {
+  userId: string;
+  batchId: string;
+  batchName: string;
+  total: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  processing: number;
+  createdAt: number;
+  updatedAt: number;
+  partIndex: number;
+  partCount: number;
+  filename: string;
+  sizeBytes: number;
+  source: "local" | "tos";
+  storageKey: string;
+  downloadUrl: string;
+};
+
+export type PaginatedAdminInternalBatchZips = {
+  items: AdminInternalBatchZip[];
+  page: PageInfo;
+};
+
 export type PaginatedLedger = {
   items: LedgerEntry[];
   page: PageInfo;
