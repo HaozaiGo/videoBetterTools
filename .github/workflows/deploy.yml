@@ -333,7 +333,9 @@ jobs:
 
           worker_replicas="$(grep -E '^WORKER_REPLICAS=' .env | tail -n 1 | cut -d= -f2- || true)"
           worker_replicas="${worker_replicas:-3}"
-          APP_VERSION="$GITHUB_SHA" docker compose -f docker-compose.prod.yml up -d --build --remove-orphans --scale "worker=$worker_replicas"
+          zip_worker_replicas="$(grep -E '^ZIP_WORKER_REPLICAS=' .env | tail -n 1 | cut -d= -f2- || true)"
+          zip_worker_replicas="${zip_worker_replicas:-8}"
+          APP_VERSION="$GITHUB_SHA" docker compose -f docker-compose.prod.yml up -d --build --remove-orphans --scale "worker=$worker_replicas" --scale "zip-worker=$zip_worker_replicas"
           docker compose -f docker-compose.prod.yml ps
 
           ln -sfn "$release_dir" "$DEPLOY_DIR/current"
