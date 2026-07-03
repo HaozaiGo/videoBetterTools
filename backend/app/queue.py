@@ -1,5 +1,5 @@
 from redis import Redis
-from rq import Queue
+from rq import Queue, Retry
 
 from app.config import settings
 
@@ -8,19 +8,37 @@ def redis_connection() -> Redis:
     return Redis.from_url(settings.redis_url)
 
 
+def named_queue(name: str) -> Queue:
+    return Queue(name, connection=redis_connection())
+
+
 def task_queue() -> Queue:
-    return Queue("model-plaza-tasks", connection=redis_connection())
+    return named_queue("model-plaza-tasks")
+
+
+def internal_batch_zip_queue() -> Queue:
+    return named_queue("model-plaza-zips")
 
 
 def enqueue_provider_job(task_id: str) -> None:
     task_queue().enqueue("app.worker.process_provider_job", task_id, job_timeout=settings.task_job_timeout_seconds, result_ttl=3600)
 
 
+def _internal_batch_zip_retry() -> Retry | None:
+    max_retries = max(0, int(settings.internal_batch_zip_retry_max))
+    if max_retries <= 0:
+        return None
+    interval = max(1, int(settings.internal_batch_zip_retry_interval_seconds))
+    return Retry(max=max_retries, interval=[interval * (2**attempt) for attempt in range(max_retries)])
+
+
 def enqueue_internal_batch_zip(user_id: str, batch_id: str) -> None:
-    task_queue().enqueue(
+    internal_batch_zip_queue().enqueue(
         "app.worker.prepare_internal_batch_zip",
         user_id,
         batch_id,
         job_timeout=settings.internal_batch_zip_gpu_timeout_seconds,
         result_ttl=3600,
+        failure_ttl=86400,
+        retry=_internal_batch_zip_retry(),
     )

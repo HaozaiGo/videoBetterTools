@@ -7,7 +7,7 @@ from rq import SimpleWorker, Worker
 from app.config import settings
 from app.database import SessionLocal
 from app.models import Asset, Task
-from app.queue import enqueue_provider_job, redis_connection, task_queue
+from app.queue import enqueue_provider_job, named_queue, redis_connection, task_queue
 from app.services import create_internal_batch_zip, provider_callback
 from app.video.enhance import process_video_enhance
 from app.video.translate import process_video_translate
@@ -23,6 +23,7 @@ def prepare_internal_batch_zip(user_id: str, batch_id: str) -> None:
             create_internal_batch_zip(db, user_id, batch_id)
         except Exception:
             logger.exception("Failed to auto-prepare internal batch zip %s for user %s", batch_id, user_id)
+            raise
 
 
 def process_provider_job(task_id: str) -> None:
@@ -149,7 +150,9 @@ def _fail_provider_job(provider_job_id: str, error_code: str, progress_stage: st
 
 def run_worker() -> None:
     worker_class = SimpleWorker if os.environ.get("MODEL_PLAZA_WORKER_MODE") == "simple" else Worker
-    worker = worker_class([task_queue()], connection=redis_connection())
+    queue_names = [name.strip() for name in os.environ.get("MODEL_PLAZA_WORKER_QUEUES", "").split(",") if name.strip()]
+    queues = [named_queue(name) for name in queue_names] if queue_names else [task_queue()]
+    worker = worker_class(queues, connection=redis_connection())
     worker.work()
 
 

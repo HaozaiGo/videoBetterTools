@@ -78,9 +78,32 @@ services:
       PUBLIC_UPLOAD_PREFIX: /uploads
       AUTH_SECRET: ${AUTH_SECRET}
       ALLOW_DEMO_WITHOUT_AUTH: ${ALLOW_DEMO_WITHOUT_AUTH:-false}
+      MODEL_PLAZA_WORKER_QUEUES: model-plaza-tasks
       PROPAINTER_COMMAND: ${PROPAINTER_COMMAND:-python /app/scripts/gpu/propainter_api_adapter.py}
       ENHANCE_COMMAND: ${ENHANCE_COMMAND:-python /app/scripts/gpu/video_enhance_api_adapter.py}
       TRANSLATE_COMMAND: ${TRANSLATE_COMMAND:-python /app/scripts/gpu/video_translate_api_adapter.py}
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      api:
+        condition: service_started
+      redis:
+        condition: service_started
+
+  zip-worker:
+    image: model-plaza-api:${APP_VERSION:-latest}
+    restart: unless-stopped
+    command: python -m app.worker
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-model_plaza}:${POSTGRES_PASSWORD:-model_plaza}@postgres:5432/${POSTGRES_DB:-model_plaza}
+      REDIS_URL: redis://redis:6379/0
+      UPLOAD_DIR: /data/uploads
+      PUBLIC_UPLOAD_PREFIX: /uploads
+      AUTH_SECRET: ${AUTH_SECRET}
+      ALLOW_DEMO_WITHOUT_AUTH: ${ALLOW_DEMO_WITHOUT_AUTH:-false}
+      MODEL_PLAZA_WORKER_QUEUES: model-plaza-zips
     volumes:
       - uploads:/data/uploads
     depends_on:

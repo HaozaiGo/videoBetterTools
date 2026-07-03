@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     internal_batch_zip_gpu_enabled: bool = False
     internal_batch_zip_gpu_timeout_seconds: int = 7200
     internal_batch_zip_auto_prepare_enabled: bool = False
+    internal_batch_zip_retry_max: int = 5
+    internal_batch_zip_retry_interval_seconds: int = 60
     cleanup_disk_high_watermark_percent: int = 80
     cleanup_disk_low_watermark_percent: int = 75
     cleanup_disk_min_age_hours: int = 6
