@@ -405,10 +405,11 @@ def admin_tasks_endpoint(
 def admin_internal_batch_zips_endpoint(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, alias="perPage", ge=1, le=100),
+    status: str = Query("ready"),
     db: Session = Depends(get_db),
     _admin: User = Depends(admin_user),
 ) -> dict:
-    return admin_internal_batch_zips(db, page=page, per_page=per_page)
+    return admin_internal_batch_zips(db, page=page, per_page=per_page, status=status)
 
 
 @app.get("/api/admin/internal-batch-zips/{batch_id}/download")

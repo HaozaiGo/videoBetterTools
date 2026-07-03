@@ -1,4 +1,4 @@
-import type { AdminInternalBatchZip, AdminSummary, AdminUser, Asset, AuthUser, BootstrapState, GpuMetrics, InternalBatchStatus, PaginatedAdminInternalBatchZips, PaginatedLedger, PaginatedTasks, Task, UserCreateInput } from "../types";
+import type { AdminInternalBatchZip, AdminInternalBatchZipStatus, AdminSummary, AdminUser, Asset, AuthUser, BootstrapState, GpuMetrics, InternalBatchStatus, PaginatedAdminInternalBatchZips, PaginatedLedger, PaginatedTasks, Task, UserCreateInput } from "../types";
 
 const tokenKey = "model_plaza_auth_token";
 
@@ -524,8 +524,9 @@ export function getAdminTasks(page = 1, perPage = 50) {
   return request<PaginatedTasks>(`/api/admin/tasks?${params.toString()}`);
 }
 
-export function getAdminInternalBatchZips(page = 1, perPage = 50) {
+export function getAdminInternalBatchZips(page = 1, perPage = 50, status: AdminInternalBatchZipStatus = "ready") {
   const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
+  params.set("status", status);
   return request<PaginatedAdminInternalBatchZips>(`/api/admin/internal-batch-zips?${params.toString()}`);
 }
 

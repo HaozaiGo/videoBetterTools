@@ -169,6 +169,8 @@ export type PageInfo = {
   hasPrevious: boolean;
 };
 
+export type AdminInternalBatchZipStatus = "ready" | "processing" | "failed";
+
 export type PaginatedTasks = {
   items: Task[];
   page: PageInfo;
@@ -185,18 +187,32 @@ export type AdminInternalBatchZip = {
   processing: number;
   createdAt: number;
   updatedAt: number;
+  zipStatus: AdminInternalBatchZipStatus;
+  zipStage: "tasks" | "waiting" | "queued" | "gpu" | "retry" | "failed";
+  zipJob: {
+    state: "queued" | "started" | "scheduled" | "failed";
+    position: number | null;
+    jobId: string;
+    retriesLeft: number | null;
+    createdAt: number | null;
+    startedAt: number | null;
+    endedAt: number | null;
+  } | null;
   partIndex: number;
   partCount: number;
   filename: string;
   sizeBytes: number;
-  source: "local" | "tos";
+  estimatedSizeBytes: number;
+  source: "local" | "tos" | "";
   storageKey: string;
   downloadUrl: string;
+  message: string;
 };
 
 export type PaginatedAdminInternalBatchZips = {
   items: AdminInternalBatchZip[];
   page: PageInfo;
+  tabs: Record<AdminInternalBatchZipStatus, number>;
 };
 
 export type PaginatedLedger = {

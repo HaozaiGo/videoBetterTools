@@ -283,13 +283,17 @@ def get_task_result_url(db: Session, user_id: str, task_id: str) -> str:
 
 
 def _internal_batch_tasks(db: Session, user_id: str, batch_id: str) -> list[Task]:
-    tasks = db.execute(
+    batch_id_expr = Task.params["internalBatchId"].as_string()
+    return list(db.execute(
         select(Task)
-        .where(Task.user_id == user_id, Task.tool_slug == "subtitle-translate-workflow")
+        .where(
+            Task.user_id == user_id,
+            Task.tool_slug == "subtitle-translate-workflow",
+            batch_id_expr == batch_id,
+        )
         .options(selectinload(Task.input_asset))
         .order_by(Task.created_at.asc())
-    ).scalars()
-    return [task for task in tasks if isinstance(task.params, dict) and task.params.get("internalBatchId") == batch_id]
+    ).scalars())
 
 
 def internal_batch_status(db: Session, user_id: str, batch_id: str) -> dict:
