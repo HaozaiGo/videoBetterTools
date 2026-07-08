@@ -103,7 +103,7 @@ export function AdminPage() {
   const freeGpuCount = gpus.filter((gpu) => gpu.utilizationGpuPercent <= 5 && gpu.memoryUsedMiB < 1024 && gpu.workerSlotsUsed === 0).length;
 
   return (
-    <section className="admin-layout">
+    <section className="admin-layout admin-dashboard-layout">
       <div className="page-head">
         <div>
           <h1>后台管理</h1>
@@ -117,6 +117,7 @@ export function AdminPage() {
         <div><span>资产</span><strong>{summary.assets}</strong></div>
         <div><span>已扣积分</span><strong>{formatCredits(summary.creditsCharged)}</strong></div>
         <div><span>队列中</span><strong>{summary.queuedTasks}</strong></div>
+        <div><span>处理中</span><strong>{summary.processingTasks}</strong></div>
         <div><span>失败</span><strong>{summary.failedTasks}</strong></div>
       </div>
       <div className="panel gpu-monitor">

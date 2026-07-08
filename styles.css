@@ -1732,6 +1732,21 @@ th {
   padding-top: 28px;
 }
 
+.admin-dashboard-layout {
+  width: 100%;
+  max-width: none;
+}
+
+.admin-dashboard-layout .admin-stats {
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+}
+
+.admin-dashboard-layout .admin-stats strong {
+  display: block;
+  white-space: nowrap;
+  line-height: 1.15;
+}
+
 .admin-columns {
   display: grid;
   grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
