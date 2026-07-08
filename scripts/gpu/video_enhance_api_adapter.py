@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import http.client
 import os
 import time
 import urllib.error
@@ -12,8 +13,8 @@ import uuid
 from pathlib import Path
 
 
-DEFAULT_API_URL = "http://32.196.46.122:18081"
-DEFAULT_API_KEY = "model-plaza-dev-gpu-key"
+DEFAULT_API_URL = "https://piankexiu.uniphore-ai.com"
+DEFAULT_API_KEY = ""
 
 
 class GpuApiError(RuntimeError):
@@ -239,7 +240,7 @@ def _download_result(job_id: str, output_path: Path) -> None:
             last_error = GpuApiError(f"GPU API result HTTP {exc.code} for job {job_id}: {body}")
             if exc.code < 500 or attempt >= retries:
                 raise last_error from exc
-        except (TimeoutError, urllib.error.URLError, OSError) as exc:
+        except (TimeoutError, urllib.error.URLError, OSError, http.client.IncompleteRead) as exc:
             last_error = GpuApiRequestError(f"GPU API result download failed for job {job_id} on attempt {attempt}/{retries} after {timeout}s: {exc}")
             if attempt >= retries:
                 raise last_error from exc

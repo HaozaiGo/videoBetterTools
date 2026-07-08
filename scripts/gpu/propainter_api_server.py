@@ -38,7 +38,7 @@ PROPAINTER_RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_PROPAINTER_RUNNER", st
 ENHANCE_RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_ENHANCE_RUNNER", str(ROOT / "scripts" / "video_enhance_runner.py"))).resolve()
 TRANSLATE_RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_TRANSLATE_RUNNER", str(ROOT / "scripts" / "video_translate_runner.py"))).resolve()
 PYTHON_PATH = os.environ.get("PROPAINTER_PYTHON", "/data1/conda/miniconda3/envs/video-inpaint/bin/python")
-API_KEY = os.environ.get("MODEL_PLAZA_GPU_API_KEY", "model-plaza-dev-gpu-key")
+API_KEY = os.environ.get("MODEL_PLAZA_GPU_API_KEY", "")
 UPLOAD_RESULTS = os.environ.get("MODEL_PLAZA_GPU_UPLOAD_RESULTS", "0").lower() not in {"0", "false", "no"}
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 

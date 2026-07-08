@@ -121,7 +121,7 @@ The compose service mounts the host \`video-inpaint\` conda environment and shar
 \`\`\`bash
 cd $DOCKER_DIR
 docker compose up -d
-curl -H "X-API-Key: model-plaza-dev-gpu-key" http://127.0.0.1:$HOST_PORT/health
+curl -H "X-API-Key: " http://127.0.0.1:$HOST_PORT/health
 \`\`\`
 
 ## Sync code and weights from legacy service

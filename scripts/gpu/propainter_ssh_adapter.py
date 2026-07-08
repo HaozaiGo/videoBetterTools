@@ -55,8 +55,8 @@ def _remote_quote(value: str | Path) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default=os.environ.get("MODEL_PLAZA_GPU_HOST", "ubuntu@32.196.46.122"))
-    parser.add_argument("--identity", default=os.environ.get("MODEL_PLAZA_GPU_IDENTITY", "~/.ssh/moda-gpu-new-prod01.pem"))
+    parser.add_argument("--host", default=os.environ.get("MODEL_PLAZA_GPU_HOST", "ubuntu@3.91.196.255"))
+    parser.add_argument("--identity", default=os.environ.get("MODEL_PLAZA_GPU_IDENTITY", "~/.ssh/moda-gpu-new-prod.pem"))
     parser.add_argument("--remote-root", default=os.environ.get("MODEL_PLAZA_GPU_ROOT", DEFAULT_REMOTE_ROOT))
     args = parser.parse_args()
 
