@@ -1,17 +1,39 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 
 const frontendPort = process.env.FRONTEND_PORT ?? "5175";
-const workerReplicas = Math.max(1, Number.parseInt(process.env.WORKER_REPLICAS ?? "8", 10) || 8);
+const workerReplicas = Math.max(1, Number.parseInt(process.env.WORKER_REPLICAS ?? "6", 10) || 6);
+
+function readBackendDotEnv() {
+  try {
+    return Object.fromEntries(
+      readFileSync(new URL("../backend/.env", import.meta.url), "utf8")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("#") && line.includes("="))
+        .map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    );
+  } catch {
+    return {};
+  }
+}
+
+const backendDotEnv = readBackendDotEnv();
+const envValue = (name) => process.env[name] ?? backendDotEnv[name];
 
 const backendEnv = {
   ...process.env,
   PROPAINTER_COMMAND: process.env.PROPAINTER_COMMAND ?? "python ../scripts/gpu/propainter_api_adapter.py",
   ENHANCE_COMMAND: process.env.ENHANCE_COMMAND ?? "python ../scripts/gpu/video_enhance_api_adapter.py",
   TRANSLATE_COMMAND: process.env.TRANSLATE_COMMAND ?? "python ../scripts/gpu/video_translate_api_adapter.py",
-  MODEL_PLAZA_GPU_API_URL: process.env.MODEL_PLAZA_GPU_API_URL ?? "http://32.196.46.122:18081",
-  MODEL_PLAZA_GPU_API_KEY: process.env.MODEL_PLAZA_GPU_API_KEY ?? "model-plaza-dev-gpu-key",
-  MODEL_PLAZA_GPU_API_TUNNEL: process.env.MODEL_PLAZA_GPU_API_TUNNEL ?? "0",
+  MODEL_PLAZA_GPU_API_URL: envValue("MODEL_PLAZA_GPU_API_URL") ?? "https://piankexiu.uniphore-ai.com",
+  MODEL_PLAZA_GPU_API_KEY: envValue("MODEL_PLAZA_GPU_API_KEY") ?? "",
+  MODEL_PLAZA_GPU_API_TUNNEL: envValue("MODEL_PLAZA_GPU_API_TUNNEL") ?? "0",
   MODEL_PLAZA_WORKER_MODE: process.env.MODEL_PLAZA_WORKER_MODE ?? "simple",
+  OBJC_DISABLE_INITIALIZE_FORK_SAFETY: process.env.OBJC_DISABLE_INITIALIZE_FORK_SAFETY ?? "YES",
 };
 
 const processes = [

@@ -209,7 +209,18 @@ def _frame_mask(frame, regions: list[dict], padding: int, params: dict[str, Any]
     return _rect_mask(regions, width, height, padding)
 
 
-def _output_key(task_id: str, suffix: str = "watermark-removed") -> str:
+def output_run_suffix(params: dict[str, Any]) -> str:
+    run_id = str(params.get("providerJobId") or params.get("singleGpuRetryAt") or "").strip()
+    if not run_id:
+        return ""
+    safe_run_id = "".join(char if char.isalnum() or char in "-_" else "-" for char in run_id)
+    return safe_run_id[-64:]
+
+
+def _output_key(task_id: str, suffix: str = "watermark-removed", params: dict[str, Any] | None = None) -> str:
+    run_suffix = output_run_suffix(params or {})
+    if run_suffix:
+        return f"{task_id}-{run_suffix}-{suffix}.mp4"
     return f"{task_id}-{suffix}.mp4"
 
 
@@ -463,7 +474,7 @@ def process_masked_video_removal(input_storage_key: str, task_id: str, params: d
         raise VideoProcessingError("Please select at least one removal region.")
 
     # 去水印/去字幕共用同一条 mask 修复管线，由业务工具决定输出命名和前端文案。
-    output_key = _output_key(task_id, suffix)
+    output_key = _output_key(task_id, suffix, params)
     output_path = settings.upload_path / output_key
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _, remote_result = process_with_model_adapter(

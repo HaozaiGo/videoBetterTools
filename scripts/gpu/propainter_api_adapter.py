@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import http.client
 import os
 import subprocess
 import time
@@ -14,7 +15,7 @@ from pathlib import Path
 
 
 DEFAULT_API_URL = "http://127.0.0.1:18080"
-DEFAULT_API_KEY = "model-plaza-dev-gpu-key"
+DEFAULT_API_KEY = ""
 
 
 class GpuApiError(RuntimeError):
@@ -53,8 +54,8 @@ def _start_tunnel_if_needed() -> subprocess.Popen | None:
     if not tunnel_enabled or _health_ok():
         return None
 
-    host = os.environ.get("MODEL_PLAZA_GPU_SSH_HOST", "ubuntu@32.196.46.122")
-    identity = str(Path(os.environ.get("MODEL_PLAZA_GPU_IDENTITY", "~/.ssh/moda-gpu-new-prod01.pem")).expanduser())
+    host = os.environ.get("MODEL_PLAZA_GPU_SSH_HOST", "ubuntu@3.91.196.255")
+    identity = str(Path(os.environ.get("MODEL_PLAZA_GPU_IDENTITY", "~/.ssh/moda-gpu-new-prod.pem")).expanduser())
     local_port = os.environ.get("MODEL_PLAZA_GPU_TUNNEL_LOCAL_PORT", "18080")
     remote_port = os.environ.get("MODEL_PLAZA_GPU_TUNNEL_REMOTE_PORT", "18080")
     process = subprocess.Popen(
@@ -288,7 +289,7 @@ def _download_result(job_id: str, output_path: Path) -> None:
             last_error = GpuApiError(f"GPU API result HTTP {exc.code} for job {job_id}: {body}")
             if exc.code < 500 or attempt >= retries:
                 raise last_error from exc
-        except (TimeoutError, urllib.error.URLError, OSError) as exc:
+        except (TimeoutError, urllib.error.URLError, OSError, http.client.IncompleteRead) as exc:
             last_error = GpuApiRequestError(f"GPU API result download failed for job {job_id} on attempt {attempt}/{retries} after {timeout}s: {exc}")
             if attempt >= retries:
                 raise last_error from exc

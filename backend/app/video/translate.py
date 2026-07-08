@@ -7,10 +7,13 @@ from typing import Any
 
 from app.config import settings
 from app.storage import storage
-from app.video.watermark import GpuUnavailableError, VideoProcessingError, is_gpu_unavailable_error
+from app.video.watermark import GpuUnavailableError, VideoProcessingError, is_gpu_unavailable_error, output_run_suffix
 
 
-def _output_key(task_id: str) -> str:
+def _output_key(task_id: str, params: dict[str, Any] | None = None) -> str:
+    run_suffix = output_run_suffix(params or {})
+    if run_suffix:
+        return f"{task_id}-{run_suffix}-translated.mp4"
     return f"{task_id}-translated.mp4"
 
 
@@ -101,7 +104,7 @@ def process_video_translate(input_storage_key: str, task_id: str, params: dict) 
     elif not storage.is_remote:
         input_url_for_adapter = None
 
-    output_key = _output_key(task_id)
+    output_key = _output_key(task_id, params)
     output_path = settings.upload_path / output_key
     output_path.parent.mkdir(parents=True, exist_ok=True)
     remote_result = _run_translate_command(
