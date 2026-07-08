@@ -234,7 +234,7 @@ jobs:
           AUTH_SECRET=$auth_secret
           ALLOW_DEMO_WITHOUT_AUTH=false
           WEB_PORT=$DEPLOY_WEB_PORT
-          WORKER_REPLICAS=8
+          WORKER_REPLICAS=6
           TASK_JOB_TIMEOUT_SECONDS=7200
           ASSET_RETENTION_HOURS=48
           CLEANUP_RETENTION_HOURS=48
@@ -246,7 +246,7 @@ jobs:
           CLEANUP_DISK_LOW_WATERMARK_PERCENT=75
           CLEANUP_DISK_MIN_AGE_HOURS=6
           VOLCENGINE_TOS_PRESIGN_EXPIRES_SECONDS=21600
-          MODEL_PLAZA_GPU_API_URL=http://32.196.46.122:18081
+          MODEL_PLAZA_GPU_API_URL=https://piankexiu.uniphore-ai.com
           MODEL_PLAZA_GPU_API_KEY=model-plaza-dev-gpu-key
           MODEL_PLAZA_CALLBACK_URL=http://api:8010/api/provider/callback
           MODEL_PLAZA_GPU_STALL_TIMEOUT_SECONDS=1800
@@ -289,7 +289,8 @@ jobs:
           fi
 
           set_env_value STORAGE_BACKEND tos
-          set_env_value MODEL_PLAZA_GPU_API_URL http://32.196.46.122:18081
+          set_env_value MODEL_PLAZA_GPU_API_URL https://piankexiu.uniphore-ai.com
+          set_env_value WORKER_REPLICAS 6
           set_env_value ASSET_RETENTION_HOURS 48
           set_env_value CLEANUP_RETENTION_HOURS 48
           set_env_value CLEANUP_INTERVAL_SECONDS 3600
