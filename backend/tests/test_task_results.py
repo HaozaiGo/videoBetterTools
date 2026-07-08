@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 import app.services as services
 from app.models import Asset, Base, Task, User, Wallet
-from app.services import create_internal_batch_zip, get_task_result_access, get_task_result_url, internal_batch_status, now, paginated_tasks, plan_internal_batch_zip, retry_failed_task_single_gpu, retry_internal_batch_tasks, task_to_dict
+from app.services import create_internal_batch_zip, delete_tasks_from_list, get_task_result_access, get_task_result_url, internal_batch_status, now, paginated_tasks, plan_internal_batch_zip, retry_failed_task_single_gpu, retry_internal_batch_tasks, task_to_dict
 
 
 class FakeLocalStorage:
@@ -586,6 +586,59 @@ def test_paginated_tasks_filters_by_status() -> None:
     assert {task["status"] for task in page["items"]} == {"failed"}
     assert completed_page["page"]["total"] == 1
     assert [task["id"] for task in completed_page["items"]] == ["filter-task-2"]
+
+
+def test_delete_tasks_from_list_hides_selected_tasks() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        user = User(id="user-delete", email="delete@example.com", name="Delete User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+
+        for index in range(1, 4):
+            asset = Asset(
+                id=f"delete-asset-{index}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"delete-{index}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"delete-{index}.mp4",
+                url=f"/uploads/delete-{index}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=f"delete-task-{index}",
+                user_id=user.id,
+                tool_slug="remove-subtitle",
+                input_asset_id=asset.id,
+                status="succeeded",
+                params={},
+                estimated_credits=1,
+                frozen_credits=0,
+                charged_credits=0,
+                provider="mock",
+                provider_job_id=f"delete-provider-{index}",
+                progress_stage="处理完成",
+                completed_at=now(),
+            )
+            db.add_all([asset, task])
+        db.commit()
+
+        delete_payload = delete_tasks_from_list(db, user.id, ["delete-task-1", "delete-task-2", "missing-task"])
+        page = paginated_tasks(db, user.id)
+        second_delete_payload = delete_tasks_from_list(db, user.id, ["delete-task-1"])
+
+    assert delete_payload["deleted"] == 2
+    assert delete_payload["missing"] == 1
+    assert set(delete_payload["taskIds"]) == {"delete-task-1", "delete-task-2"}
+    assert page["page"]["total"] == 1
+    assert [task["id"] for task in page["items"]] == ["delete-task-3"]
+    assert second_delete_payload["deleted"] == 0
+    assert second_delete_payload["missing"] == 0
 
 
 def test_retry_failed_task_single_gpu_marks_exclusive_retry(tmp_path, monkeypatch) -> None:

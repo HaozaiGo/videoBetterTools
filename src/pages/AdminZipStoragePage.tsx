@@ -1,8 +1,8 @@
-import { useState } from "react";
-import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
-import { downloadAdminInternalBatchZip, getAdminInternalBatchZips } from "../api/client";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { useMutation, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
+import { deleteAdminInternalBatchZips, downloadAdminInternalBatchZip, getAdminInternalBatchZips } from "../api/client";
 import { formatBytes, formatDate } from "../lib/format";
-import type { AdminInternalBatchZip, AdminInternalBatchZipStatus } from "../types";
+import type { AdminInternalBatchZip, AdminInternalBatchZipSkippedTask, AdminInternalBatchZipStatus, TaskStatus } from "../types";
 
 const zipTabs: { status: AdminInternalBatchZipStatus; label: string; empty: string }[] = [
   { status: "ready", label: "可下载", empty: "暂无可直接下载的 ZIP。" },
@@ -20,13 +20,38 @@ function completionText(zip: AdminInternalBatchZip) {
   return skipped ? `${zip.succeeded}/${zip.total}，跳过 ${skipped}` : `${zip.succeeded}/${zip.total}`;
 }
 
+function zipKey(zip: Pick<AdminInternalBatchZip, "userId" | "batchId" | "partIndex">) {
+  return `${zip.userId}::${zip.batchId}::${zip.partIndex}`;
+}
+
+function statusLabel(status: TaskStatus) {
+  if (status === "failed") return "失败";
+  if (status === "cancelled") return "取消";
+  if (status === "queued") return "排队中";
+  if (status === "processing") return "处理中";
+  if (status === "succeeded") return "成功";
+  return status;
+}
+
+function skippedReason(task: AdminInternalBatchZipSkippedTask) {
+  if (task.failureReason) return task.failureReason;
+  if (task.progressStage) return task.progressStage;
+  if (task.errorCode) return task.errorCode;
+  return task.status === "cancelled" ? "任务已取消" : "仍未生成可打包结果";
+}
+
 export function AdminZipStoragePage() {
   const queryClient = useQueryClient();
   const [activeStatus, setActiveStatus] = useState<AdminInternalBatchZipStatus>("ready");
   const [pageNumber, setPageNumber] = useState(1);
+  const [searchInput, setSearchInput] = useState("");
+  const [nameQuery, setNameQuery] = useState("");
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set());
+  const [detailZip, setDetailZip] = useState<AdminInternalBatchZip | null>(null);
+  const [notice, setNotice] = useState("");
   const { data: zipPage, isFetching } = useSuspenseQuery({
-    queryKey: ["admin-internal-batch-zips", activeStatus, pageNumber],
-    queryFn: () => getAdminInternalBatchZips(pageNumber, 50, activeStatus),
+    queryKey: ["admin-internal-batch-zips", activeStatus, pageNumber, nameQuery],
+    queryFn: () => getAdminInternalBatchZips(pageNumber, 50, activeStatus, nameQuery),
     refetchInterval: 15_000,
   });
 
@@ -36,10 +61,78 @@ export function AdminZipStoragePage() {
   const tosCount = zips.filter((zip) => zip.source === "tos").length;
   const localCount = zips.length - tosCount;
   const activeTab = zipTabs.find((tab) => tab.status === activeStatus) ?? zipTabs[0];
+  const pageKeys = useMemo(() => zips.map(zipKey), [zips]);
+  const selectedZips = zips.filter((zip) => selectedKeys.has(zipKey(zip)));
+  const allPageSelected = pageKeys.length > 0 && pageKeys.every((key) => selectedKeys.has(key));
+  const somePageSelected = pageKeys.some((key) => selectedKeys.has(key));
+  const deleteMutation = useMutation({
+    mutationFn: () => deleteAdminInternalBatchZips(selectedZips.map((zip) => ({ userId: zip.userId, batchId: zip.batchId, partIndex: zip.partIndex }))),
+    onSuccess: (payload) => {
+      setSelectedKeys(new Set());
+      setNotice(payload.failed.length ? `已删除 ${payload.deleted} 行，${payload.failed.length} 行删除失败。` : `已删除 ${payload.deleted} 行。`);
+      refresh();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "删除失败"),
+  });
+
+  useEffect(() => {
+    setSelectedKeys((current) => new Set([...current].filter((key) => pageKeys.includes(key))));
+  }, [pageKeys]);
 
   function selectTab(status: AdminInternalBatchZipStatus) {
     setActiveStatus(status);
     setPageNumber(1);
+    setSelectedKeys(new Set());
+    setDetailZip(null);
+    setNotice("");
+  }
+
+  function submitSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setNameQuery(searchInput.trim());
+    setPageNumber(1);
+    setSelectedKeys(new Set());
+    setDetailZip(null);
+  }
+
+  function clearSearch() {
+    setSearchInput("");
+    setNameQuery("");
+    setPageNumber(1);
+    setSelectedKeys(new Set());
+    setDetailZip(null);
+  }
+
+  function toggleZip(zip: AdminInternalBatchZip) {
+    const key = zipKey(zip);
+    setSelectedKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }
+
+  function togglePage() {
+    setSelectedKeys((current) => {
+      const next = new Set(current);
+      if (allPageSelected) {
+        pageKeys.forEach((key) => next.delete(key));
+      } else {
+        pageKeys.forEach((key) => next.add(key));
+      }
+      return next;
+    });
+  }
+
+  function deleteSelected() {
+    if (!selectedZips.length || deleteMutation.isPending) return;
+    const confirmed = window.confirm(`确认删除选中的 ${selectedZips.length} 行？原任务和结果不会删除。`);
+    if (!confirmed) return;
+    deleteMutation.mutate();
   }
 
   return (
@@ -49,10 +142,29 @@ export function AdminZipStoragePage() {
           <h1>ZIP储存</h1>
           <p>查看已生成、可直接下载的批次 ZIP。</p>
         </div>
-        <button className="ghost compact" type="button" onClick={refresh} disabled={isFetching}>
-          {isFetching ? "刷新中" : "刷新"}
-        </button>
+        <div className="zip-storage-head-actions">
+          <button className="remove-file-button" type="button" onClick={deleteSelected} disabled={!selectedZips.length || deleteMutation.isPending}>
+            {deleteMutation.isPending ? "删除中" : `删除所选${selectedZips.length ? ` ${selectedZips.length}` : ""}`}
+          </button>
+          <button className="ghost compact" type="button" onClick={refresh} disabled={isFetching}>
+            {isFetching ? "刷新中" : "刷新"}
+          </button>
+        </div>
       </div>
+      {notice ? <p className="page-message">{notice}</p> : null}
+
+      <form className="zip-storage-filter" onSubmit={submitSearch}>
+        <label>
+          <span>名称搜索</span>
+          <input value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="输入批次名称" />
+        </label>
+        <button className="primary compact" type="submit" disabled={isFetching}>
+          查询
+        </button>
+        <button className="ghost compact" type="button" onClick={clearSearch} disabled={!searchInput && !nameQuery}>
+          清空
+        </button>
+      </form>
 
       <div className="zip-storage-tabs" role="tablist" aria-label="ZIP 储存状态">
         {zipTabs.map((tab) => (
@@ -81,6 +193,17 @@ export function AdminZipStoragePage() {
         <table className="zip-storage-table">
           <thead>
             <tr>
+              <th className="zip-select-cell">
+                <input
+                  type="checkbox"
+                  aria-label="选择当前页 ZIP"
+                  checked={allPageSelected}
+                  ref={(node) => {
+                    if (node) node.indeterminate = somePageSelected && !allPageSelected;
+                  }}
+                  onChange={togglePage}
+                />
+              </th>
               <th>批次</th>
               <th>分包</th>
               <th>来源</th>
@@ -94,6 +217,14 @@ export function AdminZipStoragePage() {
             {zips.length ? (
               zips.map((zip) => (
                 <tr key={`${zip.batchId}-${zip.partIndex}`}>
+                  <td className="zip-select-cell">
+                    <input
+                      type="checkbox"
+                      aria-label={`选择 ${zip.filename || zip.batchName}`}
+                      checked={selectedKeys.has(zipKey(zip))}
+                      onChange={() => toggleZip(zip)}
+                    />
+                  </td>
                   <td>
                     <strong>{zip.batchName}</strong>
                     <em className="subtle">{zip.batchId}</em>
@@ -106,7 +237,16 @@ export function AdminZipStoragePage() {
                     <span className={`status zip-source ${zip.source}`}>{sourceLabel(zip.source)}</span>
                   </td>
                   <td>{formatBytes(zip.sizeBytes || zip.estimatedSizeBytes || 0)}</td>
-                  <td>{completionText(zip)}</td>
+                  <td>
+                    <div className="zip-completion">
+                      <span>{completionText(zip)}</span>
+                      {zip.skippedTasks?.length ? (
+                        <button className="detail-toggle" type="button" onClick={() => setDetailZip(zip)}>
+                          查看
+                        </button>
+                      ) : null}
+                    </div>
+                  </td>
                   <td>{formatDate(zip.updatedAt)}</td>
                   <td>
                     {zip.zipStatus === "ready" && zip.downloadUrl ? (
@@ -120,7 +260,7 @@ export function AdminZipStoragePage() {
                 </tr>
               ))
             ) : (
-              <tr><td className="empty" colSpan={7}>{activeTab.empty}</td></tr>
+              <tr><td className="empty" colSpan={8}>{activeTab.empty}</td></tr>
             )}
           </tbody>
         </table>
@@ -138,6 +278,33 @@ export function AdminZipStoragePage() {
           </div>
         </div>
       </div>
+      {detailZip ? (
+        <div className="zip-detail-backdrop" role="presentation" onMouseDown={() => setDetailZip(null)}>
+          <section className="zip-detail-dialog" role="dialog" aria-modal="true" aria-label="跳过明细" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="zip-detail-head">
+              <div>
+                <strong>{detailZip.batchName}</strong>
+                <span>{completionText(detailZip)}</span>
+              </div>
+              <button className="ghost compact" type="button" onClick={() => setDetailZip(null)}>
+                关闭
+              </button>
+            </div>
+            <div className="zip-detail-list">
+              {detailZip.skippedTasks.map((task) => (
+                <article key={task.taskId} className="zip-detail-item">
+                  <div>
+                    <strong>第 {task.episode} 集</strong>
+                    <span>{task.inputAssetName || task.taskId}</span>
+                  </div>
+                  <span className={`status ${task.status}`}>{statusLabel(task.status)}</span>
+                  <p>{skippedReason(task)}</p>
+                </article>
+              ))}
+            </div>
+          </section>
+        </div>
+      ) : null}
     </section>
   );
 }

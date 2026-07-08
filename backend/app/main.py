@@ -6,12 +6,12 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from app.admin import admin_gpu_metrics, admin_internal_batch_zips, admin_ledger, admin_summary, admin_tasks, admin_users
+from app.admin import admin_delete_internal_batch_zips, admin_gpu_metrics, admin_internal_batch_zips, admin_ledger, admin_summary, admin_tasks, admin_users
 from app.auth import admin_user, create_token, current_user, find_user_by_email, verify_password
 from app.config import settings
 from app.database import SessionLocal, get_db
 from app.models import User
-from app.schemas import AssetComplete, LoginRequest, MultipartUploadInit, ProviderCallback, RechargeCreate, TaskCreate, UserCreate, UserRecharge
+from app.schemas import AdminInternalBatchZipDeleteRequest, AssetComplete, LoginRequest, MultipartUploadInit, ProviderCallback, RechargeCreate, TaskBulkDeleteRequest, TaskCreate, UserCreate, UserRecharge
 from app.services import (
     asset_to_dict,
     cancel_task,
@@ -22,6 +22,7 @@ from app.services import (
     create_presigned_asset_upload,
     create_user,
     create_task,
+    delete_tasks_from_list,
     get_task_result_access,
     get_task_result_url,
     internal_batch_status,
@@ -232,6 +233,12 @@ def cancel_task_endpoint(task_id: str, db: Session = Depends(get_db), user: User
     return {"task": task_to_dict(task), "state": serialize_bootstrap(db, user.id)}
 
 
+@app.delete("/api/tasks")
+def delete_tasks_endpoint(payload: TaskBulkDeleteRequest, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    result = delete_tasks_from_list(db, user.id, payload.taskIds)
+    return {**result, "state": serialize_bootstrap(db, user.id)}
+
+
 @app.post("/api/tasks/{task_id}/retry-single-gpu")
 def retry_task_single_gpu_endpoint(task_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
     task = retry_failed_task_single_gpu(db, user.id, task_id)
@@ -406,10 +413,20 @@ def admin_internal_batch_zips_endpoint(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, alias="perPage", ge=1, le=100),
     status: str = Query("ready"),
+    name: str = Query(""),
     db: Session = Depends(get_db),
     _admin: User = Depends(admin_user),
 ) -> dict:
-    return admin_internal_batch_zips(db, page=page, per_page=per_page, status=status)
+    return admin_internal_batch_zips(db, page=page, per_page=per_page, status=status, name=name)
+
+
+@app.delete("/api/admin/internal-batch-zips")
+def admin_delete_internal_batch_zips_endpoint(
+    payload: AdminInternalBatchZipDeleteRequest,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> dict:
+    return admin_delete_internal_batch_zips(db, [item.model_dump() for item in payload.items])
 
 
 @app.get("/api/admin/internal-batch-zips/{batch_id}/download")

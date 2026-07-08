@@ -810,7 +810,8 @@ def paginated_tasks(
     batch_name: str | None = None,
 ) -> dict:
     page, per_page = normalize_pagination(page, per_page)
-    filters = [Task.user_id == user_id]
+    deleted_expr = Task.params["taskListDeletedAt"].as_string()
+    filters = [Task.user_id == user_id, deleted_expr.is_(None)]
     if status:
         if status not in TASK_STATUS_FILTERS:
             raise HTTPException(status_code=400, detail="invalid task status filter")
@@ -834,6 +835,25 @@ def paginated_tasks(
         .limit(per_page)
     ).scalars()
     return {"items": [task_to_dict(task) for task in tasks], "page": page_info(total, page, per_page)}
+
+
+def delete_tasks_from_list(db: Session, user_id: str, task_ids: list[str]) -> dict:
+    unique_task_ids = [task_id for task_id in dict.fromkeys(task_ids) if task_id]
+    if not unique_task_ids:
+        return {"deleted": 0, "missing": 0, "taskIds": []}
+    tasks = list(db.execute(select(Task).where(Task.user_id == user_id, Task.id.in_(unique_task_ids))).scalars())
+    found_ids = {task.id for task in tasks}
+    deleted_at = serialize_datetime(now())
+    deleted_ids: list[str] = []
+    for task in tasks:
+        params = dict(task.params or {})
+        if params.get("taskListDeletedAt"):
+            continue
+        params["taskListDeletedAt"] = deleted_at
+        task.params = params
+        deleted_ids.append(task.id)
+    db.commit()
+    return {"deleted": len(deleted_ids), "missing": len(unique_task_ids) - len(found_ids), "taskIds": deleted_ids}
 
 
 def paginated_ledger(db: Session, user_id: str, page: int = 1, per_page: int = DEFAULT_PAGE_SIZE) -> dict:

@@ -1,8 +1,8 @@
 import { useMutation, useQueryClient, useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
-import { cancelTask, getAuthToken, getBootstrap, getInternalBatchDownloadManifest, getInternalBatchStatus, getTasksPage, retryInternalBatchTasks, retryTaskSingleGpu, type InternalBatchDownloadManifest } from "../api/client";
+import { cancelTask, deleteTasks, getAuthToken, getBootstrap, getInternalBatchDownloadManifest, getInternalBatchStatus, getTasksPage, retryInternalBatchTasks, retryTaskSingleGpu, type InternalBatchDownloadManifest } from "../api/client";
 import { InternalBatchDownloadParts } from "../components/InternalBatchDownloadParts";
 import { formatCredits, formatDate, statusLabel, taskProgressDisplay } from "../lib/format";
 import { translateLanguageLabel } from "../lib/translate-languages";
@@ -166,6 +166,7 @@ export function TasksPage() {
   const queryClient = useQueryClient();
   const { data } = useSuspenseQuery({ queryKey: ["bootstrap"], queryFn: getBootstrap });
   const [expandedTaskIds, setExpandedTaskIds] = useState<Set<string>>(() => new Set());
+  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(() => new Set());
   const [currentPage, setCurrentPage] = useState(1);
   const [pageInput, setPageInput] = useState("1");
   const [pageMessage, setPageMessage] = useState("");
@@ -191,6 +192,14 @@ export function TasksPage() {
   });
   const taskPage = tasksQuery.data || { items: data.tasks, page: data.taskPage };
   const totalPages = Math.max(1, taskPage.page.totalPages);
+  const pageTaskIds = useMemo(() => taskPage.items.map((task) => task.id), [taskPage.items]);
+  const selectedTasks = useMemo(() => taskPage.items.filter((task) => selectedTaskIds.has(task.id)), [selectedTaskIds, taskPage.items]);
+  const allPageSelected = pageTaskIds.length > 0 && pageTaskIds.every((taskId) => selectedTaskIds.has(taskId));
+  const somePageSelected = pageTaskIds.some((taskId) => selectedTaskIds.has(taskId));
+
+  useEffect(() => {
+    setSelectedTaskIds((current) => new Set([...current].filter((taskId) => pageTaskIds.includes(taskId))));
+  }, [pageTaskIds]);
 
   const goToPage = (page: number) => {
     const nextPage = Math.max(1, Math.min(totalPages, page));
@@ -219,6 +228,7 @@ export function TasksPage() {
     setCurrentPage(1);
     setPageInput("1");
     setExpandedTaskIds(new Set());
+    setSelectedTaskIds(new Set());
   };
 
   const resetTaskFilters = () => {
@@ -235,6 +245,18 @@ export function TasksPage() {
       queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state);
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
     },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: () => deleteTasks(selectedTasks.map((task) => task.id)),
+    onSuccess: (payload) => {
+      setSelectedTaskIds(new Set());
+      setExpandedTaskIds(new Set());
+      setPageMessage(`已删除 ${payload.deleted} 条任务${payload.missing ? `，${payload.missing} 条未找到` : ""}`);
+      queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state);
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+    onError: (error) => setPageMessage(error instanceof Error ? error.message : "删除失败"),
   });
 
   const retrySingleGpuMutation = useMutation({
@@ -261,7 +283,60 @@ export function TasksPage() {
     });
   };
 
+  const toggleTaskSelection = (taskId: string) => {
+    setSelectedTaskIds((current) => {
+      const next = new Set(current);
+      if (next.has(taskId)) {
+        next.delete(taskId);
+      } else {
+        next.add(taskId);
+      }
+      return next;
+    });
+  };
+
+  const togglePageSelection = () => {
+    setSelectedTaskIds((current) => {
+      const next = new Set(current);
+      if (allPageSelected) {
+        pageTaskIds.forEach((taskId) => next.delete(taskId));
+      } else {
+        pageTaskIds.forEach((taskId) => next.add(taskId));
+      }
+      return next;
+    });
+  };
+
+  const deleteSelectedTasks = () => {
+    if (!selectedTasks.length || deleteMutation.isPending) return;
+    const confirmed = window.confirm(`确认删除选中的 ${selectedTasks.length} 条任务？原始素材和结果文件不会删除。`);
+    if (!confirmed) return;
+    deleteMutation.mutate();
+  };
+
   const columns = [
+    columnHelper.display({
+      id: "select",
+      header: () => (
+        <input
+          type="checkbox"
+          aria-label="选择当前页任务"
+          checked={allPageSelected}
+          ref={(node) => {
+            if (node) node.indeterminate = somePageSelected && !allPageSelected;
+          }}
+          onChange={togglePageSelection}
+        />
+      ),
+      cell: ({ row }) => (
+        <input
+          type="checkbox"
+          aria-label={`选择任务 ${row.original.providerJobId}`}
+          checked={selectedTaskIds.has(row.original.id)}
+          onChange={() => toggleTaskSelection(row.original.id)}
+        />
+      ),
+    }),
     columnHelper.accessor("toolSlug", {
       header: "工具 / 供应商任务",
       cell: ({ row }) => {
@@ -411,6 +486,9 @@ export function TasksPage() {
               清空
             </button>
           ) : null}
+          <button className="remove-file-button" type="button" onClick={deleteSelectedTasks} disabled={!selectedTasks.length || deleteMutation.isPending}>
+            {deleteMutation.isPending ? "删除中" : `删除所选${selectedTasks.length ? ` ${selectedTasks.length}` : ""}`}
+          </button>
           <button
             className="ghost compact"
             onClick={() => {

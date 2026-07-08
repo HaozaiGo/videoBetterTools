@@ -20,10 +20,24 @@ class UserRecharge(BaseModel):
     credits: int
 
 
+class AdminInternalBatchZipDeleteItem(BaseModel):
+    userId: str
+    batchId: str
+    partIndex: int = 1
+
+
+class AdminInternalBatchZipDeleteRequest(BaseModel):
+    items: list[AdminInternalBatchZipDeleteItem]
+
+
 class TaskCreate(BaseModel):
     toolSlug: str
     inputAssetId: str
     params: dict[str, Any] = {}
+
+
+class TaskBulkDeleteRequest(BaseModel):
+    taskIds: list[str]
 
 
 class MultipartUploadInit(BaseModel):

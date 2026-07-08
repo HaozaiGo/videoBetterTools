@@ -125,6 +125,14 @@ export function retryTaskSingleGpu(taskId: string) {
   });
 }
 
+export function deleteTasks(taskIds: string[]) {
+  return request<{ deleted: number; missing: number; taskIds: string[]; state: BootstrapState }>("/api/tasks", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ taskIds }),
+  });
+}
+
 export type InternalBatchDownloadPart = {
   index: number;
   filename: string;
@@ -524,10 +532,21 @@ export function getAdminTasks(page = 1, perPage = 50) {
   return request<PaginatedTasks>(`/api/admin/tasks?${params.toString()}`);
 }
 
-export function getAdminInternalBatchZips(page = 1, perPage = 50, status: AdminInternalBatchZipStatus = "ready") {
+export function getAdminInternalBatchZips(page = 1, perPage = 50, status: AdminInternalBatchZipStatus = "ready", name = "") {
   const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
   params.set("status", status);
+  if (name.trim()) {
+    params.set("name", name.trim());
+  }
   return request<PaginatedAdminInternalBatchZips>(`/api/admin/internal-batch-zips?${params.toString()}`);
+}
+
+export function deleteAdminInternalBatchZips(items: Pick<AdminInternalBatchZip, "userId" | "batchId" | "partIndex">[]) {
+  return request<{ deleted: number; missing: number; failed: { userId: string; batchId: string; partIndex: number; message: string }[] }>("/api/admin/internal-batch-zips", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items }),
+  });
 }
 
 export function getAdminGpuMetrics() {

@@ -2,6 +2,7 @@ import json
 import time
 import urllib.error
 import urllib.request
+from hashlib import sha256
 from pathlib import Path
 from urllib.parse import quote
 from urllib.parse import urljoin, urlparse
@@ -12,7 +13,8 @@ from sqlalchemy.orm import Session, selectinload
 from app.config import settings
 from app.models import Asset, Task, User, Wallet, WalletLedger
 from app.queue import internal_batch_zip_queue
-from app.services import normalize_pagination, page_info, ledger_to_dict, plan_internal_batch_zip, task_to_dict
+from app.services import failure_reason_for_task, normalize_pagination, page_info, ledger_to_dict, plan_internal_batch_zip, task_to_dict
+from app.storage import storage
 
 
 def admin_summary(db: Session) -> dict:
@@ -80,6 +82,7 @@ def _zip_part_source(part: dict) -> str:
 
 
 ADMIN_ZIP_STATUS_FILTERS = {"ready", "processing", "failed"}
+SKIPPED_TASK_STATUSES = {"failed", "cancelled", "queued", "processing"}
 
 
 def _serialize_job_time(value) -> int | None:
@@ -152,7 +155,68 @@ def _zip_process_message(batch: dict, zip_status: str, zip_job: dict | None) -> 
     return "waiting", "批次已有成功结果，等待自动入 ZIP 队列"
 
 
-def _empty_zip_batch_item(batch: dict, zip_status: str, archive: dict | None = None, zip_job: dict | None = None) -> dict:
+def _zip_row_delete_marker_path(user_id: str, batch_id: str, part_index: int) -> Path:
+    fingerprint = sha256(f"{user_id}\0{batch_id}\0{part_index}".encode("utf-8")).hexdigest()
+    return settings.upload_path / "internal-batch-zips" / ".deleted" / f"{fingerprint}.json"
+
+
+def _is_zip_row_deleted(user_id: str, batch_id: str, part_index: int) -> bool:
+    return _zip_row_delete_marker_path(user_id, batch_id, part_index).exists()
+
+
+def _mark_zip_row_deleted(user_id: str, batch_id: str, part_index: int) -> None:
+    marker_path = _zip_row_delete_marker_path(user_id, batch_id, part_index)
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text(
+        json.dumps({"userId": user_id, "batchId": batch_id, "partIndex": part_index, "deletedAt": int(time.time() * 1000)}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _task_episode_hint(task: Task, index: int) -> str:
+    params = task.params if isinstance(task.params, dict) else {}
+    for key in ("episode", "episodeNumber", "episodeIndex", "fileIndex", "index"):
+        value = params.get(key)
+        if value is None or value == "":
+            continue
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return str(value)
+        return str(number + 1 if key in {"episodeIndex", "fileIndex", "index"} and number <= index else number)
+    return str(index)
+
+
+def _skipped_tasks_for_batch(db: Session, user_id: str, batch_id: str) -> list[dict]:
+    batch_id_expr = Task.params["internalBatchId"].as_string()
+    tasks = list(db.execute(
+        select(Task)
+        .where(
+            Task.user_id == user_id,
+            Task.tool_slug == "subtitle-translate-workflow",
+            batch_id_expr == batch_id,
+        )
+        .options(selectinload(Task.input_asset))
+        .order_by(Task.created_at.asc())
+    ).scalars())
+    return [
+        {
+            "taskId": task.id,
+            "episode": _task_episode_hint(task, index),
+            "inputAssetName": task.input_asset.original_name if task.input_asset else "",
+            "status": task.status,
+            "errorCode": task.error_code or "",
+            "failureReason": failure_reason_for_task(task),
+            "progressStage": task.progress_stage or "",
+            "createdAt": int(task.created_at.timestamp() * 1000),
+            "completedAt": int(task.completed_at.timestamp() * 1000) if task.completed_at else None,
+        }
+        for index, task in enumerate(tasks, start=1)
+        if task.status in SKIPPED_TASK_STATUSES
+    ]
+
+
+def _empty_zip_batch_item(batch: dict, zip_status: str, archive: dict | None = None, zip_job: dict | None = None, skipped_tasks: list[dict] | None = None) -> dict:
     part = archive["parts"][0] if archive and archive.get("parts") else {}
     batch_id = str(batch["batchId"])
     user_id = str(batch["userId"])
@@ -173,15 +237,24 @@ def _empty_zip_batch_item(batch: dict, zip_status: str, archive: dict | None = N
         "message": message,
         "batchId": batch_id,
         "userId": user_id,
+        "skippedTasks": skipped_tasks or [],
     }
 
 
-def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, status: str = "ready") -> dict:
+def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, status: str = "ready", name: str = "") -> dict:
     page, per_page = normalize_pagination(page, per_page)
     status = status if status in ADMIN_ZIP_STATUS_FILTERS else "ready"
+    normalized_name = name.strip()
     batch_id_expr = Task.params["internalBatchId"].as_string()
     batch_name_expr = Task.params["internalBatchName"].as_string()
     updated_expr = func.coalesce(Task.completed_at, Task.created_at)
+    filters = [
+        Task.tool_slug == "subtitle-translate-workflow",
+        batch_id_expr.is_not(None),
+        batch_id_expr != "",
+    ]
+    if normalized_name:
+        filters.append(batch_name_expr.ilike(f"%{normalized_name}%"))
     rows = db.execute(
         select(
             Task.user_id.label("user_id"),
@@ -195,11 +268,7 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
             func.min(Task.created_at).label("created_at"),
             func.max(updated_expr).label("updated_at"),
         )
-        .where(
-            Task.tool_slug == "subtitle-translate-workflow",
-            batch_id_expr.is_not(None),
-            batch_id_expr != "",
-        )
+        .where(*filters)
         .group_by(Task.user_id, batch_id_expr)
         .order_by(func.max(updated_expr).desc())
     ).all()
@@ -224,6 +293,8 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
     for batch in batches:
         archive = None
         ready_items: list[dict] = []
+        ready_part_count = 0
+        skipped_tasks = _skipped_tasks_for_batch(db, str(batch["userId"]), str(batch["batchId"]))
         try:
             archive = plan_internal_batch_zip(db, str(batch["userId"]), str(batch["batchId"]))
         except Exception:
@@ -237,6 +308,9 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
                 part_index = int(part["index"])
                 batch_id = str(batch["batchId"])
                 user_id = str(batch["userId"])
+                ready_part_count += 1
+                if _is_zip_row_deleted(user_id, batch_id, part_index):
+                    continue
                 ready_items.append(
                     {
                         **batch,
@@ -252,6 +326,7 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
                         "storageKey": str(part.get("storageKey") or ""),
                         "downloadUrl": f"/api/admin/internal-batch-zips/{quote(batch_id, safe='')}/download?userId={quote(user_id, safe='')}&part={part_index}",
                         "message": "",
+                        "skippedTasks": skipped_tasks,
                     }
                 )
         if ready_items:
@@ -259,20 +334,82 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
             if status == "ready":
                 items.extend(ready_items)
             continue
+        if ready_part_count > 0:
+            continue
         zip_job = zip_jobs.get((str(batch["userId"]), str(batch["batchId"])))
         pending_status = "processing"
         if zip_job and zip_job.get("state") == "failed":
             pending_status = "failed"
         elif int(batch["failed"]) + int(batch["cancelled"]) > 0 and int(batch["processing"]) <= 0:
             pending_status = "failed"
+        pending_part_index = int(archive["parts"][0].get("index") or 0) if archive and archive.get("parts") else 0
+        if _is_zip_row_deleted(str(batch["userId"]), str(batch["batchId"]), pending_part_index):
+            continue
         tab_counts[pending_status] += 1
         if status == pending_status:
-            items.append(_empty_zip_batch_item(batch, pending_status, archive, zip_job))
+            items.append(_empty_zip_batch_item(batch, pending_status, archive, zip_job, skipped_tasks))
 
     items.sort(key=lambda item: (int(item["updatedAt"]), str(item["batchId"]), int(item["partIndex"])), reverse=True)
     total = len(items)
     start = (page - 1) * per_page
     return {"items": items[start : start + per_page], "page": page_info(total, page, per_page), "tabs": tab_counts}
+
+
+def _delete_zip_part_file(part: dict) -> tuple[bool, str]:
+    zip_path = Path(str(part.get("path") or ""))
+    marker_path = zip_path.with_suffix(zip_path.suffix + ".remote.json")
+    deleted = False
+    if marker_path.exists():
+        marker_storage_key = ""
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker_storage_key = str(marker.get("storageKey") or "").strip()
+        except (OSError, json.JSONDecodeError):
+            marker_storage_key = ""
+        if marker_storage_key and storage.is_remote and not storage.delete_remote(marker_storage_key):
+            return False, "远端 ZIP 删除失败"
+        marker_path.unlink(missing_ok=True)
+        deleted = True
+    if zip_path.exists() and zip_path.is_file():
+        zip_path.unlink(missing_ok=True)
+        deleted = True
+    return deleted, "" if deleted else "ZIP 文件不存在或已删除"
+
+
+def admin_delete_internal_batch_zips(db: Session, items: list[dict]) -> dict:
+    deleted = 0
+    missing = 0
+    failed: list[dict] = []
+    seen: set[tuple[str, str, int]] = set()
+    for item in items:
+        user_id = str(item.get("userId") or "").strip()
+        batch_id = str(item.get("batchId") or "").strip()
+        part_index = int(item.get("partIndex") or 0)
+        key = (user_id, batch_id, part_index)
+        if not user_id or not batch_id or part_index < 0 or key in seen:
+            continue
+        seen.add(key)
+        try:
+            try:
+                archive = plan_internal_batch_zip(db, user_id, batch_id)
+            except Exception:
+                archive = None
+            if archive and archive.get("parts"):
+                if part_index == 0:
+                    part_index = int(archive["parts"][0].get("index") or 0)
+                    key = (user_id, batch_id, part_index)
+                part = next((candidate for candidate in archive["parts"] if int(candidate.get("index") or 0) == part_index), None)
+                if part is not None:
+                    did_delete, message = _delete_zip_part_file(part)
+                    if not did_delete:
+                        missing += 1
+                        if message and message != "ZIP 文件不存在或已删除":
+                            failed.append({"userId": user_id, "batchId": batch_id, "partIndex": part_index, "message": message})
+            _mark_zip_row_deleted(user_id, batch_id, part_index)
+            deleted += 1
+        except Exception as exc:
+            failed.append({"userId": user_id, "batchId": batch_id, "partIndex": part_index, "message": str(exc)})
+    return {"deleted": deleted, "missing": missing, "failed": failed}
 
 
 def admin_ledger(db: Session) -> list[dict]:

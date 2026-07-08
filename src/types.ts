@@ -171,6 +171,18 @@ export type PageInfo = {
 
 export type AdminInternalBatchZipStatus = "ready" | "processing" | "failed";
 
+export type AdminInternalBatchZipSkippedTask = {
+  taskId: string;
+  episode: string;
+  inputAssetName: string;
+  status: TaskStatus;
+  errorCode: string;
+  failureReason: string;
+  progressStage: string;
+  createdAt: number;
+  completedAt: number | null;
+};
+
 export type PaginatedTasks = {
   items: Task[];
   page: PageInfo;
@@ -207,6 +219,7 @@ export type AdminInternalBatchZip = {
   storageKey: string;
   downloadUrl: string;
   message: string;
+  skippedTasks: AdminInternalBatchZipSkippedTask[];
 };
 
 export type PaginatedAdminInternalBatchZips = {
