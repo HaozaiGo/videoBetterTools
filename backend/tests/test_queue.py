@@ -33,3 +33,15 @@ def test_internal_batch_zip_enqueue_can_disable_retries(monkeypatch) -> None:
     queue.enqueue_internal_batch_zip("user-1", "batch-1")
 
     assert fake_queue.calls[0]["kwargs"]["retry"] is None
+
+
+def test_result_finalize_enqueue_targets_result_queue(monkeypatch) -> None:
+    fake_queue = FakeQueue()
+    monkeypatch.setattr(queue, "result_queue", lambda: fake_queue)
+
+    result = {"storage_key": "task-result.mp4", "local_path": "/tmp/task-result.mp4", "mime_type": "video/mp4"}
+    queue.enqueue_result_finalize_job("task-1", "provider-1", result)
+
+    call = fake_queue.calls[0]
+    assert call["args"] == ("app.worker.finalize_provider_job_result", "task-1", "provider-1", result)
+    assert call["kwargs"]["failure_ttl"] == 86400

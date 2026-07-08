@@ -5,6 +5,7 @@ from app.video.watermark import process_subtitle_removal
 def process_subtitle_translate_workflow(input_storage_key: str, task_id: str, params: dict) -> dict:
     subtitle_params = {
         **params,
+        "_defer_result_upload": False,
         "mode": "manual",
         "removalTarget": "subtitle",
         "modelAdapter": params.get("modelAdapter") or "propainter",

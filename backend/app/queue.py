@@ -20,6 +20,10 @@ def internal_batch_zip_queue() -> Queue:
     return named_queue("model-plaza-zips")
 
 
+def result_queue() -> Queue:
+    return named_queue("model-plaza-results")
+
+
 def enqueue_provider_job(task_id: str) -> None:
     task_queue().enqueue("app.worker.process_provider_job", task_id, job_timeout=settings.task_job_timeout_seconds, result_ttl=3600)
 
@@ -41,4 +45,16 @@ def enqueue_internal_batch_zip(user_id: str, batch_id: str) -> None:
         result_ttl=3600,
         failure_ttl=86400,
         retry=_internal_batch_zip_retry(),
+    )
+
+
+def enqueue_result_finalize_job(task_id: str, provider_job_id: str, result: dict) -> None:
+    result_queue().enqueue(
+        "app.worker.finalize_provider_job_result",
+        task_id,
+        provider_job_id,
+        result,
+        job_timeout=settings.task_job_timeout_seconds,
+        result_ttl=3600,
+        failure_ttl=86400,
     )

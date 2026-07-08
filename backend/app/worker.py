@@ -1,14 +1,16 @@
 import logging
 import os
 import time
+from pathlib import Path
 
 from rq import SimpleWorker, Worker
 
 from app.config import settings
 from app.database import SessionLocal
 from app.models import Asset, Task
-from app.queue import enqueue_provider_job, named_queue, redis_connection, task_queue
+from app.queue import enqueue_provider_job, enqueue_result_finalize_job, named_queue, redis_connection, task_queue
 from app.services import create_internal_batch_zip, provider_callback
+from app.storage import storage
 from app.video.enhance import process_video_enhance
 from app.video.translate import process_video_translate
 from app.video.watermark import GpuUnavailableError, VideoProcessingError, process_subtitle_removal, process_watermark_removal
@@ -24,6 +26,51 @@ def prepare_internal_batch_zip(user_id: str, batch_id: str) -> None:
         except Exception:
             logger.exception("Failed to auto-prepare internal batch zip %s for user %s", batch_id, user_id)
             raise
+
+
+def _finalize_result_payload(result: dict) -> dict:
+    if result.get("local_path"):
+        local_path = Path(str(result["local_path"]))
+        storage_key = str(result["storage_key"])
+        stored = storage.save_file(storage_key, local_path)
+        if storage.is_remote:
+            storage.delete_local_copy(stored.storage_key)
+        return {
+            "storage_key": stored.storage_key,
+            "url": stored.public_url,
+            "mime_type": str(result.get("mime_type") or "video/mp4"),
+            "size_bytes": stored.size,
+        }
+    return {
+        "storage_key": str(result["storage_key"]),
+        "url": str(result["url"]),
+        "mime_type": str(result.get("mime_type") or "video/mp4"),
+        "size_bytes": int(result.get("size_bytes") or 0),
+    }
+
+
+def finalize_provider_job_result(task_id: str, provider_job_id: str, result: dict) -> None:
+    try:
+        finalized = _finalize_result_payload(result)
+    except Exception as exc:
+        logger.exception("Failed to finalize result for task %s", task_id)
+        _fail_provider_job(provider_job_id, "RESULT_UPLOAD_FAILED", str(exc))
+        raise
+
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
+            return
+        provider_callback(
+            db,
+            provider_job_id,
+            "succeeded",
+            callback_id=f"{provider_job_id}:succeeded",
+            output_url=finalized["url"],
+            output_storage_key=finalized["storage_key"],
+            output_mime_type=finalized["mime_type"],
+            output_size_bytes=finalized["size_bytes"],
+        )
 
 
 def process_provider_job(task_id: str) -> None:
@@ -71,6 +118,7 @@ def _process_real_video_task(task_id: str) -> None:
         provider_job_id = task.provider_job_id
         params = dict(task.params or {})
         params["providerJobId"] = provider_job_id
+        params["_defer_result_upload"] = True
         input_storage_key = input_asset.storage_key
         tool_slug = task.tool_slug
 
@@ -97,6 +145,22 @@ def _process_real_video_task(task_id: str) -> None:
     except Exception as exc:
         logger.exception("Unexpected video processing error for task %s", task_id)
         _fail_provider_job(provider_job_id, "VIDEO_PROCESSING_FAILED", str(exc))
+        return
+
+    if result.get("local_path"):
+        with SessionLocal() as db:
+            task = db.get(Task, task_id)
+            if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
+                return
+            provider_callback(
+                db,
+                provider_job_id,
+                "processing",
+                callback_id=f"{provider_job_id}:result-finalize-queued",
+                progress_percent=98,
+                progress_stage="结果已生成，等待上传对象存储",
+            )
+        enqueue_result_finalize_job(task_id, provider_job_id, result)
         return
 
     with SessionLocal() as db:

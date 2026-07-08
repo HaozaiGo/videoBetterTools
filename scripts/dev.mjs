@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 
 const frontendPort = process.env.FRONTEND_PORT ?? "5175";
 const workerReplicas = Math.max(1, Number.parseInt(process.env.WORKER_REPLICAS ?? "6", 10) || 6);
+const resultWorkerReplicas = Math.max(1, Number.parseInt(process.env.RESULT_WORKER_REPLICAS ?? "4", 10) || 4);
 
 function readBackendDotEnv() {
   try {
@@ -40,6 +41,12 @@ const processes = [
   spawn("uv", ["--directory", "backend", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8010", "--reload", "--reload-dir", "app"], { stdio: "inherit", env: backendEnv }),
   ...Array.from({ length: workerReplicas }, () =>
     spawn("uv", ["--directory", "backend", "run", "python", "-m", "app.worker"], { stdio: "inherit", env: backendEnv })
+  ),
+  ...Array.from({ length: resultWorkerReplicas }, () =>
+    spawn("uv", ["--directory", "backend", "run", "python", "-m", "app.worker"], {
+      stdio: "inherit",
+      env: { ...backendEnv, MODEL_PLAZA_WORKER_QUEUES: "model-plaza-results" },
+    })
   ),
   spawn("npx", ["vite", "--host", "0.0.0.0", "--port", frontendPort], { stdio: "inherit" }),
 ];

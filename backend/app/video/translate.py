@@ -33,6 +33,16 @@ def _final_result(output_key: str, output_path: Path) -> dict:
     }
 
 
+def _local_result(output_key: str, output_path: Path) -> dict:
+    return {
+        "storage_key": output_key,
+        "url": "",
+        "mime_type": "video/mp4",
+        "size_bytes": output_path.stat().st_size,
+        "local_path": str(output_path),
+    }
+
+
 def _run_translate_command(
     input_path: Path,
     output_path: Path,
@@ -121,4 +131,6 @@ def process_video_translate(input_storage_key: str, task_id: str, params: dict) 
             "mime_type": str(remote_result.get("mime_type") or "video/mp4"),
             "size_bytes": int(remote_result.get("size_bytes") or 0),
         }
+    if params.get("_defer_result_upload"):
+        return _local_result(output_key, output_path)
     return _final_result(output_key, output_path)
