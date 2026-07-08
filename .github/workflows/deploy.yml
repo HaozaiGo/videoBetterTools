@@ -234,8 +234,8 @@ jobs:
           AUTH_SECRET=$auth_secret
           ALLOW_DEMO_WITHOUT_AUTH=false
           WEB_PORT=$DEPLOY_WEB_PORT
-          WORKER_REPLICAS=6
-          RESULT_WORKER_REPLICAS=4
+          WORKER_REPLICAS=8
+          RESULT_WORKER_REPLICAS=8
           TASK_JOB_TIMEOUT_SECONDS=7200
           ASSET_RETENTION_HOURS=48
           CLEANUP_RETENTION_HOURS=48
@@ -291,7 +291,8 @@ jobs:
 
           set_env_value STORAGE_BACKEND tos
           set_env_value MODEL_PLAZA_GPU_API_URL https://piankexiu.uniphore-ai.com
-          set_env_value WORKER_REPLICAS 6
+          set_env_value WORKER_REPLICAS 8
+          set_env_value RESULT_WORKER_REPLICAS 8
           set_env_value ASSET_RETENTION_HOURS 48
           set_env_value CLEANUP_RETENTION_HOURS 48
           set_env_value CLEANUP_INTERVAL_SECONDS 3600
@@ -337,7 +338,7 @@ jobs:
           zip_worker_replicas="$(grep -E '^ZIP_WORKER_REPLICAS=' .env | tail -n 1 | cut -d= -f2- || true)"
           zip_worker_replicas="${zip_worker_replicas:-8}"
           result_worker_replicas="$(grep -E '^RESULT_WORKER_REPLICAS=' .env | tail -n 1 | cut -d= -f2- || true)"
-          result_worker_replicas="${result_worker_replicas:-4}"
+          result_worker_replicas="${result_worker_replicas:-8}"
           APP_VERSION="$GITHUB_SHA" docker compose -f docker-compose.prod.yml up -d --build --remove-orphans --scale "worker=$worker_replicas" --scale "zip-worker=$zip_worker_replicas" --scale "result-worker=$result_worker_replicas"
           docker compose -f docker-compose.prod.yml ps
 

@@ -2,8 +2,8 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const frontendPort = process.env.FRONTEND_PORT ?? "5175";
-const workerReplicas = Math.max(1, Number.parseInt(process.env.WORKER_REPLICAS ?? "6", 10) || 6);
-const resultWorkerReplicas = Math.max(1, Number.parseInt(process.env.RESULT_WORKER_REPLICAS ?? "4", 10) || 4);
+const workerReplicas = Math.max(1, Number.parseInt(process.env.WORKER_REPLICAS ?? "8", 10) || 8);
+const resultWorkerReplicas = Math.max(1, Number.parseInt(process.env.RESULT_WORKER_REPLICAS ?? "8", 10) || 8);
 
 function readBackendDotEnv() {
   try {

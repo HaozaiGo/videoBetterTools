@@ -8,6 +8,7 @@ from typing import Any
 
 from app.config import settings
 from app.storage import storage
+from app.video.gpu_api import RemoteGpuError, RemoteGpuUnavailableError, can_submit_remote_video_job, submit_remote_video_job
 
 
 class VideoProcessingError(RuntimeError):
@@ -464,8 +465,28 @@ def process_with_model_adapter(
 
 def process_masked_video_removal(input_storage_key: str, task_id: str, params: dict, suffix: str = "watermark-removed") -> dict:
     params = {**params, "taskId": task_id}
-    input_url = storage.presign_download(input_storage_key)
     adapter = _adapter_name(params)
+    regions = params.get("regions") or []
+    if not regions:
+        raise VideoProcessingError("Please select at least one removal region.")
+
+    # 去水印/去字幕共用同一条 mask 修复管线，由业务工具决定输出命名和前端文案。
+    output_key = _output_key(task_id, suffix, params)
+    if params.get("_async_remote_gpu") and adapter in {"propainter", "e2fgvi"} and can_submit_remote_video_job():
+        try:
+            return submit_remote_video_job(
+                job_type="propainter",
+                input_storage_key=input_storage_key,
+                output_key=output_key,
+                params=params,
+                regions=regions,
+            )
+        except RemoteGpuUnavailableError as exc:
+            raise GpuUnavailableError(str(exc)) from exc
+        except RemoteGpuError as exc:
+            raise VideoProcessingError(str(exc)) from exc
+
+    input_url = storage.presign_download(input_storage_key)
     input_path = storage.local_path(input_storage_key)
     input_url_for_adapter = input_url if _is_http_url(input_url) else None
     if not input_path.exists():
@@ -479,12 +500,6 @@ def process_masked_video_removal(input_storage_key: str, task_id: str, params: d
     elif not storage.is_remote:
         input_url_for_adapter = None
 
-    regions = params.get("regions") or []
-    if not regions:
-        raise VideoProcessingError("Please select at least one removal region.")
-
-    # 去水印/去字幕共用同一条 mask 修复管线，由业务工具决定输出命名和前端文案。
-    output_key = _output_key(task_id, suffix, params)
     output_path = settings.upload_path / output_key
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _, remote_result = process_with_model_adapter(

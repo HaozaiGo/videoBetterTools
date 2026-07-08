@@ -49,3 +49,35 @@ def test_finalize_result_payload_uploads_local_file(monkeypatch, tmp_path) -> No
     }
     assert fake_storage.saved == [("model-plaza/output/videos/result.mp4", output)]
     assert fake_storage.deleted == ["model-plaza/output/videos/result.mp4"]
+
+
+def test_finalize_remote_gpu_result_uses_direct_upload_metadata(monkeypatch) -> None:
+    monkeypatch.setattr(worker, "_sync_remote_gpu_progress", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        worker,
+        "get_remote_video_job",
+        lambda job_id: {
+            "status": "succeeded",
+            "result_storage_key": "model-plaza/output/videos/result.mp4",
+            "result_url": "https://cdn.example.test/model-plaza/output/videos/result.mp4",
+            "result_mime_type": "video/mp4",
+            "result_size_bytes": 123,
+        },
+    )
+
+    finalized = worker._finalize_remote_gpu_result(
+        "task-1",
+        "provider-1",
+        {
+            "remote_job_id": "remote-1",
+            "storage_key": "model-plaza/output/videos/result.mp4",
+            "url": "https://cdn.example.test/model-plaza/output/videos/result.mp4",
+        },
+    )
+
+    assert finalized == {
+        "storage_key": "model-plaza/output/videos/result.mp4",
+        "url": "https://cdn.example.test/model-plaza/output/videos/result.mp4",
+        "mime_type": "video/mp4",
+        "size_bytes": 123,
+    }

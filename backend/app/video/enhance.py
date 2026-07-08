@@ -7,6 +7,7 @@ from typing import Any
 
 from app.config import settings
 from app.storage import storage
+from app.video.gpu_api import RemoteGpuError, RemoteGpuUnavailableError, can_submit_remote_video_job, submit_remote_video_job
 from app.video.watermark import GpuUnavailableError, VideoProcessingError, is_gpu_unavailable_error, output_run_suffix
 
 
@@ -100,6 +101,20 @@ def _run_enhance_command(
 
 def process_video_enhance(input_storage_key: str, task_id: str, params: dict) -> dict:
     params = {**params, "taskId": task_id}
+    output_key = _output_key(task_id, params)
+    if params.get("_async_remote_gpu") and can_submit_remote_video_job():
+        try:
+            return submit_remote_video_job(
+                job_type="enhance",
+                input_storage_key=input_storage_key,
+                output_key=output_key,
+                params=params,
+            )
+        except RemoteGpuUnavailableError as exc:
+            raise GpuUnavailableError(str(exc)) from exc
+        except RemoteGpuError as exc:
+            raise VideoProcessingError(str(exc)) from exc
+
     input_url = storage.presign_download(input_storage_key)
     input_path = storage.local_path(input_storage_key)
     input_url_for_adapter = input_url if _is_http_url(input_url) else None
@@ -114,7 +129,6 @@ def process_video_enhance(input_storage_key: str, task_id: str, params: dict) ->
     elif not storage.is_remote:
         input_url_for_adapter = None
 
-    output_key = _output_key(task_id, params)
     output_path = settings.upload_path / output_key
     output_path.parent.mkdir(parents=True, exist_ok=True)
     remote_result = _run_enhance_command(

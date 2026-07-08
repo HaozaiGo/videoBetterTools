@@ -11,6 +11,7 @@ from app.models import Asset, Task
 from app.queue import enqueue_provider_job, enqueue_result_finalize_job, named_queue, redis_connection, task_queue
 from app.services import create_internal_batch_zip, provider_callback
 from app.storage import storage
+from app.video.gpu_api import RemoteGpuError, cancel_remote_video_job, download_remote_video_result, get_remote_video_job
 from app.video.enhance import process_video_enhance
 from app.video.translate import process_video_translate
 from app.video.watermark import GpuUnavailableError, VideoProcessingError, process_subtitle_removal, process_watermark_removal
@@ -51,7 +52,10 @@ def _finalize_result_payload(result: dict) -> dict:
 
 def finalize_provider_job_result(task_id: str, provider_job_id: str, result: dict) -> None:
     try:
-        finalized = _finalize_result_payload(result)
+        if result.get("workflow") == "subtitle-translate":
+            finalized = _finalize_subtitle_translate_workflow_result(task_id, provider_job_id, result)
+        else:
+            finalized = _finalize_remote_gpu_result(task_id, provider_job_id, result) if result.get("remote_job_id") else _finalize_result_payload(result)
     except Exception as exc:
         logger.exception("Failed to finalize result for task %s", task_id)
         _fail_provider_job(provider_job_id, "RESULT_UPLOAD_FAILED", str(exc))
@@ -119,6 +123,7 @@ def _process_real_video_task(task_id: str) -> None:
         params = dict(task.params or {})
         params["providerJobId"] = provider_job_id
         params["_defer_result_upload"] = True
+        params["_async_remote_gpu"] = True
         input_storage_key = input_asset.storage_key
         tool_slug = task.tool_slug
 
@@ -145,6 +150,22 @@ def _process_real_video_task(task_id: str) -> None:
     except Exception as exc:
         logger.exception("Unexpected video processing error for task %s", task_id)
         _fail_provider_job(provider_job_id, "VIDEO_PROCESSING_FAILED", str(exc))
+        return
+
+    if result.get("remote_job_id"):
+        with SessionLocal() as db:
+            task = db.get(Task, task_id)
+            if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
+                return
+            provider_callback(
+                db,
+                provider_job_id,
+                "processing",
+                callback_id=f"{provider_job_id}:remote-gpu-submitted",
+                progress_percent=10,
+                progress_stage="远端 GPU 已提交，等待处理",
+            )
+        enqueue_result_finalize_job(task_id, provider_job_id, result)
         return
 
     if result.get("local_path"):
@@ -178,6 +199,120 @@ def _process_real_video_task(task_id: str) -> None:
             output_mime_type=result["mime_type"],
             output_size_bytes=result["size_bytes"],
         )
+
+
+def _sync_remote_gpu_progress(task_id: str, provider_job_id: str, remote_job_id: str, status: dict) -> bool:
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
+            return False
+        state = str(status.get("status") or "queued")
+        fallback_percent = {"queued": 10, "processing": 15, "uploading": 96, "succeeded": 100, "failed": 0, "cancelled": 0}.get(state, 0)
+        percent = int(status.get("progress_percent") or fallback_percent)
+        stage = str(status.get("progress_stage") or state)
+        if state == "uploading":
+            stage = stage if stage != "uploading" else "远端正在上传对象存储"
+        provider_callback(
+            db,
+            provider_job_id,
+            "processing",
+            callback_id=f"{provider_job_id}:{remote_job_id}:progress:{percent}:{state}",
+            progress_percent=percent,
+            progress_stage=stage,
+        )
+        return True
+
+
+def _finalize_remote_gpu_result(task_id: str, provider_job_id: str, result: dict) -> dict:
+    remote_job_id = str(result["remote_job_id"])
+    output_key = str(result["storage_key"])
+    interval = max(1, int(os.environ.get("MODEL_PLAZA_GPU_POLL_INTERVAL", "5")))
+    timeout = max(interval, int(os.environ.get("MODEL_PLAZA_GPU_POLL_TIMEOUT", str(settings.task_job_timeout_seconds))))
+    deadline = time.time() + timeout
+    last_status: dict = {}
+    try:
+        while time.time() < deadline:
+            status = get_remote_video_job(remote_job_id)
+            last_status = status
+            if not _sync_remote_gpu_progress(task_id, provider_job_id, remote_job_id, status):
+                return {
+                    "storage_key": output_key,
+                    "url": str(result.get("url") or storage.public_url(output_key)),
+                    "mime_type": str(result.get("mime_type") or "video/mp4"),
+                    "size_bytes": int(result.get("size_bytes") or 0),
+                }
+            state = str(status.get("status") or "")
+            if state == "succeeded":
+                storage_key = str(status.get("result_storage_key") or output_key)
+                result_url = str(status.get("result_url") or result.get("url") or storage.public_url(storage_key))
+                size_bytes = int(status.get("result_size_bytes") or result.get("size_bytes") or 0)
+                if status.get("result_storage_key") and status.get("result_url"):
+                    return {
+                        "storage_key": storage_key,
+                        "url": result_url,
+                        "mime_type": str(status.get("result_mime_type") or result.get("mime_type") or "video/mp4"),
+                        "size_bytes": size_bytes,
+                    }
+                local_path = settings.upload_path / output_key
+                download_remote_video_result(remote_job_id, local_path)
+                return _finalize_result_payload(
+                    {
+                        "storage_key": output_key,
+                        "local_path": str(local_path),
+                        "mime_type": str(result.get("mime_type") or "video/mp4"),
+                    }
+                )
+            if state == "failed":
+                raise RemoteGpuError(f"remote GPU job failed: {status.get('error') or 'unknown error'}")
+            if state == "cancelled":
+                raise RemoteGpuError("remote GPU job was cancelled")
+            time.sleep(interval)
+    except Exception:
+        try:
+            cancel_remote_video_job(remote_job_id)
+        except Exception:
+            logger.warning("Failed to cancel remote GPU job %s after result finalize error", remote_job_id, exc_info=True)
+        raise
+    raise RemoteGpuError(f"remote GPU job timed out after {timeout}s: {remote_job_id}; last_status={last_status}")
+
+
+def _finalize_subtitle_translate_workflow_result(task_id: str, provider_job_id: str, result: dict) -> dict:
+    intermediate = _finalize_remote_gpu_result(task_id, provider_job_id, result)
+    translate_params = dict(result.get("translate_params") or {})
+    translate_params["providerJobId"] = provider_job_id
+    translate_params["_defer_result_upload"] = True
+    translate_params["_async_remote_gpu"] = True
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
+            return intermediate
+        provider_callback(
+            db,
+            provider_job_id,
+            "processing",
+            callback_id=f"{provider_job_id}:subtitle-translate:translate-submit",
+            progress_percent=55,
+            progress_stage="字幕去除完成，正在提交翻译任务",
+        )
+
+    translate_result = process_video_translate(str(intermediate["storage_key"]), task_id, translate_params)
+    if translate_result.get("remote_job_id"):
+        finalized = _finalize_remote_gpu_result(task_id, provider_job_id, translate_result)
+    elif translate_result.get("local_path"):
+        finalized = _finalize_result_payload(translate_result)
+    else:
+        finalized = {
+            "storage_key": str(translate_result["storage_key"]),
+            "url": str(translate_result["url"]),
+            "mime_type": str(translate_result.get("mime_type") or "video/mp4"),
+            "size_bytes": int(translate_result.get("size_bytes") or 0),
+        }
+    if storage.is_remote:
+        try:
+            storage.delete_remote(str(intermediate["storage_key"]))
+        except Exception:
+            logger.warning("Failed to delete intermediate subtitle workflow object %s", intermediate["storage_key"], exc_info=True)
+    return finalized
 
 
 def _requeue_provider_job_for_gpu_unavailable(task_id: str, provider_job_id: str, progress_stage: str = "") -> None:
