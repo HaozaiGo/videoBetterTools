@@ -764,6 +764,74 @@ def _runner_for_job_type(job_type: str) -> Path:
     raise RuntimeError(f"Unsupported job type: {job_type}")
 
 
+def _runner_command(runner_path: Path, input_path: Path, output_path: Path, params_path: Path, work_dir: Path, regions_path: Path | None = None) -> list[str]:
+    command = [
+        PYTHON_PATH,
+        str(runner_path),
+        "--input",
+        str(input_path),
+        "--output",
+        str(output_path),
+        "--params",
+        str(params_path),
+        "--workdir",
+        str(work_dir),
+    ]
+    if regions_path is not None:
+        command[6:6] = ["--regions", str(regions_path)]
+    return command
+
+
+def _run_tracked_process(job_id: str, command: list[str], log_file, assigned_gpu: str, use_progress_file: bool = True) -> None:
+    env = {
+        **os.environ,
+        "CUDA_VISIBLE_DEVICES": assigned_gpu,
+        "MODEL_PLAZA_ASSIGNED_GPU": assigned_gpu,
+    }
+    if use_progress_file:
+        env["MODEL_PLAZA_PROGRESS_FILE"] = str(_progress_path(job_id))
+    process = subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT, text=True, env=env, start_new_session=True)
+    with running_processes_lock:
+        running_processes[job_id] = process
+        running_gpu_devices[job_id] = assigned_gpu
+        status = _read_status(job_id)
+        running_progress_snapshots[job_id] = (_progress_signature_from_status(status), time.time(), _job_activity_heartbeat(job_id, status))
+    return_code = process.wait()
+    with running_processes_lock:
+        running_processes.pop(job_id, None)
+        running_gpu_devices.pop(job_id, None)
+        running_progress_snapshots.pop(job_id, None)
+    if _read_status(job_id).get("status") in TERMINAL_STATUSES:
+        return
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, command)
+
+
+def _run_subtitle_translate_job(job_id: str, input_path: Path, output_path: Path, regions_path: Path, params_path: Path, work_dir: Path, log_file, assigned_gpu: str) -> None:
+    intermediate_path = work_dir / "subtitle-removed.mp4"
+    intermediate_path.parent.mkdir(parents=True, exist_ok=True)
+
+    _write_status(job_id, progress_percent=10, progress_stage="开始去字幕")
+    _run_tracked_process(
+        job_id,
+        _runner_command(PROPAINTER_RUNNER_PATH, input_path, intermediate_path, params_path, work_dir / "propainter", regions_path),
+        log_file,
+        assigned_gpu,
+    )
+    if not intermediate_path.exists():
+        raise RuntimeError("subtitle removal runner completed but intermediate video was not created")
+
+    _progress_path(job_id).unlink(missing_ok=True)
+    _write_status(job_id, progress_percent=55, progress_stage="字幕去除完成，开始翻译并写入字幕")
+    _run_tracked_process(
+        job_id,
+        _runner_command(TRANSLATE_RUNNER_PATH, intermediate_path, output_path, params_path, work_dir / "translate"),
+        log_file,
+        assigned_gpu,
+        use_progress_file=False,
+    )
+
+
 def _run_model_job(job_id: str) -> None:
     job_dir = _job_dir(job_id)
     status = _read_status(job_id)
@@ -809,43 +877,24 @@ def _run_model_job(job_id: str) -> None:
             progress_percent=8,
             progress_stage=f"远端 GPU {assigned_gpu} {'独占' if exclusive_gpu else ''}已领取任务",
         )
-        command = [
-            PYTHON_PATH,
-            str(_runner_for_job_type(job_type)),
-            "--input",
-            str(input_path),
-            "--output",
-            str(output_path),
-            "--params",
-            str(params_path),
-            "--workdir",
-            str(work_dir),
-        ]
-        if job_type in {"propainter", "enhance"}:
-            command[6:6] = ["--regions", str(regions_path)]
         LOGS_ROOT.mkdir(parents=True, exist_ok=True)
         with log_path.open("w", encoding="utf-8") as log_file:
-            env = {
-                **os.environ,
-                "CUDA_VISIBLE_DEVICES": assigned_gpu,
-                "MODEL_PLAZA_ASSIGNED_GPU": assigned_gpu,
-                "MODEL_PLAZA_PROGRESS_FILE": str(_progress_path(job_id)),
-            }
-            process = subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT, text=True, env=env, start_new_session=True)
-            with running_processes_lock:
-                running_processes[job_id] = process
-                running_gpu_devices[job_id] = assigned_gpu
-                status = _read_status(job_id)
-                running_progress_snapshots[job_id] = (_progress_signature_from_status(status), time.time(), _job_activity_heartbeat(job_id, status))
-            return_code = process.wait()
-            with running_processes_lock:
-                running_processes.pop(job_id, None)
-                running_gpu_devices.pop(job_id, None)
-                running_progress_snapshots.pop(job_id, None)
-            if _read_status(job_id).get("status") in TERMINAL_STATUSES:
-                return
-            if return_code != 0:
-                raise subprocess.CalledProcessError(return_code, command)
+            if job_type == "subtitle_translate":
+                _run_subtitle_translate_job(job_id, input_path, output_path, regions_path, params_path, work_dir, log_file, assigned_gpu)
+            else:
+                _run_tracked_process(
+                    job_id,
+                    _runner_command(
+                        _runner_for_job_type(job_type),
+                        input_path,
+                        output_path,
+                        params_path,
+                        work_dir,
+                        regions_path if job_type in {"propainter", "enhance"} else None,
+                    ),
+                    log_file,
+                    assigned_gpu,
+                )
         if not output_path.exists():
             raise RuntimeError("runner completed but output.mp4 was not created")
         if not UPLOAD_RESULTS:
@@ -1385,11 +1434,11 @@ async def create_job(
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="regions/params must be valid JSON") from exc
     job_type = job_type.lower().strip()
-    if job_type not in {"propainter", "enhance", "translate"}:
+    if job_type not in {"propainter", "enhance", "translate", "subtitle_translate"}:
         raise HTTPException(status_code=400, detail="unsupported job type")
     if not isinstance(regions_json, list):
         raise HTTPException(status_code=400, detail="regions must be a JSON array")
-    if job_type == "propainter" and not regions_json:
+    if job_type in {"propainter", "subtitle_translate"} and not regions_json:
         raise HTTPException(status_code=400, detail="regions must be a non-empty JSON array")
     if not isinstance(params_json, dict):
         raise HTTPException(status_code=400, detail="params must be a JSON object")

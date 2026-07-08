@@ -11,7 +11,7 @@ from app.video.gpu_api import RemoteGpuError, RemoteGpuUnavailableError, can_sub
 from app.video.watermark import GpuUnavailableError, VideoProcessingError, is_gpu_unavailable_error, output_run_suffix
 
 
-def _output_key(task_id: str, params: dict[str, Any] | None = None) -> str:
+def translated_output_key(task_id: str, params: dict[str, Any] | None = None) -> str:
     run_suffix = output_run_suffix(params or {})
     if run_suffix:
         return f"{task_id}-{run_suffix}-translated.mp4"
@@ -101,7 +101,7 @@ def _run_translate_command(
 
 def process_video_translate(input_storage_key: str, task_id: str, params: dict) -> dict:
     params = {**params, "taskId": task_id}
-    output_key = _output_key(task_id, params)
+    output_key = translated_output_key(task_id, params)
     if params.get("_async_remote_gpu") and can_submit_remote_video_job():
         try:
             return submit_remote_video_job(

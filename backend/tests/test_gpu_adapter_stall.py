@@ -183,3 +183,64 @@ def test_gpu_api_server_rejects_unsafe_result_cache_paths() -> None:
     )
     with pytest.raises(ValueError):
         module._safe_relative_path("../result.mp4")
+
+
+def test_gpu_api_server_subtitle_translate_runs_locally_and_uploads_once(tmp_path, monkeypatch) -> None:
+    module = _load_script_module("propainter_api_server_workflow_test", "scripts/gpu/propainter_api_server.py")
+    job_id = "workflowjob123"
+    job_dir = tmp_path / "jobs" / job_id
+    job_dir.mkdir(parents=True)
+    (job_dir / "input.mp4").write_bytes(b"input-video")
+    (job_dir / "regions.json").write_text('[{"x":0,"y":0.75,"width":1,"height":0.08}]', encoding="utf-8")
+    (job_dir / "params.json").write_text('{"targetLanguage":"en","subtitlePlacement":"bottom"}', encoding="utf-8")
+    (job_dir / "status.json").write_text('{"status":"queued","job_type":"subtitle_translate","created_at":1}', encoding="utf-8")
+
+    commands: list[list[str]] = []
+    uploaded: list[Path] = []
+
+    class FakeProcess:
+        def __init__(self, command, **kwargs) -> None:
+            self.command = list(command)
+            commands.append(self.command)
+
+        def wait(self) -> int:
+            output_path = Path(self.command[self.command.index("--output") + 1])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"output-video")
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(module, "JOBS_ROOT", tmp_path / "jobs")
+    monkeypatch.setattr(module, "LOGS_ROOT", tmp_path / "logs")
+    monkeypatch.setattr(module, "PROPAINTER_RUNNER_PATH", tmp_path / "propainter_runner.py")
+    monkeypatch.setattr(module, "TRANSLATE_RUNNER_PATH", tmp_path / "video_translate_runner.py")
+    monkeypatch.setattr(module, "PYTHON_PATH", sys.executable)
+    monkeypatch.setattr(module, "UPLOAD_RESULTS", True)
+    monkeypatch.setattr(module, "_require_gpu_preflight", lambda: None)
+    monkeypatch.setattr(module, "_acquire_gpu_slot", lambda *args, **kwargs: "0")
+    monkeypatch.setattr(module, "_release_gpu_slot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.subprocess, "Popen", lambda command, **kwargs: FakeProcess(command, **kwargs))
+    monkeypatch.setattr(module, "_upload_result_with_deadline", lambda job_id, output_path: uploaded.append(output_path) or {
+        "result_storage_key": "model-plaza/output/videos/final.mp4",
+        "result_url": "https://cdn.example.test/final.mp4",
+        "result_size_bytes": output_path.stat().st_size,
+    })
+    monkeypatch.setattr(module, "_persist_result_cache", lambda storage_key, output_path: output_path)
+    monkeypatch.setattr(module, "_cleanup_result_cache_for_watermark", lambda: None)
+
+    module._run_model_job(job_id)
+
+    assert len(commands) == 2
+    assert commands[0][1].endswith("propainter_runner.py")
+    assert commands[0][commands[0].index("--input") + 1].endswith("input.mp4")
+    intermediate_output = commands[0][commands[0].index("--output") + 1]
+    assert intermediate_output.endswith("subtitle-removed.mp4")
+    assert commands[1][1].endswith("video_translate_runner.py")
+    assert commands[1][commands[1].index("--input") + 1] == intermediate_output
+    assert len(uploaded) == 1
+    assert uploaded[0] == job_dir / "output.mp4"
+    status = module._read_status(job_id)
+    assert status["status"] == "succeeded"
+    assert status["result_storage_key"] == "model-plaza/output/videos/final.mp4"

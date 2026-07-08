@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     volcengine_tos_ak: str = ""
     volcengine_tos_sk: str = ""
     volcengine_tos_presign_expires_seconds: int = 6 * 60 * 60
+    remote_storage_ready_timeout_seconds: int = 120
+    remote_storage_ready_poll_seconds: int = 3
     asset_retention_hours: int = 72
     cleanup_retention_hours: int = 48
     internal_batch_zip_retention_hours: int = 12

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import time
 import urllib.error
 import urllib.request
@@ -11,6 +12,8 @@ from typing import Any
 
 from app.config import settings
 from app.storage import storage
+
+logger = logging.getLogger("model_plaza.gpu_api")
 
 
 class RemoteGpuError(RuntimeError):
@@ -62,6 +65,24 @@ def can_submit_remote_video_job() -> bool:
     return bool(settings.model_plaza_gpu_api_url and storage.is_remote)
 
 
+def wait_for_remote_storage(storage_key: str) -> None:
+    timeout = max(0, int(settings.remote_storage_ready_timeout_seconds))
+    interval = max(1, int(settings.remote_storage_ready_poll_seconds))
+    deadline = time.monotonic() + timeout
+    attempts = 0
+
+    while True:
+        attempts += 1
+        if storage.remote_exists(storage_key):
+            if attempts > 1:
+                logger.info("Remote storage object became visible after %s checks: %s", attempts, storage_key)
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RemoteGpuUnavailableError(f"input asset is not available in remote storage after waiting {timeout}s")
+        time.sleep(min(interval, remaining))
+
+
 def submit_remote_video_job(
     *,
     job_type: str,
@@ -72,8 +93,7 @@ def submit_remote_video_job(
 ) -> dict:
     if not can_submit_remote_video_job():
         raise RemoteGpuError("remote GPU async submit is not configured")
-    if not storage.remote_exists(input_storage_key):
-        raise RemoteGpuUnavailableError("input asset is not available in remote storage yet")
+    wait_for_remote_storage(input_storage_key)
 
     result_upload = storage.presign_upload(kind="video", storage_key=output_key)
     if result_upload.get("mode") != "tos-put":
