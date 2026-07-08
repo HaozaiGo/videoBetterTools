@@ -307,7 +307,6 @@ jobs:
 
           if [ "${DEPLOY_BUILD_MIRRORS:-0}" = "1" ]; then
             set_env_from_main STORAGE_BACKEND
-            set_env_from_main MODEL_PLAZA_GPU_API_URL
             set_env_from_main VOLCENGINE_TOS_AK
             set_env_from_main VOLCENGINE_TOS_SK
             set_env_from_main VOLCENGINE_TOS_BUCKET
