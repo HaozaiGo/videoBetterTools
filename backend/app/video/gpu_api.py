@@ -65,7 +65,28 @@ def can_submit_remote_video_job() -> bool:
     return bool(settings.model_plaza_gpu_api_url and storage.is_remote)
 
 
-def wait_for_remote_storage(storage_key: str) -> None:
+def _http_url_exists(url: str) -> bool:
+    if not url.lower().startswith(("http://", "https://")):
+        return False
+    request = urllib.request.Request(url, method="HEAD")
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return 200 <= response.status < 400
+    except urllib.error.HTTPError as exc:
+        if exc.code != 405:
+            return False
+    except (TimeoutError, urllib.error.URLError, OSError):
+        return False
+
+    request = urllib.request.Request(url, headers={"Range": "bytes=0-0"}, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return 200 <= response.status < 400
+    except (TimeoutError, urllib.error.HTTPError, urllib.error.URLError, OSError):
+        return False
+
+
+def wait_for_remote_storage(storage_key: str, input_url: str | None = None) -> None:
     timeout = max(0, int(settings.remote_storage_ready_timeout_seconds))
     interval = max(1, int(settings.remote_storage_ready_poll_seconds))
     deadline = time.monotonic() + timeout
@@ -73,7 +94,7 @@ def wait_for_remote_storage(storage_key: str) -> None:
 
     while True:
         attempts += 1
-        if storage.remote_exists(storage_key):
+        if storage.remote_exists(storage_key) or (input_url and _http_url_exists(input_url)):
             if attempts > 1:
                 logger.info("Remote storage object became visible after %s checks: %s", attempts, storage_key)
             return
@@ -87,23 +108,25 @@ def submit_remote_video_job(
     *,
     job_type: str,
     input_storage_key: str,
+    input_url: str | None = None,
     output_key: str,
     params: dict[str, Any],
     regions: list[dict] | None = None,
 ) -> dict:
     if not can_submit_remote_video_job():
         raise RemoteGpuError("remote GPU async submit is not configured")
-    wait_for_remote_storage(input_storage_key)
+    wait_for_remote_storage(input_storage_key, input_url=input_url)
 
     result_upload = storage.presign_upload(kind="video", storage_key=output_key)
     if result_upload.get("mode") != "tos-put":
         raise RemoteGpuError("remote GPU async submit requires TOS presigned PUT storage")
+    download_url = input_url if input_url and input_url.lower().startswith(("http://", "https://")) else storage.presign_download(input_storage_key)
 
     fields = {
         "job_type": job_type,
         "regions": json.dumps(regions or [], ensure_ascii=False),
         "params": json.dumps(params, ensure_ascii=False),
-        "input_url": storage.presign_download(input_storage_key),
+        "input_url": download_url,
         "result_upload_url": str(result_upload["uploadUrl"]),
         "result_upload_headers": json.dumps(result_upload.get("headers") or {}, ensure_ascii=False),
         "result_storage_key": output_key,

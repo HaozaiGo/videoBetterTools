@@ -139,6 +139,8 @@ def _process_real_video_task(task_id: str) -> None:
         params["_defer_result_upload"] = True
         params["_async_remote_gpu"] = True
         input_storage_key = input_asset.storage_key
+        if input_asset.url and storage.is_remote and input_asset.url != storage.public_url(input_storage_key):
+            params["_inputAssetUrl"] = input_asset.url
         tool_slug = task.tool_slug
 
     # 耗时视频处理放在数据库会话之外，避免长时间占用连接和行锁。

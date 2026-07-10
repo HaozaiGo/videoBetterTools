@@ -477,6 +477,7 @@ def process_masked_video_removal(input_storage_key: str, task_id: str, params: d
             return submit_remote_video_job(
                 job_type="propainter",
                 input_storage_key=input_storage_key,
+                input_url=params.get("_inputAssetUrl"),
                 output_key=output_key,
                 params=params,
                 regions=regions,

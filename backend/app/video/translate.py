@@ -107,6 +107,7 @@ def process_video_translate(input_storage_key: str, task_id: str, params: dict) 
             return submit_remote_video_job(
                 job_type="translate",
                 input_storage_key=input_storage_key,
+                input_url=params.get("_inputAssetUrl"),
                 output_key=output_key,
                 params=params,
             )

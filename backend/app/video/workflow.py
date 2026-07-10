@@ -24,6 +24,7 @@ def process_subtitle_translate_workflow(input_storage_key: str, task_id: str, pa
             return submit_remote_video_job(
                 job_type="subtitle_translate",
                 input_storage_key=input_storage_key,
+                input_url=params.get("_inputAssetUrl"),
                 output_key=translated_output_key(task_id, translate_params),
                 params={
                     **params,
