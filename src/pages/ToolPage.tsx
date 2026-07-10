@@ -29,7 +29,16 @@ const defaultValues: ToolFormValues = {
   maskPadding: 8,
   maskStrategy: "subtitle-text",
   textLightThreshold: 155,
+  videoPrompt: "",
+  providerModel: "veo-3.1-generate-preview",
+  aspectRatio: "16:9",
 };
+
+const videoRedrawModels = [
+  { value: "veo-3.1-generate-preview", label: "Veo 3.1 Generate Preview" },
+  { value: "kling-video-o1-std", label: "Kling Video O1 Standard" },
+  { value: "kling-video-o1-pro", label: "Kling Video O1 Pro" },
+] as const;
 
 function clamp(value: number) {
   return Math.max(0, Math.min(1, value));
@@ -136,8 +145,9 @@ export function ToolPage() {
   const isSubtitleTool = tool?.slug === "remove-subtitle";
   const isEnhanceTool = tool?.slug === "enhance";
   const isTranslateTool = tool?.slug === "translate";
+  const isVideoRedrawTool = tool?.slug === "video-redraw";
   const isMaskVideoTool = isWatermarkTool || isSubtitleTool;
-  const showVideoPreview = Boolean(videoPreviewUrl && (isMaskVideoTool || isEnhanceTool || isTranslateTool));
+  const showVideoPreview = Boolean(videoPreviewUrl && (isMaskVideoTool || isEnhanceTool || isTranslateTool || isVideoRedrawTool));
   const regionNoun = isSubtitleTool ? "字幕" : "水印";
   const selectedFile = files[activeFileIndex] || files[0] || null;
   const selectedFileId = selectedFile ? fileBatchId(selectedFile, files[activeFileIndex] ? activeFileIndex : 0) : "";
@@ -254,15 +264,23 @@ export function ToolPage() {
                 keepAudio: values.keepAudio,
                 priority: values.priority,
               }
-            : isTranslateTool
-              ? {
-                  duration,
-                  targetLanguage: values.targetLanguage,
-                  subtitlePlacement: values.subtitlePlacement,
-                  keepAudio: values.keepAudio,
-                  priority: values.priority,
-                }
-              : taskValues;
+              : isTranslateTool
+                ? {
+                    duration,
+                    targetLanguage: values.targetLanguage,
+                    subtitlePlacement: values.subtitlePlacement,
+                    keepAudio: values.keepAudio,
+                    priority: values.priority,
+                  }
+                : isVideoRedrawTool
+                  ? {
+                      duration,
+                      videoPrompt: values.videoPrompt.trim(),
+                      resolution: values.resolution === "1080p" ? "1080p" : "720p",
+                      aspectRatio: values.aspectRatio,
+                      providerModel: values.providerModel,
+                    }
+                  : taskValues;
       };
       let latestState: BootstrapState | null = null;
       let createdCount = 0;
@@ -416,11 +434,18 @@ export function ToolPage() {
 
   const handleLoadedMetadata = () => {
     updateMediaBox();
-    const seconds = videoRef.current?.duration;
+    const video = videoRef.current;
+    const seconds = video?.duration;
     if (seconds && Number.isFinite(seconds)) {
       const roundedSeconds = Math.max(1, Math.ceil(seconds));
       if (values.duration !== roundedSeconds) {
         form.setFieldValue("duration", roundedSeconds);
+      }
+    }
+    if (isVideoRedrawTool && video?.videoWidth && video.videoHeight) {
+      const aspectRatio = video.videoWidth >= video.videoHeight * 1.2 ? "16:9" : video.videoHeight >= video.videoWidth * 1.2 ? "9:16" : "1:1";
+      if (values.aspectRatio !== aspectRatio) {
+        form.setFieldValue("aspectRatio", aspectRatio);
       }
     }
   };
@@ -518,9 +543,13 @@ export function ToolPage() {
       </Link>
       {notice ? <div className="notice">{notice}</div> : null}
       <form
-        className={`tool-detail${isEnhanceTool ? " enhance-detail" : ""}${isMaskVideoTool ? " mask-detail" : ""}${isTranslateTool ? " translate-detail" : ""}`}
+        className={`tool-detail${isEnhanceTool ? " enhance-detail" : ""}${isMaskVideoTool ? " mask-detail" : ""}${isTranslateTool ? " translate-detail" : ""}${isVideoRedrawTool ? " redraw-detail" : ""}`}
         onSubmit={(event) => {
           event.preventDefault();
+          if (isVideoRedrawTool && !values.videoPrompt.trim()) {
+            setNotice("请先输入视频转绘提示词。");
+            return;
+          }
           if (isMaskVideoTool) {
             const firstMissingIndex = files.findIndex((item, index) => !(regionsByFileId[fileBatchId(item, index)] || []).length);
             if (firstMissingIndex >= 0) {
@@ -550,6 +579,7 @@ export function ToolPage() {
                 {isEnhanceTool ? <span>远端 GPU 超分</span> : null}
                 {isMaskVideoTool ? <span>区域框选修复</span> : null}
                 {isTranslateTool ? <span>多语言硬字幕</span> : null}
+                {isVideoRedrawTool ? <span>GPTProto 多模型</span> : null}
                 {tool.pricing.mode !== "image" ? <span>支持批处理</span> : null}
               </div>
             </div>
@@ -570,7 +600,7 @@ export function ToolPage() {
             <strong>
               {selectedFileCount ? (isBatchUpload ? `已选择 ${selectedFileCount} 个文件` : selectedFile?.name) : tool.pricing.mode === "image" ? "选择图片文件" : "选择视频文件"}
             </strong>
-            <span>{selectedFileCount ? (isBatchUpload ? `合计 ${formatBytes(selectedFilesSize)}，可逐个视频设置选区。` : `${formatBytes(selectedFile?.size || 0)}，创建任务时会上传到后端。`) : "超过 32MB 自动使用分片与断点续传。"}</span>
+            <span>{selectedFileCount ? (isBatchUpload ? `合计 ${formatBytes(selectedFilesSize)}${isMaskVideoTool ? "，可逐个视频设置选区。" : "，将逐个创建处理任务。"}` : `${formatBytes(selectedFile?.size || 0)}，创建任务时会上传到后端。`) : "超过 32MB 自动使用分片与断点续传。"}</span>
           </label>
           {batchItems.length ? (
             <div className="batch-file-list" aria-label="批量文件列表">
@@ -749,7 +779,7 @@ export function ToolPage() {
                   <label>
                     输出清晰度
                     <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value)}>
-                      {["720p", "1080p", "2K", "4K"].map((item) => (
+                      {(isVideoRedrawTool ? ["720p", "1080p"] : ["720p", "1080p", "2K", "4K"]).map((item) => (
                         <option value={item} key={item}>
                           {item}
                         </option>
@@ -758,6 +788,49 @@ export function ToolPage() {
                   </label>
                 )}
               </form.Field>
+            ) : null}
+            {isVideoRedrawTool ? (
+              <>
+                <form.Field name="providerModel">
+                  {(field) => (
+                    <label>
+                      转绘模型
+                      <select aria-label="转绘模型" value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["providerModel"])}>
+                        {videoRedrawModels.map((model) => (
+                          <option value={model.value} key={model.value}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                </form.Field>
+                <form.Field name="videoPrompt">
+                  {(field) => (
+                    <label className="full-field">
+                      转绘提示词
+                      <textarea
+                        value={field.state.value}
+                        rows={5}
+                        placeholder="例如：把人物保持一致，转成电影感赛博朋克夜景，霓虹灯反射，真实镜头运动，保留原视频动作节奏。"
+                        onChange={(event) => field.handleChange(event.target.value)}
+                      />
+                    </label>
+                  )}
+                </form.Field>
+                <form.Field name="aspectRatio">
+                  {(field) => (
+                    <label>
+                      输出画幅
+                      <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["aspectRatio"])}>
+                        <option value="16:9">横屏 16:9</option>
+                        <option value="9:16">竖屏 9:16</option>
+                        <option value="1:1">方形 1:1</option>
+                      </select>
+                    </label>
+                  )}
+                </form.Field>
+              </>
             ) : null}
             {isEnhanceTool ? (
               <>

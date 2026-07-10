@@ -44,7 +44,16 @@ function failureReason(task: Task) {
 
 function paramSummary(task: Task) {
   const params = task.params || {};
+  const modelLabel =
+    params.providerModel === "veo-3.1-generate-preview"
+      ? "Veo 3.1"
+      : params.providerModel === "kling-video-o1-pro"
+        ? "Kling Video O1 Pro"
+      : params.providerModel === "kling-video-o1-std" || params.providerModel === "kling-v3-omni-std"
+        ? "Kling Video O1 Std"
+        : "";
   const items = [
+    modelLabel ? `模型 ${modelLabel}` : "",
     typeof params.resolution === "string" ? `清晰度 ${params.resolution}` : "",
     typeof params.enhanceMode === "string" ? `模式 ${params.enhanceMode === "natural" ? "自然增强" : "高质量超分"}` : "",
     typeof params.targetLanguage === "string" ? `目标语言 ${translateLanguageLabel(params.targetLanguage)}` : "",

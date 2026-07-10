@@ -27,6 +27,7 @@ from app.pricing import estimate_credits
 from app.queue import enqueue_internal_batch_zip, enqueue_provider_job
 from app.storage import object_key_for_upload, safe_storage_name, storage
 from app.tool_config import CATEGORIES, TOOLS, get_tool
+from app.video.gptproto import VIDEO_REDRAW_MODELS, normalize_video_redraw_model
 
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 100
@@ -200,6 +201,12 @@ def failure_reason_for_task(task: Task) -> str:
         return "远端 ProPainter 去字幕模型执行失败。建议优先使用“单卡重跑”；如果仍失败，再降低并发或调整模型参数。"
     if "translate command failed" in haystack:
         return "远端翻译/字幕生成链路失败。可重跑；如果多次失败，需检查翻译模型或上传链路日志。"
+    if task.error_code == "GPTPROTO_VIDEO_REDRAW_FAILED":
+        if "no channel found" in haystack or "channel configuration" in haystack:
+            return "GPTProto 未给当前账号/模型配置可用通道。请确认使用文档中的模型名，或联系 GPTProto 管理员开通对应模型通道后再试。"
+        if "http 429" in haystack:
+            return "GPTProto 视频转绘触发 429 限流或通道不可用。请稍后重试，或联系 GPTProto 确认该模型通道状态。"
+        return "GPTProto 视频转绘失败。请检查 API Key、输入视频公网地址、提示词或供应商任务状态后重试。"
     if task.error_code == "VIDEO_PROCESSING_FAILED":
         return "远端视频处理失败，可能是模型报错、显存不足、视频编码不兼容或网络传输中断。"
     if task.error_code == "PROVIDER_FAILED":
@@ -215,6 +222,7 @@ def task_result_output_key(task: Task) -> str:
         "remove-subtitle": "subtitle-removed",
         "enhance": "enhanced",
         "translate": "translated",
+        "video-redraw": "redraw",
         "subtitle-translate-workflow": "translated",
     }
     suffix = suffix_by_tool.get(task.tool_slug, "result")
@@ -1200,6 +1208,18 @@ def create_task(db: Session, user_id: str, tool_slug: str, input_asset_id: str, 
     input_asset = db.get(Asset, input_asset_id)
     if input_asset is None or input_asset.user_id != user_id:
         raise HTTPException(status_code=400, detail="missing uploaded asset")
+    if tool_slug == "video-redraw":
+        if input_asset.kind != "video":
+            raise HTTPException(status_code=400, detail="video redraw requires a video asset")
+        prompt = str((params or {}).get("videoPrompt") or (params or {}).get("prompt") or "").strip()
+        if not prompt:
+            raise HTTPException(status_code=400, detail="请输入视频转绘提示词")
+        provider_model = normalize_video_redraw_model(str((params or {}).get("providerModel") or "veo-3.1-generate-preview"))
+        if provider_model not in VIDEO_REDRAW_MODELS:
+            raise HTTPException(status_code=400, detail="不支持的视频转绘模型")
+        params = {**(params or {}), "providerModel": provider_model}
+        if not (input_asset.url or "").startswith(("http://", "https://")):
+            raise HTTPException(status_code=400, detail="GPTProto 转绘需要公网可访问的视频地址，请启用 TOS/S3 等远程存储")
 
     estimate = estimate_credits(tool, {**params, "duration": params.get("duration") or input_asset.duration_seconds or 30})
     wallet = get_wallet(db, user_id, lock=True)

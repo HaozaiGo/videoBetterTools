@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     e2fgvi_command: str = ""
     model_plaza_gpu_api_url: str = ""
     model_plaza_gpu_api_key: str = ""
+    gptproto_api_key: str = ""
+    gptproto_query_token: str = ""
+    gptproto_base_url: str = ""
+    gptproto_poll_interval_seconds: int = 10
+    gptproto_timeout_seconds: int = 1800
+    seedreambest_gptproto_api_key: str = ""
+    seedreambest_gptproto_query_token: str = ""
+    seedreambest_gptproto_base_url: str = ""
     storage_backend: str = "local"
     volcengine_openapi_ak: str = ""
     volcengine_openapi_sk: str = ""

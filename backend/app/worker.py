@@ -19,6 +19,7 @@ from app.video.gpu_api import (
     get_remote_video_job,
 )
 from app.video.enhance import process_video_enhance
+from app.video.gptproto import GptProtoCancelled, GptProtoError, generate_video_redraw
 from app.video.translate import process_video_translate
 from app.video.watermark import GpuUnavailableError, VideoProcessingError, process_subtitle_removal, process_watermark_removal
 from app.video.workflow import process_subtitle_translate_workflow
@@ -100,6 +101,10 @@ def process_provider_job(task_id: str) -> None:
         provider_callback(db, provider_job_id, "processing", callback_id=f"{provider_job_id}:processing")
 
     # 已接入真实视频处理能力的工具单独走 GPU/本地处理管线；其他工具仍保留模拟供应商结果。
+    if task.tool_slug == "video-redraw":
+        _process_gptproto_video_redraw_task(task_id)
+        return
+
     if task.tool_slug in {"remove-watermark", "remove-subtitle", "enhance", "translate", "subtitle-translate-workflow"}:
         _process_real_video_task(task_id)
         return
@@ -116,6 +121,71 @@ def process_provider_job(task_id: str) -> None:
             "succeeded",
             callback_id=f"{task.provider_job_id}:succeeded",
         )
+
+
+def _process_gptproto_video_redraw_task(task_id: str) -> None:
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if task is None or task.status in {"succeeded", "failed", "cancelled"}:
+            return
+        input_asset = db.get(Asset, task.input_asset_id)
+        if input_asset is None:
+            provider_callback(
+                db,
+                task.provider_job_id,
+                "failed",
+                callback_id=f"{task.provider_job_id}:missing-input",
+                error_code="INPUT_ASSET_NOT_FOUND",
+            )
+            return
+        provider_job_id = task.provider_job_id
+        input_url = storage.presign_download(input_asset.storage_key, input_asset.original_name) if storage.is_remote else input_asset.url or ""
+        params = dict(task.params or {})
+
+    def progress(percent: int, stage: str) -> None:
+        with SessionLocal() as progress_db:
+            current = progress_db.get(Task, task_id)
+            if current is None or current.provider_job_id != provider_job_id or current.status in {"succeeded", "failed", "cancelled"}:
+                return
+            provider_callback(
+                progress_db,
+                provider_job_id,
+                "processing",
+                callback_id=f"{provider_job_id}:gptproto-progress:{percent}:{hash(stage)}",
+                progress_percent=percent,
+                progress_stage=stage,
+            )
+
+    try:
+        result = generate_video_redraw(input_url, task_id, params, progress)
+    except GptProtoCancelled:
+        return
+    except GptProtoError as exc:
+        logger.warning("GPTProto video redraw failed for task %s: %s", task_id, exc)
+        _fail_provider_job(provider_job_id, "GPTPROTO_VIDEO_REDRAW_FAILED", str(exc))
+        return
+    except Exception as exc:
+        logger.exception("Unexpected GPTProto video redraw error for task %s", task_id)
+        _fail_provider_job(provider_job_id, "GPTPROTO_VIDEO_REDRAW_FAILED", str(exc))
+        return
+
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
+            return
+        params = dict(task.params or {})
+        params["gptprotoOperationId"] = result.get("gptproto_operation_id", "")
+        params["providerModel"] = result.get("gptproto_model", params.get("providerModel", ""))
+        task.params = params
+        provider_callback(
+            db,
+            provider_job_id,
+            "processing",
+            callback_id=f"{provider_job_id}:result-finalize-queued",
+            progress_percent=98,
+            progress_stage="视频转绘结果已生成，等待上传对象存储",
+        )
+    enqueue_result_finalize_job(task_id, provider_job_id, result)
 
 
 def _process_real_video_task(task_id: str) -> None:

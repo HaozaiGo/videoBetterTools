@@ -98,6 +98,26 @@ export const tools = [
     inputs: ["duration", "targetLanguage", "subtitlePlacement", "keepAudio", "priority"],
   },
   {
+    slug: "video-redraw",
+    category: "video",
+    categoryName: "视频工具",
+    name: "视频转绘",
+    summary: "上传原视频并输入转绘提示词，使用 GPTProto Veo 或 Kling 重新生成风格、主体或场景一致的视频。",
+    route: "/tools/video/video-redraw",
+    icon: "redraw",
+    status: "online",
+    provider: "gptproto-veo",
+    pricing: {
+      mode: "duration",
+      unitSeconds: 8,
+      unitCredits: 32,
+      minimumCredits: 32,
+      resolutionMultiplier: { "720p": 1, "1080p": 1.5 },
+      priorityMultiplier: { standard: 1, express: 1 },
+    },
+    inputs: ["duration", "providerModel", "videoPrompt", "aspectRatio", "resolution"],
+  },
+  {
     slug: "image-cleanup",
     category: "image",
     categoryName: "图片工具",
@@ -155,7 +175,7 @@ export function estimateCredits(tool, form = {}) {
 
   const seconds = Number(form.duration || 30);
   const units = Math.ceil(seconds / tool.pricing.unitSeconds);
-  const resolution = form.resolution || "1080p";
+  const resolution = form.resolution || (tool.slug === "video-redraw" ? "720p" : "1080p");
   const resolutionMultiplier = tool.pricing.resolutionMultiplier?.[resolution] || 1;
   const complexity = Number(form.watermarkCount || 1) > 1 || form.maskComplexity === "complex" ? 1.25 : 1;
   const estimate = units * tool.pricing.unitCredits * resolutionMultiplier * priorityMultiplier * complexity;

@@ -284,4 +284,7 @@ export type ToolFormValues = {
   maskPadding: number;
   maskStrategy: "rectangle" | "subtitle-text" | "dark-subtitle-line";
   textLightThreshold: number;
+  videoPrompt: string;
+  providerModel: "veo-3.1-generate-preview" | "kling-video-o1-std" | "kling-video-o1-pro";
+  aspectRatio: "16:9" | "9:16" | "1:1";
 };

@@ -4,6 +4,7 @@ const labels: Record<string, string> = {
   grid: "▦",
   hd: "HD",
   translate: "中A",
+  redraw: "V2V",
   erase: "⌫",
   paint: "◩",
 };

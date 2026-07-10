@@ -33,7 +33,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -856,7 +857,8 @@ label {
 }
 
 input,
-select {
+select,
+textarea {
   min-height: 46px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -866,8 +868,20 @@ select {
   outline: none;
 }
 
+textarea {
+  min-height: 118px;
+  resize: vertical;
+  line-height: 1.55;
+  padding: 12px;
+}
+
+.full-field {
+  grid-column: 1 / -1;
+}
+
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   border-color: rgba(49, 92, 255, 0.55);
   box-shadow: 0 0 0 3px rgba(49, 92, 255, 0.12);
 }
@@ -1953,8 +1967,10 @@ th {
 
 .zip-detail-dialog {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   width: min(720px, 100%);
-  max-height: min(720px, calc(100vh - 48px));
+  max-height: min(720px, calc(100dvh - 48px));
+  min-height: 0;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1993,7 +2009,9 @@ th {
 .zip-detail-list {
   display: grid;
   gap: 10px;
+  min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 14px;
 }
 
