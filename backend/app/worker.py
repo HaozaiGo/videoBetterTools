@@ -267,6 +267,8 @@ def _finalize_remote_gpu_result(task_id: str, provider_job_id: str, result: dict
                 result_url = str(status.get("result_url") or result.get("url") or storage.public_url(storage_key))
                 size_bytes = int(status.get("result_size_bytes") or result.get("size_bytes") or 0)
                 if status.get("result_storage_key") and status.get("result_url"):
+                    if storage.is_remote and not storage.remote_exists(storage_key):
+                        raise RemoteGpuUnavailableError(f"remote GPU result is not visible in storage yet: {storage_key}")
                     return {
                         "storage_key": storage_key,
                         "url": result_url,
@@ -355,16 +357,41 @@ def _mark_result_finalize_retrying(task_id: str, provider_job_id: str, progress_
         db.commit()
 
 
+def _is_input_asset_remote_missing(progress_stage: str) -> bool:
+    return "input asset is not available in remote storage" in progress_stage.lower()
+
+
 def _requeue_provider_job_for_gpu_unavailable(task_id: str, provider_job_id: str, progress_stage: str = "") -> None:
+    should_requeue = False
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
             return
+        params = dict(task.params or {})
+        retries = int(params.get("_gpuUnavailableRetries") or 0) + 1
+        params["_gpuUnavailableRetries"] = retries
+        task.params = params
+        max_retries = max(0, int(settings.gpu_unavailable_retry_max))
+        if retries > max_retries:
+            error_code = "INPUT_ASSET_REMOTE_MISSING" if _is_input_asset_remote_missing(progress_stage) else "REMOTE_GPU_UNAVAILABLE"
+            provider_callback(
+                db,
+                provider_job_id,
+                "failed",
+                callback_id=f"{provider_job_id}:gpu-unavailable-retries-exhausted",
+                error_code=error_code,
+                progress_stage=(progress_stage or "远端 GPU 暂不可用，已超过自动重试次数")[:160],
+            )
+            return
         task.status = "queued"
         task.error_code = None
         task.progress_percent = max(5, task.progress_percent)
-        task.progress_stage = "远端 GPU 暂不可用，等待自动重试"
+        task.progress_stage = f"远端 GPU 暂不可用，等待自动重试（{retries}/{max_retries}）"
         db.commit()
+        should_requeue = True
+
+    if not should_requeue:
+        return
 
     time.sleep(settings.gpu_unavailable_retry_delay_seconds)
 

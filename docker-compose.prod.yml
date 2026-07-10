@@ -127,6 +127,7 @@ services:
       AUTH_SECRET: ${AUTH_SECRET}
       ALLOW_DEMO_WITHOUT_AUTH: ${ALLOW_DEMO_WITHOUT_AUTH:-false}
       MODEL_PLAZA_WORKER_QUEUES: model-plaza-results
+      MODEL_PLAZA_WORKER_WITH_SCHEDULER: "true"
     volumes:
       - uploads:/data/uploads
     depends_on:

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 import app.services as services
 from app.models import Asset, Base, Task, User, Wallet
+from app.storage import StoredObject
 from app.services import create_internal_batch_zip, delete_tasks_from_list, get_task_result_access, get_task_result_url, internal_batch_status, now, paginated_tasks, plan_internal_batch_zip, retry_failed_task_single_gpu, retry_internal_batch_tasks, task_to_dict
 
 
@@ -427,6 +428,107 @@ def test_internal_batch_zip_recreates_stale_remote_marker(tmp_path, monkeypatch)
     assert archive["parts"][0]["remoteUrl"].startswith("https://tos.example.test/model-plaza/output/zips/")
     marker = json.loads(stale_marker.read_text(encoding="utf-8"))
     assert marker["storageKey"] == requested_payloads[0]["zip_storage_key"]
+
+
+def test_internal_batch_zip_restores_missing_tos_object_from_gpu_local_zip(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(services.settings, "internal_batch_zip_gpu_enabled", True)
+    monkeypatch.setattr(services.settings, "model_plaza_gpu_api_url", "https://gpu.example.test")
+
+    class FakeRemoteStorage:
+        is_remote = True
+
+        def __init__(self) -> None:
+            self.saved_files: list[tuple[str, bytes]] = []
+
+        def presign_download(self, storage_key: str, filename: str | None = None) -> str:
+            return f"https://upload-mmm.example.test/{storage_key}?filename={filename or ''}"
+
+        def remote_exists(self, storage_key: str) -> bool:
+            return any(saved_key == storage_key for saved_key, _content in self.saved_files)
+
+        def save_file(self, storage_key: str, local_path) -> StoredObject:
+            content = local_path.read_bytes()
+            self.saved_files.append((storage_key, content))
+            return StoredObject(storage_key=storage_key, public_url=f"https://upload-mmm.example.test/{storage_key}", size=len(content))
+
+    fake_storage = FakeRemoteStorage()
+    requested_payloads: list[dict] = []
+    downloaded_zip_ids: list[str] = []
+
+    def fake_remote_zip(payload: dict) -> dict:
+        requested_payloads.append(payload)
+        return {
+            "url": f"https://jkx-data.example.test/{payload['zip_storage_key']}",
+            "storage_key": payload["zip_storage_key"],
+            "size_bytes": 9999,
+        }
+
+    def fake_download_from_gpu(zip_id: str, target_path):
+        downloaded_zip_ids.append(zip_id)
+        target_path.write_bytes(b"gpu-local-zip")
+        return target_path
+
+    monkeypatch.setattr(services, "storage", fake_storage)
+    monkeypatch.setattr(services, "_request_remote_internal_batch_zip", fake_remote_zip)
+    monkeypatch.setattr(services, "_download_remote_internal_batch_zip_from_gpu", fake_download_from_gpu)
+
+    with Session(engine) as db:
+        user = User(id="user-restore-gpu-zip", email="restore-gpu-zip@example.com", name="Restore GPU Zip User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        input_asset = Asset(
+            id="restore-gpu-zip-input",
+            user_id=user.id,
+            kind="video",
+            original_name="clip.mp4",
+            mime_type="video/mp4",
+            storage_key="input.mp4",
+            url="https://upload-mmm.example.test/input.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        output_asset = Asset(
+            id="restore-gpu-zip-output",
+            user_id=user.id,
+            kind="video",
+            original_name="clip-result.mp4",
+            mime_type="video/mp4",
+            storage_key="model-plaza/output/videos/2026/07/02/restore-result.mp4",
+            url="https://upload-mmm.example.test/model-plaza/output/videos/2026/07/02/restore-result.mp4",
+            size_bytes=12,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="restore-gpu-zip-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=input_asset.id,
+            output_asset_id=output_asset.id,
+            status="succeeded",
+            params={"internalBatchId": "restore-gpu-zip-batch", "internalBatchName": "restore gpu zip"},
+            estimated_credits=0,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="restore-gpu-zip-provider",
+            output_url=output_asset.url,
+            progress_percent=100,
+            progress_stage="处理完成",
+        )
+        db.add_all([user, wallet, input_asset, output_asset, task])
+        db.commit()
+
+        archive = create_internal_batch_zip(db, user.id, "restore-gpu-zip-batch", part=1)
+
+    assert len(requested_payloads) == 1
+    assert downloaded_zip_ids == [requested_payloads[0]["zip_id"]]
+    assert fake_storage.saved_files == [(requested_payloads[0]["zip_storage_key"], b"gpu-local-zip")]
+    assert archive["parts"][0]["sizeBytes"] == len(b"gpu-local-zip")
+    assert archive["parts"][0]["remoteUrl"].startswith("https://upload-mmm.example.test/model-plaza/output/zips/")
 
 
 def test_completed_internal_batch_auto_enqueues_gpu_zip_prepare(tmp_path, monkeypatch) -> None:

@@ -688,6 +688,10 @@ def _result_upload_config(job_id: str) -> dict:
     return json.loads(config_path.read_text(encoding="utf-8"))
 
 
+def _should_upload_result(job_id: str) -> bool:
+    return UPLOAD_RESULTS or bool(_result_upload_config(job_id))
+
+
 def _upload_result_to_presigned_url(job_id: str, output_path: Path) -> dict | None:
     config = _result_upload_config(job_id)
     upload_url = str(config.get("upload_url") or "")
@@ -940,7 +944,7 @@ def _run_model_job(job_id: str) -> None:
                 )
         if not output_path.exists():
             raise RuntimeError("runner completed but output.mp4 was not created")
-        if not UPLOAD_RESULTS:
+        if not _should_upload_result(job_id):
             _write_status(
                 job_id,
                 status="succeeded",
@@ -1214,7 +1218,7 @@ def _watchdog_loop() -> None:
 
 def _recover_finished_job(job_id: str, output_path: Path) -> None:
     try:
-        if not UPLOAD_RESULTS:
+        if not _should_upload_result(job_id):
             _write_status(
                 job_id,
                 status="succeeded",
@@ -1468,6 +1472,16 @@ def run_cleanup(x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = No
 def create_internal_batch_zip(payload: dict, x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None) -> dict:
     _check_auth(x_api_key)
     return _create_internal_batch_zip_on_gpu(payload)
+
+
+@app.get("/internal-batch-zips/{zip_id}/download")
+def download_internal_batch_zip(zip_id: str, x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None):
+    _check_auth(x_api_key)
+    safe_zip_id = _safe_zip_id(zip_id)
+    zip_path = ZIP_RESULTS_ROOT / f"{safe_zip_id}.zip"
+    if not zip_path.exists() or not zip_path.is_file() or zip_path.stat().st_size <= 0:
+        raise HTTPException(status_code=404, detail="zip not found")
+    return FileResponse(zip_path, media_type="application/zip", filename=zip_path.name)
 
 
 @app.post("/jobs", status_code=202)

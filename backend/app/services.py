@@ -428,14 +428,18 @@ def _internal_batch_zip_remote_marker_path(zip_path: Path) -> Path:
     return zip_path.with_suffix(zip_path.suffix + ".remote.json")
 
 
-def _internal_batch_zip_remote_object_exists(marker: dict) -> bool:
-    storage_key = str(marker.get("storageKey") or "").strip()
+def _remote_storage_object_exists(storage_key: str) -> bool:
     if not storage.is_remote or not storage_key:
         return True
     remote_exists = getattr(storage, "remote_exists", None)
     if not callable(remote_exists):
         return True
     return bool(remote_exists(storage_key))
+
+
+def _internal_batch_zip_remote_object_exists(marker: dict) -> bool:
+    storage_key = str(marker.get("storageKey") or "").strip()
+    return _remote_storage_object_exists(storage_key)
 
 
 def _read_internal_batch_zip_remote_marker(zip_path: Path, verify_remote: bool = False) -> dict | None:
@@ -589,6 +593,45 @@ def _request_remote_internal_batch_zip(payload: dict) -> dict:
         raise HTTPException(status_code=502, detail=f"GPU zip failed: {exc}") from exc
 
 
+def _download_remote_internal_batch_zip_from_gpu(zip_id: str, target_path: Path) -> Path:
+    base_url = settings.model_plaza_gpu_api_url.rstrip("/")
+    url = f"{base_url}/internal-batch-zips/{quote(zip_id, safe='')}/download"
+    headers = {}
+    if settings.model_plaza_gpu_api_key:
+        headers["X-API-Key"] = settings.model_plaza_gpu_api_key
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with urllib.request.urlopen(request, timeout=settings.internal_batch_zip_gpu_timeout_seconds) as response:
+            with target_path.open("wb") as output_file:
+                shutil.copyfileobj(response, output_file)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise HTTPException(status_code=502, detail=f"GPU zip download failed: HTTP {exc.code}: {detail}") from exc
+    except (TimeoutError, urllib.error.URLError, OSError) as exc:
+        raise HTTPException(status_code=502, detail=f"GPU zip download failed: {exc}") from exc
+    if not _internal_batch_zip_exists(target_path):
+        raise HTTPException(status_code=502, detail="GPU zip download returned an empty file")
+    return target_path
+
+
+def _restore_internal_batch_zip_to_current_tos(zip_id: str, storage_key: str, filename: str, zip_path: Path) -> dict | None:
+    if not storage.is_remote or not storage_key or _remote_storage_object_exists(storage_key):
+        return None
+    temp_path = zip_path.with_suffix(f".{uuid4().hex}.gpu-download.tmp")
+    try:
+        downloaded_path = _download_remote_internal_batch_zip_from_gpu(zip_id, temp_path)
+        stored = storage.save_file(storage_key, downloaded_path)
+        return {
+            "url": stored.public_url,
+            "storageKey": stored.storage_key,
+            "sizeBytes": stored.size,
+            "filename": filename,
+        }
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def _create_remote_internal_batch_zip(batch: dict, task_summaries: list[dict], selected_part: dict) -> bool:
     if not _remote_internal_batch_zip_enabled():
         return False
@@ -608,6 +651,9 @@ def _create_remote_internal_batch_zip(batch: dict, task_summaries: list[dict], s
             "sizeBytes": int(result.get("size_bytes") or 0),
             "filename": selected_part["filename"],
         }
+        restored_marker = _restore_internal_batch_zip_to_current_tos(zip_path.stem, marker["storageKey"], selected_part["filename"], zip_path)
+        if restored_marker:
+            marker = restored_marker
         if not marker["url"] or marker["sizeBytes"] <= 0:
             raise HTTPException(status_code=502, detail="GPU zip returned an invalid result")
         marker_path = _internal_batch_zip_remote_marker_path(zip_path)

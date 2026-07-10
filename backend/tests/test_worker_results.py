@@ -1,6 +1,13 @@
 from pathlib import Path
+from datetime import timedelta
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 from app import worker
+from app.models import Asset, Base, Task, User, Wallet
+from app.services import now
 
 
 class FakeStorage:
@@ -24,6 +31,9 @@ class FakeStorage:
 
     def delete_local_copy(self, storage_key: str) -> bool:
         self.deleted.append(storage_key)
+        return True
+
+    def remote_exists(self, storage_key: str) -> bool:
         return True
 
 
@@ -52,6 +62,7 @@ def test_finalize_result_payload_uploads_local_file(monkeypatch, tmp_path) -> No
 
 
 def test_finalize_remote_gpu_result_uses_direct_upload_metadata(monkeypatch) -> None:
+    monkeypatch.setattr(worker, "storage", FakeStorage())
     monkeypatch.setattr(worker, "_sync_remote_gpu_progress", lambda *args, **kwargs: True)
     monkeypatch.setattr(
         worker,
@@ -81,3 +92,97 @@ def test_finalize_remote_gpu_result_uses_direct_upload_metadata(monkeypatch) -> 
         "mime_type": "video/mp4",
         "size_bytes": 123,
     }
+
+
+def test_finalize_remote_gpu_result_waits_for_uploaded_object_visibility(monkeypatch) -> None:
+    class InvisibleStorage:
+        is_remote = True
+
+        def remote_exists(self, storage_key: str) -> bool:
+            return False
+
+    monkeypatch.setattr(worker, "storage", InvisibleStorage())
+    monkeypatch.setattr(worker, "_sync_remote_gpu_progress", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        worker,
+        "get_remote_video_job",
+        lambda job_id: {
+            "status": "succeeded",
+            "result_storage_key": "model-plaza/output/videos/result.mp4",
+            "result_url": "https://cdn.example.test/model-plaza/output/videos/result.mp4",
+            "result_mime_type": "video/mp4",
+            "result_size_bytes": 123,
+        },
+    )
+    monkeypatch.setattr(worker, "cancel_remote_video_job", lambda job_id: None)
+
+    with pytest.raises(worker.RemoteGpuUnavailableError, match="not visible in storage yet"):
+        worker._finalize_remote_gpu_result(
+            "task-1",
+            "provider-1",
+            {
+                "remote_job_id": "remote-1",
+                "storage_key": "model-plaza/output/videos/result.mp4",
+                "url": "https://cdn.example.test/model-plaza/output/videos/result.mp4",
+            },
+        )
+
+
+def test_gpu_unavailable_retries_exhaust_to_failed(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        user = User(id="user-gpu-retry", email="gpu-retry@example.com", name="GPU Retry", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=10)
+        asset = Asset(
+            id="asset-gpu-retry",
+            user_id=user.id,
+            kind="input",
+            original_name="input.mp4",
+            mime_type="video/mp4",
+            storage_key="missing.mp4",
+            url="https://cdn.example.test/missing.mp4",
+            size_bytes=1024,
+            duration_seconds=70,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="task-gpu-retry",
+            user_id=user.id,
+            tool_slug="translate",
+            input_asset_id=asset.id,
+            status="queued",
+            params={"_gpuUnavailableRetries": 1},
+            estimated_credits=10,
+            frozen_credits=10,
+            provider="mock",
+            provider_job_id="provider-gpu-retry",
+            progress_percent=5,
+            progress_stage="远端 GPU 暂不可用，等待自动重试",
+        )
+        db.add_all([user, wallet, asset, task])
+        db.commit()
+
+    session_factory = lambda: Session(engine)
+    enqueued: list[str] = []
+    monkeypatch.setattr(worker, "SessionLocal", session_factory)
+    monkeypatch.setattr(worker.settings, "gpu_unavailable_retry_max", 1)
+    monkeypatch.setattr(worker, "enqueue_provider_job", lambda task_id: enqueued.append(task_id))
+
+    worker._requeue_provider_job_for_gpu_unavailable(
+        "task-gpu-retry",
+        "provider-gpu-retry",
+        "input asset is not available in remote storage after waiting 120s",
+    )
+
+    with Session(engine) as db:
+        task = db.get(Task, "task-gpu-retry")
+        wallet = db.get(Wallet, "user-gpu-retry")
+        assert task is not None
+        assert wallet is not None
+        assert task.status == "failed"
+        assert task.error_code == "INPUT_ASSET_REMOTE_MISSING"
+        assert task.params["_gpuUnavailableRetries"] == 2
+        assert wallet.frozen_credits == 0
+    assert enqueued == []

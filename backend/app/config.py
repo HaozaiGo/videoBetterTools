@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     cleanup_disk_low_watermark_percent: int = 75
     cleanup_disk_min_age_hours: int = 6
     cleanup_interval_seconds: int = 3600
+    gpu_unavailable_retry_max: int = 3
     gpu_unavailable_retry_delay_seconds: int = 60
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
