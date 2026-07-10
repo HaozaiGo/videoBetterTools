@@ -30,14 +30,13 @@ const defaultValues: ToolFormValues = {
   maskStrategy: "subtitle-text",
   textLightThreshold: 155,
   videoPrompt: "",
-  providerModel: "veo-3.1-generate-preview",
+  providerModel: "kling-video-o1-std",
   aspectRatio: "16:9",
 };
 
 const videoRedrawModels = [
-  { value: "veo-3.1-generate-preview", label: "Veo 3.1 Generate Preview" },
-  { value: "kling-video-o1-std", label: "Kling Video O1 Standard" },
-  { value: "kling-video-o1-pro", label: "Kling Video O1 Pro" },
+  { value: "kling-video-o1-std", label: "Pike Lova" },
+  { value: "kling-video-o1-pro", label: "Pike pro" },
 ] as const;
 
 function clamp(value: number) {
@@ -90,12 +89,18 @@ type BatchUploadItem = {
   error?: string;
 };
 
+type VideoFileMetadata = {
+  duration: number | null;
+  width: number;
+  height: number;
+};
+
 function fileBatchId(file: File, index: number) {
   return `${file.name}-${file.size}-${file.lastModified}-${index}`;
 }
 
-function readVideoDuration(file: File) {
-  return new Promise<number | null>((resolve) => {
+function readVideoMetadata(file: File) {
+  return new Promise<VideoFileMetadata | null>((resolve) => {
     if (!file.type.startsWith("video/")) {
       resolve(null);
       return;
@@ -110,8 +115,11 @@ function readVideoDuration(file: File) {
     video.preload = "metadata";
     video.onloadedmetadata = () => {
       const seconds = video.duration;
+      const duration = seconds && Number.isFinite(seconds) ? Math.max(1, Math.ceil(seconds)) : null;
+      const width = video.videoWidth || 0;
+      const height = video.videoHeight || 0;
       cleanup();
-      resolve(seconds && Number.isFinite(seconds) ? Math.max(1, Math.ceil(seconds)) : null);
+      resolve({ duration, width, height });
     };
     video.onerror = () => {
       cleanup();
@@ -127,6 +135,7 @@ export function ToolPage() {
   const { data } = useSuspenseQuery({ queryKey: ["bootstrap"], queryFn: getBootstrap });
   const [files, setFiles] = useState<File[]>([]);
   const [fileDurations, setFileDurations] = useState<Record<string, number>>({});
+  const [fileVideoMetadata, setFileVideoMetadata] = useState<Record<string, VideoFileMetadata>>({});
   const [batchItems, setBatchItems] = useState<BatchUploadItem[]>([]);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [notice, setNotice] = useState("");
@@ -170,6 +179,7 @@ export function ToolPage() {
     const nextFiles = files.filter((_, index) => index !== removeIndex);
     const nextRegionsByFileId: Record<string, WatermarkRegion[]> = {};
     const nextDurations: Record<string, number> = {};
+    const nextVideoMetadata: Record<string, VideoFileMetadata> = {};
     const nextBatchItems = nextFiles.map((item, index) => {
       const oldIndex = index >= removeIndex ? index + 1 : index;
       const oldId = fileBatchId(item, oldIndex);
@@ -180,6 +190,9 @@ export function ToolPage() {
       }
       if (fileDurations[oldId]) {
         nextDurations[nextId] = fileDurations[oldId];
+      }
+      if (fileVideoMetadata[oldId]) {
+        nextVideoMetadata[nextId] = fileVideoMetadata[oldId];
       }
       return {
         id: nextId,
@@ -197,6 +210,7 @@ export function ToolPage() {
     setBatchItems(nextBatchItems);
     setRegionsByFileId(nextRegionsByFileId);
     setFileDurations(nextDurations);
+    setFileVideoMetadata(nextVideoMetadata);
     setDraftRegion(null);
     setIsSelectingRegion(false);
     setSubmitProgress(null);
@@ -215,6 +229,7 @@ export function ToolPage() {
     if (!mergedFiles.length) return;
     setFiles(mergedFiles);
     setFileDurations({});
+    setFileVideoMetadata({});
     if (!options.append) {
       setActiveFileIndex(0);
     }
@@ -279,6 +294,7 @@ export function ToolPage() {
                       resolution: values.resolution === "1080p" ? "1080p" : "720p",
                       aspectRatio: values.aspectRatio,
                       providerModel: values.providerModel,
+                      keepAudio: values.keepAudio,
                     }
                   : taskValues;
       };
@@ -374,13 +390,15 @@ export function ToolPage() {
 
     Promise.all(
       files.map(async (item, index) => {
-        const duration = await readVideoDuration(item);
-        return [fileBatchId(item, index), duration] as const;
+        const metadata = await readVideoMetadata(item);
+        return [fileBatchId(item, index), metadata] as const;
       }),
     ).then((entries) => {
       if (cancelled) return;
-      const nextDurations = Object.fromEntries(entries.filter((entry): entry is readonly [string, number] => Boolean(entry[1])));
+      const metadataEntries = entries.filter((entry): entry is readonly [string, VideoFileMetadata] => Boolean(entry[1]));
+      const nextDurations = Object.fromEntries(metadataEntries.filter((entry) => Boolean(entry[1].duration)).map(([id, metadata]) => [id, metadata.duration as number]));
       setFileDurations(nextDurations);
+      setFileVideoMetadata(Object.fromEntries(metadataEntries));
     });
 
     return () => {
@@ -443,9 +461,22 @@ export function ToolPage() {
       }
     }
     if (isVideoRedrawTool && video?.videoWidth && video.videoHeight) {
+      if (selectedFileId) {
+        setFileVideoMetadata((items) => ({
+          ...items,
+          [selectedFileId]: {
+            duration: seconds && Number.isFinite(seconds) ? Math.max(1, Math.ceil(seconds)) : null,
+            width: video.videoWidth,
+            height: video.videoHeight,
+          },
+        }));
+      }
       const aspectRatio = video.videoWidth >= video.videoHeight * 1.2 ? "16:9" : video.videoHeight >= video.videoWidth * 1.2 ? "9:16" : "1:1";
       if (values.aspectRatio !== aspectRatio) {
         form.setFieldValue("aspectRatio", aspectRatio);
+      }
+      if (video.videoHeight < 700 || video.videoHeight > 2160) {
+        setNotice(`Pike 官方视频转绘要求输入视频高度在 700-2160px 之间；当前视频为 ${video.videoWidth}x${video.videoHeight}，请先转成 720p 或更高清晰度后再提交。`);
       }
     }
   };
@@ -550,6 +581,20 @@ export function ToolPage() {
             setNotice("请先输入视频转绘提示词。");
             return;
           }
+          if (isVideoRedrawTool) {
+            const invalidVideoIndex = files.findIndex((item, index) => {
+              const metadata = fileVideoMetadata[fileBatchId(item, index)];
+              return metadata?.height ? metadata.height < 700 || metadata.height > 2160 : false;
+            });
+            if (invalidVideoIndex >= 0) {
+              const metadata = fileVideoMetadata[fileBatchId(files[invalidVideoIndex], invalidVideoIndex)];
+              setActiveFileIndex(invalidVideoIndex);
+              setNotice(
+                `Pike 官方视频转绘要求输入视频高度在 700-2160px 之间；第 ${invalidVideoIndex + 1} 个视频为 ${metadata.width}x${metadata.height}，请先转成 720p 或更高清晰度后再提交。`,
+              );
+              return;
+            }
+          }
           if (isMaskVideoTool) {
             const firstMissingIndex = files.findIndex((item, index) => !(regionsByFileId[fileBatchId(item, index)] || []).length);
             if (firstMissingIndex >= 0) {
@@ -579,7 +624,7 @@ export function ToolPage() {
                 {isEnhanceTool ? <span>远端 GPU 超分</span> : null}
                 {isMaskVideoTool ? <span>区域框选修复</span> : null}
                 {isTranslateTool ? <span>多语言硬字幕</span> : null}
-                {isVideoRedrawTool ? <span>GPTProto 多模型</span> : null}
+                {isVideoRedrawTool ? <span>支持多模型</span> : null}
                 {tool.pricing.mode !== "image" ? <span>支持批处理</span> : null}
               </div>
             </div>
@@ -805,6 +850,22 @@ export function ToolPage() {
                     </label>
                   )}
                 </form.Field>
+                <form.Field name="aspectRatio">
+                  {(field) => (
+                    <label>
+                      输出画幅
+                      <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["aspectRatio"])}>
+                        <option value="16:9">横屏 16:9</option>
+                        <option value="9:16">竖屏 9:16</option>
+                        <option value="1:1">方形 1:1</option>
+                      </select>
+                    </label>
+                  )}
+                </form.Field>
+                <div className="official-input-note full-field">
+                  <strong>视频传入要求</strong>
+                  <span>视频高度需在 700-2160px，建议 720p 及以上；支持 16:9、9:16、1:1；时长按 3-10 秒提交；可选择保留原视频声音。</span>
+                </div>
                 <form.Field name="videoPrompt">
                   {(field) => (
                     <label className="full-field">
@@ -818,15 +879,11 @@ export function ToolPage() {
                     </label>
                   )}
                 </form.Field>
-                <form.Field name="aspectRatio">
+                <form.Field name="keepAudio">
                   {(field) => (
-                    <label>
-                      输出画幅
-                      <select value={field.state.value} onChange={(event) => field.handleChange(event.target.value as ToolFormValues["aspectRatio"])}>
-                        <option value="16:9">横屏 16:9</option>
-                        <option value="9:16">竖屏 9:16</option>
-                        <option value="1:1">方形 1:1</option>
-                      </select>
+                    <label className="checkbox-field">
+                      <input type="checkbox" checked={field.state.value} onChange={(event) => field.handleChange(event.target.checked)} />
+                      保留原声音
                     </label>
                   )}
                 </form.Field>

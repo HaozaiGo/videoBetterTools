@@ -879,6 +879,21 @@ textarea {
   grid-column: 1 / -1;
 }
 
+.official-input-note {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid rgba(49, 92, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(49, 92, 255, 0.06);
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.official-input-note strong {
+  color: var(--text);
+}
+
 input:focus,
 select:focus,
 textarea:focus {

@@ -80,7 +80,6 @@ export function ToolsPage() {
                   <p>{tool.summary}</p>
                   <div className="tool-meta">
                     <span>{tool.pricing.mode === "image" ? `每张 ${tool.pricing.unitCredits} 积分起` : `每 ${tool.pricing.unitSeconds} 秒 ${tool.pricing.unitCredits} 积分起`}</span>
-                    <span>{tool.provider?.includes("video") ? "GPU/Worker" : "供应商"}</span>
                     {tool.category === "video" && tool.status === "online" ? <span>支持批处理</span> : null}
                   </div>
                   {tool.status === "online" ? (

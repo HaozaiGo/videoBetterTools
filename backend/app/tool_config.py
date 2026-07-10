@@ -102,7 +102,7 @@ TOOLS = [
         "category": "video",
         "categoryName": "视频工具",
         "name": "视频转绘",
-        "summary": "上传原视频并输入转绘提示词，使用 GPTProto Veo 或 Kling 重新生成风格、主体或场景一致的视频。",
+        "summary": "上传原视频并输入转绘提示词，重新生成风格、主体或场景一致的视频。",
         "route": "/tools/video/video-redraw",
         "icon": "redraw",
         "status": "online",
@@ -115,7 +115,7 @@ TOOLS = [
             "resolutionMultiplier": {"720p": 1, "1080p": 1.5},
             "priorityMultiplier": {"standard": 1, "express": 1},
         },
-        "inputs": ["duration", "providerModel", "videoPrompt", "aspectRatio", "resolution"],
+        "inputs": ["duration", "providerModel", "keepAudio", "videoPrompt", "aspectRatio", "resolution"],
     },
     {
         "slug": "subtitle-translate-workflow",

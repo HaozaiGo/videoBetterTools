@@ -48,9 +48,9 @@ function paramSummary(task: Task) {
     params.providerModel === "veo-3.1-generate-preview"
       ? "Veo 3.1"
       : params.providerModel === "kling-video-o1-pro"
-        ? "Kling Video O1 Pro"
+        ? "Pike pro"
       : params.providerModel === "kling-video-o1-std" || params.providerModel === "kling-v3-omni-std"
-        ? "Kling Video O1 Std"
+        ? "Pike Lova"
         : "";
   const items = [
     modelLabel ? `模型 ${modelLabel}` : "",

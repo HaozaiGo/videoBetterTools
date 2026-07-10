@@ -202,11 +202,19 @@ def failure_reason_for_task(task: Task) -> str:
     if "translate command failed" in haystack:
         return "远端翻译/字幕生成链路失败。可重跑；如果多次失败，需检查翻译模型或上传链路日志。"
     if task.error_code == "GPTPROTO_VIDEO_REDRAW_FAILED":
+        if "video height should not be less than 700" in haystack or "height should not be less than 700" in haystack:
+            return "Pike 视频转绘要求输入视频高度在 700-2160px 之间。当前素材分辨率过低，请先转成 720p 或更高清晰度后再提交。"
+        if "aspect ratio must be specified" in haystack:
+            return "Pike 视频转绘缺少输出画幅参数，请选择 16:9、9:16 或 1:1 后重试。"
+        if "video can not be null" in haystack or "video cannot be null" in haystack:
+            return "Pike 视频转绘没有收到有效视频地址，请重新上传视频后再试。"
+        if "content policy" in haystack or "input may not meet the guidelines" in haystack:
+            return "Pike 供应商安全审核未通过，请调整视频内容或提示词后重试。"
         if "no channel found" in haystack or "channel configuration" in haystack:
             return "GPTProto 未给当前账号/模型配置可用通道。请确认使用文档中的模型名，或联系 GPTProto 管理员开通对应模型通道后再试。"
         if "http 429" in haystack:
             return "GPTProto 视频转绘触发 429 限流或通道不可用。请稍后重试，或联系 GPTProto 确认该模型通道状态。"
-        return "GPTProto 视频转绘失败。请检查 API Key、输入视频公网地址、提示词或供应商任务状态后重试。"
+        return "Pike 视频转绘失败。请检查视频是否可访问、分辨率/时长是否符合要求，或查看供应商返回的原始错误后重试。"
     if task.error_code == "VIDEO_PROCESSING_FAILED":
         return "远端视频处理失败，可能是模型报错、显存不足、视频编码不兼容或网络传输中断。"
     if task.error_code == "PROVIDER_FAILED":
