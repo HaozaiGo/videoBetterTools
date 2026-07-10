@@ -29,6 +29,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       UPLOAD_DIR: /data/uploads
       AUTH_SECRET: change-me-in-production
+      MODEL_PLAZA_WORKER_WITH_SCHEDULER: "true"
     ports:
       - "8010:8010"
     volumes:

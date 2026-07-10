@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     cleanup_interval_seconds: int = 3600
     gpu_unavailable_retry_max: int = 3
     gpu_unavailable_retry_delay_seconds: int = 60
+    gpu_queue_full_retry_delay_seconds: int = 300
+    gpu_queue_full_retry_max: int = 0
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

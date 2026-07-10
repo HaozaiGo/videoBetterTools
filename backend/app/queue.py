@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from redis import Redis
 from rq import Queue, Retry
 
@@ -24,8 +26,13 @@ def result_queue() -> Queue:
     return named_queue("model-plaza-results")
 
 
-def enqueue_provider_job(task_id: str) -> None:
-    task_queue().enqueue("app.worker.process_provider_job", task_id, job_timeout=settings.task_job_timeout_seconds, result_ttl=3600)
+def enqueue_provider_job(task_id: str, delay_seconds: int = 0) -> None:
+    queue = task_queue()
+    kwargs = {"job_timeout": settings.task_job_timeout_seconds, "result_ttl": 3600}
+    if delay_seconds > 0:
+        queue.enqueue_in(timedelta(seconds=delay_seconds), "app.worker.process_provider_job", task_id, **kwargs)
+        return
+    queue.enqueue("app.worker.process_provider_job", task_id, **kwargs)
 
 
 def _internal_batch_zip_retry() -> Retry | None:

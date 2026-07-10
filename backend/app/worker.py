@@ -363,7 +363,52 @@ def _is_input_asset_remote_missing(progress_stage: str) -> bool:
     return "input asset is not available in remote storage" in progress_stage.lower()
 
 
+def _is_remote_gpu_queue_full(progress_stage: str) -> bool:
+    return "queue is full" in progress_stage.lower()
+
+
+def _requeue_provider_job_for_gpu_queue_full(task_id: str, provider_job_id: str, progress_stage: str = "") -> None:
+    should_requeue = False
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
+            return
+        params = dict(task.params or {})
+        retries = int(params.get("_gpuQueueFullRetries") or 0) + 1
+        params["_gpuQueueFullRetries"] = retries
+        task.params = params
+        max_retries = max(0, int(settings.gpu_queue_full_retry_max))
+        if max_retries and retries > max_retries:
+            provider_callback(
+                db,
+                provider_job_id,
+                "failed",
+                callback_id=f"{provider_job_id}:gpu-queue-full-retries-exhausted",
+                error_code="REMOTE_GPU_QUEUE_FULL",
+                progress_stage=(progress_stage or "远端 GPU 队列已满，已超过自动重试次数")[:160],
+            )
+            return
+        task.status = "queued"
+        task.error_code = None
+        task.progress_percent = max(5, task.progress_percent)
+        if max_retries:
+            task.progress_stage = f"远端 GPU 队列已满，等待空位自动重试（{retries}/{max_retries}）"
+        else:
+            task.progress_stage = f"远端 GPU 队列已满，等待空位自动重试（第 {retries} 次）"
+        db.commit()
+        should_requeue = True
+
+    if not should_requeue:
+        return
+
+    enqueue_provider_job(task_id, delay_seconds=max(1, int(settings.gpu_queue_full_retry_delay_seconds)))
+
+
 def _requeue_provider_job_for_gpu_unavailable(task_id: str, provider_job_id: str, progress_stage: str = "") -> None:
+    if _is_remote_gpu_queue_full(progress_stage):
+        _requeue_provider_job_for_gpu_queue_full(task_id, provider_job_id, progress_stage)
+        return
+
     should_requeue = False
     with SessionLocal() as db:
         task = db.get(Task, task_id)

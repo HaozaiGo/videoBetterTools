@@ -8,6 +8,9 @@ class FakeQueue:
     def enqueue(self, *args, **kwargs) -> None:
         self.calls.append({"args": args, "kwargs": kwargs})
 
+    def enqueue_in(self, *args, **kwargs) -> None:
+        self.calls.append({"args": args, "kwargs": kwargs})
+
 
 def test_internal_batch_zip_enqueue_uses_retry_policy(monkeypatch) -> None:
     fake_queue = FakeQueue()
@@ -45,3 +48,16 @@ def test_result_finalize_enqueue_targets_result_queue(monkeypatch) -> None:
     call = fake_queue.calls[0]
     assert call["args"] == ("app.worker.finalize_provider_job_result", "task-1", "provider-1", result)
     assert call["kwargs"]["failure_ttl"] == 86400
+
+
+def test_provider_enqueue_can_delay_with_scheduler(monkeypatch) -> None:
+    fake_queue = FakeQueue()
+    monkeypatch.setattr(queue, "task_queue", lambda: fake_queue)
+
+    queue.enqueue_provider_job("task-1", delay_seconds=300)
+
+    call = fake_queue.calls[0]
+    delay = call["args"][0]
+    assert delay.total_seconds() == 300
+    assert call["args"][1:] == ("app.worker.process_provider_job", "task-1")
+    assert call["kwargs"]["result_ttl"] == 3600
