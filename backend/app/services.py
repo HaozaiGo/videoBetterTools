@@ -428,7 +428,17 @@ def _internal_batch_zip_remote_marker_path(zip_path: Path) -> Path:
     return zip_path.with_suffix(zip_path.suffix + ".remote.json")
 
 
-def _read_internal_batch_zip_remote_marker(zip_path: Path) -> dict | None:
+def _internal_batch_zip_remote_object_exists(marker: dict) -> bool:
+    storage_key = str(marker.get("storageKey") or "").strip()
+    if not storage.is_remote or not storage_key:
+        return True
+    remote_exists = getattr(storage, "remote_exists", None)
+    if not callable(remote_exists):
+        return True
+    return bool(remote_exists(storage_key))
+
+
+def _read_internal_batch_zip_remote_marker(zip_path: Path, verify_remote: bool = False) -> dict | None:
     marker_path = _internal_batch_zip_remote_marker_path(zip_path)
     if not marker_path.exists():
         return None
@@ -437,6 +447,9 @@ def _read_internal_batch_zip_remote_marker(zip_path: Path) -> dict | None:
     except (OSError, json.JSONDecodeError):
         return None
     if not marker.get("url") or int(marker.get("sizeBytes") or 0) <= 0:
+        return None
+    if verify_remote and not _internal_batch_zip_remote_object_exists(marker):
+        marker_path.unlink(missing_ok=True)
         return None
     return marker
 
@@ -580,13 +593,13 @@ def _create_remote_internal_batch_zip(batch: dict, task_summaries: list[dict], s
     if not _remote_internal_batch_zip_enabled():
         return False
     zip_path = Path(selected_part["path"])
-    if _read_internal_batch_zip_remote_marker(zip_path):
+    if _read_internal_batch_zip_remote_marker(zip_path, verify_remote=True):
         return True
     payload = _remote_internal_batch_zip_payload(batch, task_summaries, selected_part)
     if payload is None:
         return False
     with _locked_internal_batch_zip(zip_path):
-        if _read_internal_batch_zip_remote_marker(zip_path) or _internal_batch_zip_exists(zip_path):
+        if _read_internal_batch_zip_remote_marker(zip_path, verify_remote=True) or _internal_batch_zip_exists(zip_path):
             return True
         result = _request_remote_internal_batch_zip(payload)
         marker = {
@@ -616,7 +629,7 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: in
     db.close()
     for selected_part in selected_parts:
         zip_path = selected_part["path"]
-        if not _internal_batch_zip_exists(zip_path) and not _read_internal_batch_zip_remote_marker(zip_path):
+        if not _internal_batch_zip_exists(zip_path) and not _read_internal_batch_zip_remote_marker(zip_path, verify_remote=True):
             if _create_remote_internal_batch_zip(batch, task_summaries, selected_part):
                 continue
             with _locked_internal_batch_zip(zip_path):
@@ -638,7 +651,7 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: in
                     finally:
                         if temp_zip_path.exists():
                             temp_zip_path.unlink()
-        marker = _read_internal_batch_zip_remote_marker(zip_path)
+        marker = _read_internal_batch_zip_remote_marker(zip_path, verify_remote=True)
         if marker:
             selected_part["sizeBytes"] = int(marker["sizeBytes"])
             selected_part["storageKey"] = str(marker.get("storageKey") or "")

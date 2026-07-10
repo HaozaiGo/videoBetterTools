@@ -321,6 +321,114 @@ def test_internal_batch_zip_can_be_materialized_on_gpu_and_marked_ready(tmp_path
     assert manifest["parts"][0]["sizeBytes"] == 1234
 
 
+def test_internal_batch_zip_recreates_stale_remote_marker(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(services.settings, "internal_batch_zip_gpu_enabled", True)
+    monkeypatch.setattr(services.settings, "model_plaza_gpu_api_url", "https://gpu.example.test")
+
+    class FakeRemoteStorage:
+        is_remote = True
+
+        def __init__(self) -> None:
+            self.existing_keys: set[str] = set()
+
+        def presign_download(self, storage_key: str, filename: str | None = None) -> str:
+            return f"https://tos.example.test/{storage_key}?filename={filename or ''}"
+
+        def remote_exists(self, storage_key: str) -> bool:
+            return storage_key in self.existing_keys
+
+    fake_storage = FakeRemoteStorage()
+    requested_payloads: list[dict] = []
+
+    def fake_remote_zip(payload: dict) -> dict:
+        requested_payloads.append(payload)
+        fake_storage.existing_keys.add(payload["zip_storage_key"])
+        return {
+            "url": f"https://tos.example.test/{payload['zip_storage_key']}",
+            "storage_key": payload["zip_storage_key"],
+            "size_bytes": 4321,
+        }
+
+    monkeypatch.setattr(services, "storage", fake_storage)
+    monkeypatch.setattr(services, "_request_remote_internal_batch_zip", fake_remote_zip)
+
+    with Session(engine) as db:
+        user = User(id="user-stale-gpu-zip", email="stale-gpu-zip@example.com", name="Stale GPU Zip User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        input_asset = Asset(
+            id="stale-gpu-zip-input",
+            user_id=user.id,
+            kind="video",
+            original_name="clip.mp4",
+            mime_type="video/mp4",
+            storage_key="input.mp4",
+            url="https://tos.example.test/input.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        output_asset = Asset(
+            id="stale-gpu-zip-output",
+            user_id=user.id,
+            kind="video",
+            original_name="clip-result.mp4",
+            mime_type="video/mp4",
+            storage_key="model-plaza/output/videos/2026/07/02/stale-result.mp4",
+            url="https://tos.example.test/model-plaza/output/videos/2026/07/02/stale-result.mp4",
+            size_bytes=12,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="stale-gpu-zip-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=input_asset.id,
+            output_asset_id=output_asset.id,
+            status="succeeded",
+            params={"internalBatchId": "stale-gpu-zip-batch", "internalBatchName": "stale gpu zip"},
+            estimated_credits=0,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="stale-gpu-zip-provider",
+            output_url=output_asset.url,
+            progress_percent=100,
+            progress_stage="处理完成",
+        )
+        db.add_all([user, wallet, input_asset, output_asset, task])
+        db.commit()
+
+        manifest = plan_internal_batch_zip(db, user.id, "stale-gpu-zip-batch")
+        zip_path = manifest["parts"][0]["path"]
+        stale_marker = zip_path.with_suffix(zip_path.suffix + ".remote.json")
+        stale_marker.write_text(
+            json.dumps(
+                {
+                    "url": "https://tos.example.test/model-plaza/output/zips/stale/missing.zip",
+                    "storageKey": "model-plaza/output/zips/stale/missing.zip",
+                    "sizeBytes": 9999,
+                    "filename": "stale gpu zip.zip",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        archive = create_internal_batch_zip(db, user.id, "stale-gpu-zip-batch", part=1)
+
+    assert len(requested_payloads) == 1
+    assert archive["parts"][0]["sizeBytes"] == 4321
+    assert archive["parts"][0]["storageKey"] == requested_payloads[0]["zip_storage_key"]
+    assert archive["parts"][0]["remoteUrl"].startswith("https://tos.example.test/model-plaza/output/zips/")
+    marker = json.loads(stale_marker.read_text(encoding="utf-8"))
+    assert marker["storageKey"] == requested_payloads[0]["zip_storage_key"]
+
+
 def test_completed_internal_batch_auto_enqueues_gpu_zip_prepare(tmp_path, monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
