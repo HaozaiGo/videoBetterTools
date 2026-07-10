@@ -448,6 +448,13 @@ def _internal_batch_zip_size_bytes(zip_path: Path) -> int:
     return int(marker.get("sizeBytes") or 0) if marker else 0
 
 
+def _internal_batch_zip_remote_download_url(marker: dict, filename: str) -> str:
+    storage_key = str(marker.get("storageKey") or "").strip()
+    if storage_key and storage.is_remote:
+        return storage.presign_download(storage_key, filename)
+    return str(marker.get("url") or "")
+
+
 def _internal_batch_zip_process_lock(lock_path: Path) -> threading.Lock:
     lock_key = str(lock_path)
     with _INTERNAL_BATCH_ZIP_LOCKS_GUARD:
@@ -594,8 +601,8 @@ def _create_remote_internal_batch_zip(batch: dict, task_summaries: list[dict], s
         marker_path.parent.mkdir(parents=True, exist_ok=True)
         marker_path.write_text(json.dumps(marker, ensure_ascii=False, indent=2), encoding="utf-8")
         selected_part["sizeBytes"] = marker["sizeBytes"]
-        selected_part["remoteUrl"] = marker["url"]
         selected_part["storageKey"] = marker["storageKey"]
+        selected_part["remoteUrl"] = _internal_batch_zip_remote_download_url(marker, selected_part["filename"])
         return True
 
 
@@ -634,8 +641,8 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: in
         marker = _read_internal_batch_zip_remote_marker(zip_path)
         if marker:
             selected_part["sizeBytes"] = int(marker["sizeBytes"])
-            selected_part["remoteUrl"] = str(marker["url"])
             selected_part["storageKey"] = str(marker.get("storageKey") or "")
+            selected_part["remoteUrl"] = _internal_batch_zip_remote_download_url(marker, selected_part["filename"])
         else:
             selected_part["sizeBytes"] = zip_path.stat().st_size
 

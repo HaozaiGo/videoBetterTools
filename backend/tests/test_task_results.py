@@ -311,7 +311,8 @@ def test_internal_batch_zip_can_be_materialized_on_gpu_and_marked_ready(tmp_path
         archive = create_internal_batch_zip(db, user.id, "gpu-zip-batch", part=1)
 
         assert archive["parts"][0]["sizeBytes"] == 1234
-        assert archive["parts"][0]["remoteUrl"] == "https://tos.example.test/model-plaza/output/zips/batch/remote.zip"
+        assert archive["parts"][0]["remoteUrl"].startswith("https://tos.example.test/model-plaza/output/zips/")
+        assert archive["parts"][0]["remoteUrl"].endswith("?filename=gpu zip.zip")
         manifest = plan_internal_batch_zip(db, user.id, "gpu-zip-batch")
 
     assert requested_payloads[0]["entries"][0]["storage_key"] == output_storage_key
