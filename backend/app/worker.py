@@ -3,7 +3,7 @@ import os
 import time
 from pathlib import Path
 
-from rq import SimpleWorker, Worker
+from rq import SimpleWorker, Worker, get_current_job
 
 from app.config import settings
 from app.database import SessionLocal
@@ -11,7 +11,13 @@ from app.models import Asset, Task
 from app.queue import enqueue_provider_job, enqueue_result_finalize_job, named_queue, redis_connection, task_queue
 from app.services import create_internal_batch_zip, provider_callback
 from app.storage import storage
-from app.video.gpu_api import RemoteGpuError, cancel_remote_video_job, download_remote_video_result, get_remote_video_job
+from app.video.gpu_api import (
+    RemoteGpuError,
+    RemoteGpuUnavailableError,
+    cancel_remote_video_job,
+    download_remote_video_result,
+    get_remote_video_job,
+)
 from app.video.enhance import process_video_enhance
 from app.video.translate import process_video_translate
 from app.video.watermark import GpuUnavailableError, VideoProcessingError, process_subtitle_removal, process_watermark_removal
@@ -56,6 +62,14 @@ def finalize_provider_job_result(task_id: str, provider_job_id: str, result: dic
             finalized = _finalize_subtitle_translate_workflow_result(task_id, provider_job_id, result)
         else:
             finalized = _finalize_remote_gpu_result(task_id, provider_job_id, result) if result.get("remote_job_id") else _finalize_result_payload(result)
+    except RemoteGpuUnavailableError as exc:
+        logger.warning("Result finalize temporarily unavailable for task %s, will retry if possible: %s", task_id, exc)
+        if _result_finalize_retries_left() > 0:
+            _mark_result_finalize_retrying(task_id, provider_job_id, str(exc))
+            raise
+        logger.exception("Result finalize retries exhausted for task %s", task_id)
+        _fail_provider_job(provider_job_id, "RESULT_UPLOAD_FAILED", str(exc))
+        raise
     except Exception as exc:
         logger.exception("Failed to finalize result for task %s", task_id)
         _fail_provider_job(provider_job_id, "RESULT_UPLOAD_FAILED", str(exc))
@@ -232,7 +246,13 @@ def _finalize_remote_gpu_result(task_id: str, provider_job_id: str, result: dict
     last_status: dict = {}
     try:
         while time.time() < deadline:
-            status = get_remote_video_job(remote_job_id)
+            try:
+                status = get_remote_video_job(remote_job_id)
+            except RemoteGpuUnavailableError as exc:
+                last_status = {"status": "unavailable", "error": str(exc)}
+                logger.warning("Remote GPU status temporarily unavailable for job %s: %s", remote_job_id, exc)
+                time.sleep(interval)
+                continue
             last_status = status
             if not _sync_remote_gpu_progress(task_id, provider_job_id, remote_job_id, status):
                 return {
@@ -267,6 +287,8 @@ def _finalize_remote_gpu_result(task_id: str, provider_job_id: str, result: dict
             if state == "cancelled":
                 raise RemoteGpuError("remote GPU job was cancelled")
             time.sleep(interval)
+    except RemoteGpuUnavailableError:
+        raise
     except Exception:
         try:
             cancel_remote_video_job(remote_job_id)
@@ -313,6 +335,24 @@ def _finalize_subtitle_translate_workflow_result(task_id: str, provider_job_id: 
         except Exception:
             logger.warning("Failed to delete intermediate subtitle workflow object %s", intermediate["storage_key"], exc_info=True)
     return finalized
+
+
+def _result_finalize_retries_left() -> int:
+    job = get_current_job(connection=redis_connection())
+    if job is None:
+        return 0
+    retries_left = getattr(job, "retries_left", None)
+    return max(0, int(retries_left or 0))
+
+
+def _mark_result_finalize_retrying(task_id: str, provider_job_id: str, progress_stage: str) -> None:
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
+            return
+        task.progress_percent = max(95, min(task.progress_percent, 99))
+        task.progress_stage = f"结果回收暂时不可用，等待自动重试：{progress_stage}"[:160]
+        db.commit()
 
 
 def _requeue_provider_job_for_gpu_unavailable(task_id: str, provider_job_id: str, progress_stage: str = "") -> None:

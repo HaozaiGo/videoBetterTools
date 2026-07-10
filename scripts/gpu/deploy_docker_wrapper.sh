@@ -24,7 +24,12 @@ mkdir -p \
   "$SHARED_DIR/outputs" \
   "$SHARED_DIR/cache" \
   "$SHARED_DIR/home" \
-  "$RESULTS_DIR"
+  "$RESULTS_DIR" \
+  "$RESULTS_DIR/internal-batch-zips"
+
+# The systemd service may run with a reduced capability set, so even root
+# cannot rely on DAC override when this directory is owned by the deploy user.
+chmod -R a+rwX "$RESULTS_DIR"
 
 rsync -a --delete "$OLD_DIR/scripts/" "$DOCKER_DIR/app/scripts/"
 rsync -a --delete "$OLD_DIR/repos/" "$SHARED_DIR/repos/"

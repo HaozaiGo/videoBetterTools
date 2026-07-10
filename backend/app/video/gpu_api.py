@@ -38,7 +38,7 @@ def _request_json(request: urllib.request.Request, timeout: int = 30) -> dict:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        if exc.code in {429, 503}:
+        if exc.code in {408, 425, 429, 500, 502, 503, 504}:
             raise RemoteGpuUnavailableError(f"GPU API HTTP {exc.code}: {body}") from exc
         raise RemoteGpuError(f"GPU API HTTP {exc.code}: {body}") from exc
     except (TimeoutError, urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
@@ -153,8 +153,11 @@ def download_remote_video_result(job_id: str, output_path: Path) -> None:
                 return
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            last_error = RemoteGpuError(f"GPU API result HTTP {exc.code}: {body}")
-            if exc.code < 500 or attempt >= 3:
+            if exc.code >= 500 or exc.code in {408, 425, 429}:
+                last_error = RemoteGpuUnavailableError(f"GPU API result HTTP {exc.code} on attempt {attempt}/3: {body}")
+            else:
+                last_error = RemoteGpuError(f"GPU API result HTTP {exc.code}: {body}")
+            if not isinstance(last_error, RemoteGpuUnavailableError) or attempt >= 3:
                 raise last_error from exc
         except (TimeoutError, urllib.error.URLError, OSError, http.client.IncompleteRead) as exc:
             last_error = RemoteGpuUnavailableError(f"GPU API result download failed on attempt {attempt}/3: {exc}")

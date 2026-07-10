@@ -36,6 +36,14 @@ def _internal_batch_zip_retry() -> Retry | None:
     return Retry(max=max_retries, interval=[interval * (2**attempt) for attempt in range(max_retries)])
 
 
+def _result_finalize_retry() -> Retry | None:
+    max_retries = max(0, int(settings.result_finalize_retry_max))
+    if max_retries <= 0:
+        return None
+    interval = max(1, int(settings.result_finalize_retry_interval_seconds))
+    return Retry(max=max_retries, interval=[interval * (2**attempt) for attempt in range(max_retries)])
+
+
 def enqueue_internal_batch_zip(user_id: str, batch_id: str) -> None:
     internal_batch_zip_queue().enqueue(
         "app.worker.prepare_internal_batch_zip",
@@ -57,4 +65,5 @@ def enqueue_result_finalize_job(task_id: str, provider_job_id: str, result: dict
         job_timeout=settings.task_job_timeout_seconds,
         result_ttl=3600,
         failure_ttl=86400,
+        retry=_result_finalize_retry(),
     )

@@ -34,6 +34,7 @@ ROOT = Path(os.environ.get("MODEL_PLAZA_VIDEO_ROOT", "/data1/model-plaza-video-w
 JOBS_ROOT = Path(os.environ.get("MODEL_PLAZA_GPU_JOBS_ROOT", str(ROOT / "work" / "api-jobs"))).resolve()
 LOGS_ROOT = Path(os.environ.get("MODEL_PLAZA_GPU_LOGS_ROOT", str(ROOT / "logs"))).resolve()
 RESULTS_ROOT = Path(os.environ.get("MODEL_PLAZA_GPU_RESULTS_ROOT", "/data1/model-plaza-results")).resolve()
+ZIP_RESULTS_ROOT = RESULTS_ROOT / "internal-batch-zips"
 PROPAINTER_RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_PROPAINTER_RUNNER", str(ROOT / "scripts" / "propainter_runner.py"))).resolve()
 ENHANCE_RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_ENHANCE_RUNNER", str(ROOT / "scripts" / "video_enhance_runner.py"))).resolve()
 TRANSLATE_RUNNER_PATH = Path(os.environ.get("MODEL_PLAZA_TRANSLATE_RUNNER", str(ROOT / "scripts" / "video_translate_runner.py"))).resolve()
@@ -90,6 +91,7 @@ running_processes: dict[str, subprocess.Popen] = {}
 running_gpu_devices: dict[str, str] = {}
 running_progress_snapshots: dict[str, tuple[tuple[str, int, str], float, float]] = {}
 running_processes_lock = threading.Lock()
+job_admission_lock = threading.Lock()
 recover_lock = threading.Lock()
 cleanup_lock = threading.Lock()
 zip_locks: dict[str, threading.Lock] = {}
@@ -359,6 +361,10 @@ def _running_jobs_snapshot() -> list[dict]:
     return jobs
 
 
+def _active_job_count() -> int:
+    return len(_running_jobs_snapshot())
+
+
 def _gpu_metrics() -> dict:
     running_by_gpu = {gpu_device: 0 for gpu_device in GPU_DEVICE_IDS}
     with running_processes_lock:
@@ -568,6 +574,8 @@ def _upload_file_to_tos(object_key: str, local_path: Path) -> dict | None:
             break
         except Exception as exc:
             last_error = exc
+            if _is_tos_retryable_upload_error(str(exc)):
+                checkpoint_file.unlink(missing_ok=True)
             if attempt >= attempts:
                 raise
             time.sleep(min(60, max(1, _env_int("MODEL_PLAZA_TOS_UPLOAD_RETRY_BACKOFF_SECONDS", 5)) * attempt))
@@ -581,6 +589,25 @@ def _upload_file_to_tos(object_key: str, local_path: Path) -> dict | None:
     }
 
 
+def _is_tos_retryable_upload_error(error_text: str) -> bool:
+    return any(
+        marker in error_text
+        for marker in (
+            "CompletingStatusNoExpiration",
+            "Competing status not expiration",
+            "status_code': 409",
+            '"status_code": 409',
+        )
+    )
+
+
+def _retry_tos_object_key(object_key: str) -> str:
+    suffix = f"-retry-{uuid.uuid4().hex[:8]}"
+    if object_key.lower().endswith(".zip"):
+        return f"{object_key[:-4]}{suffix}.zip"
+    return f"{object_key}{suffix}"
+
+
 def _upload_file_to_tos_worker(object_key: str, local_path: str, queue) -> None:
     try:
         queue.put({"ok": True, "result": _upload_file_to_tos(object_key, Path(local_path))})
@@ -590,22 +617,38 @@ def _upload_file_to_tos_worker(object_key: str, local_path: str, queue) -> None:
 
 def _upload_file_to_tos_with_deadline(object_key: str, local_path: Path, timeout_env: str, default_timeout: int = 900) -> dict | None:
     timeout = int(os.environ.get(timeout_env, str(default_timeout)))
+    deadline = time.time() + timeout
+    attempts = max(1, _env_int("MODEL_PLAZA_TOS_DEADLINE_UPLOAD_ATTEMPTS", 3))
     context = get_context("spawn")
-    queue = context.Queue()
-    process = context.Process(target=_upload_file_to_tos_worker, args=(object_key, str(local_path), queue))
-    process.start()
-    process.join(timeout)
-    if process.is_alive():
-        process.terminate()
-        process.join(10)
-        raise RuntimeError(f"TOS upload exceeded total timeout {timeout}s")
-    if queue.empty():
-        raise RuntimeError("TOS upload worker exited without a result")
-    payload = queue.get()
-    if not payload.get("ok"):
-        raise RuntimeError(str(payload.get("error") or "TOS upload failed"))
-    result = payload.get("result")
-    return dict(result) if result else None
+    last_error = ""
+    for attempt in range(1, attempts + 1):
+        remaining = max(1, int(deadline - time.time()))
+        queue = context.Queue()
+        process = context.Process(target=_upload_file_to_tos_worker, args=(object_key, str(local_path), queue))
+        process.start()
+        process.join(remaining)
+        if process.is_alive():
+            process.terminate()
+            process.join(10)
+            raise RuntimeError(f"TOS upload exceeded total timeout {timeout}s")
+        if queue.empty():
+            last_error = "TOS upload worker exited without a result"
+        else:
+            payload = queue.get()
+            if payload.get("ok"):
+                result = payload.get("result")
+                return dict(result) if result else None
+            last_error = str(payload.get("error") or "TOS upload failed")
+        if attempt >= attempts or not _is_tos_retryable_upload_error(last_error):
+            raise RuntimeError(last_error)
+        sleep_seconds = min(
+            max(1, int(deadline - time.time())),
+            max(5, _env_int("MODEL_PLAZA_TOS_CONFLICT_RETRY_BACKOFF_SECONDS", 30)) * attempt,
+        )
+        if sleep_seconds <= 0:
+            raise RuntimeError(last_error)
+        time.sleep(sleep_seconds)
+    raise RuntimeError(last_error or "TOS upload failed")
 
 
 def _upload_result_to_tos(job_id: str, output_path: Path) -> dict | None:
@@ -1317,6 +1360,7 @@ def _safe_zip_id(value: str) -> str:
 def _create_internal_batch_zip_on_gpu(payload: dict) -> dict:
     zip_id = _safe_zip_id(str(payload.get("zip_id") or ""))
     filename = Path(str(payload.get("filename") or f"{zip_id}.zip")).name
+    local_filename = f"{zip_id}.zip"
     zip_storage_key = str(payload.get("zip_storage_key") or f"model-plaza/output/zips/{zip_id}.zip").strip("/")
     entries = payload.get("entries") or []
     summary = payload.get("summary") or {}
@@ -1326,9 +1370,12 @@ def _create_internal_batch_zip_on_gpu(payload: dict) -> dict:
     if not _tos_enabled():
         raise HTTPException(status_code=503, detail="TOS is not configured on GPU worker")
 
-    zip_dir = RESULTS_ROOT / "internal-batch-zips"
-    zip_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = zip_dir / filename
+    zip_dir = ZIP_RESULTS_ROOT
+    try:
+        zip_dir.mkdir(parents=True, exist_ok=True)
+    except PermissionError as exc:
+        raise HTTPException(status_code=503, detail=f"ZIP result directory is not writable: {zip_dir}") from exc
+    zip_path = zip_dir / local_filename
     with _zip_lock(zip_id):
         if not zip_path.exists() or zip_path.stat().st_size <= 0:
             temp_zip_path = zip_path.with_suffix(zip_path.suffix + f".{uuid.uuid4().hex}.tmp")
@@ -1341,9 +1388,21 @@ def _create_internal_batch_zip_on_gpu(payload: dict) -> dict:
                             raise HTTPException(status_code=400, detail="zip_name is required")
                         archive.write(_source_path_for_zip_entry(entry), zip_name)
                 temp_zip_path.replace(zip_path)
+            except PermissionError as exc:
+                raise HTTPException(status_code=503, detail=f"ZIP result path is not writable: {zip_path}") from exc
             finally:
                 temp_zip_path.unlink(missing_ok=True)
-        uploaded = _upload_file_to_tos_with_deadline(zip_storage_key, zip_path, "MODEL_PLAZA_GPU_ZIP_UPLOAD_TOTAL_TIMEOUT", 900)
+        try:
+            uploaded = _upload_file_to_tos_with_deadline(zip_storage_key, zip_path, "MODEL_PLAZA_GPU_ZIP_UPLOAD_TOTAL_TIMEOUT", 900)
+        except RuntimeError as exc:
+            if not _is_tos_retryable_upload_error(str(exc)):
+                raise
+            uploaded = _upload_file_to_tos_with_deadline(
+                _retry_tos_object_key(zip_storage_key),
+                zip_path,
+                "MODEL_PLAZA_GPU_ZIP_UPLOAD_TOTAL_TIMEOUT",
+                900,
+            )
         if not uploaded:
             raise HTTPException(status_code=503, detail="TOS upload is not available")
     _cleanup_result_cache_for_watermark()
@@ -1442,41 +1501,44 @@ async def create_job(
         raise HTTPException(status_code=400, detail="regions must be a non-empty JSON array")
     if not isinstance(params_json, dict):
         raise HTTPException(status_code=400, detail="params must be a JSON object")
+    with job_admission_lock:
+        if _active_job_count() >= MAX_WORKERS:
+            raise HTTPException(status_code=503, detail="GPU API queue is full")
 
-    job_id = uuid.uuid4().hex
-    job_dir = _job_dir(job_id)
-    if job_dir.exists():
-        shutil.rmtree(job_dir)
-    job_dir.mkdir(parents=True, exist_ok=True)
-    input_path = job_dir / "input.mp4"
-    if input_url:
-        _input_url_path(job_id).write_text(json.dumps({"input_url": input_url}, ensure_ascii=False), encoding="utf-8")
-    elif input_file:
-        input_path.write_bytes(await input_file.read())
-    else:
-        raise HTTPException(status_code=400, detail="input_file or input_url is required")
-    if result_upload_url:
-        try:
-            parsed_headers = json.loads(result_upload_headers or "{}")
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail="result_upload_headers must be valid JSON") from exc
-        if not isinstance(parsed_headers, dict):
-            raise HTTPException(status_code=400, detail="result_upload_headers must be a JSON object")
-        (job_dir / "result-upload.json").write_text(
-            json.dumps(
-                {
-                    "upload_url": result_upload_url,
-                    "headers": parsed_headers,
-                    "storage_key": result_storage_key or "",
-                    "url": result_url or "",
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-    (job_dir / "regions.json").write_text(json.dumps(regions_json, ensure_ascii=False), encoding="utf-8")
-    (job_dir / "params.json").write_text(json.dumps(params_json, ensure_ascii=False), encoding="utf-8")
-    _write_status(job_id, status="queued", job_type=job_type, created_at=time.time(), result_path="", error="", progress_percent=0, progress_stage="远端任务排队中")
+        job_id = uuid.uuid4().hex
+        job_dir = _job_dir(job_id)
+        if job_dir.exists():
+            shutil.rmtree(job_dir)
+        job_dir.mkdir(parents=True, exist_ok=True)
+        input_path = job_dir / "input.mp4"
+        if input_url:
+            _input_url_path(job_id).write_text(json.dumps({"input_url": input_url}, ensure_ascii=False), encoding="utf-8")
+        elif input_file:
+            input_path.write_bytes(await input_file.read())
+        else:
+            raise HTTPException(status_code=400, detail="input_file or input_url is required")
+        if result_upload_url:
+            try:
+                parsed_headers = json.loads(result_upload_headers or "{}")
+            except json.JSONDecodeError as exc:
+                raise HTTPException(status_code=400, detail="result_upload_headers must be valid JSON") from exc
+            if not isinstance(parsed_headers, dict):
+                raise HTTPException(status_code=400, detail="result_upload_headers must be a JSON object")
+            (job_dir / "result-upload.json").write_text(
+                json.dumps(
+                    {
+                        "upload_url": result_upload_url,
+                        "headers": parsed_headers,
+                        "storage_key": result_storage_key or "",
+                        "url": result_url or "",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        (job_dir / "regions.json").write_text(json.dumps(regions_json, ensure_ascii=False), encoding="utf-8")
+        (job_dir / "params.json").write_text(json.dumps(params_json, ensure_ascii=False), encoding="utf-8")
+        _write_status(job_id, status="queued", job_type=job_type, created_at=time.time(), result_path="", error="", progress_percent=0, progress_stage="远端任务排队中")
     executor.submit(_run_model_job, job_id)
     return {"job_id": job_id, "status": "queued", "status_url": f"/jobs/{job_id}", "result_url": f"/jobs/{job_id}/result"}
 
