@@ -188,6 +188,68 @@ def test_gpu_unavailable_retries_exhaust_to_failed(monkeypatch) -> None:
     assert enqueued == []
 
 
+def test_gpu_unavailable_requeues_with_delay(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        user = User(id="user-gpu-delay", email="gpu-delay@example.com", name="GPU Delay", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=10)
+        asset = Asset(
+            id="asset-gpu-delay",
+            user_id=user.id,
+            kind="input",
+            original_name="input.mp4",
+            mime_type="video/mp4",
+            storage_key="input.mp4",
+            url="https://cdn.example.test/input.mp4",
+            size_bytes=1024,
+            duration_seconds=70,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="task-gpu-delay",
+            user_id=user.id,
+            tool_slug="translate",
+            input_asset_id=asset.id,
+            status="queued",
+            params={"_gpuUnavailableRetries": 0},
+            estimated_credits=10,
+            frozen_credits=10,
+            provider="mock",
+            provider_job_id="provider-gpu-delay",
+            progress_percent=5,
+            progress_stage="远端 GPU 暂不可用，等待自动重试",
+        )
+        db.add_all([user, wallet, asset, task])
+        db.commit()
+
+    session_factory = lambda: Session(engine)
+    enqueued: list[tuple[str, int]] = []
+    monkeypatch.setattr(worker, "SessionLocal", session_factory)
+    monkeypatch.setattr(worker.settings, "gpu_unavailable_retry_max", 3)
+    monkeypatch.setattr(worker.settings, "gpu_unavailable_retry_delay_seconds", 120)
+    monkeypatch.setattr(worker, "enqueue_provider_job", lambda task_id, delay_seconds=0: enqueued.append((task_id, delay_seconds)))
+
+    worker._requeue_provider_job_for_gpu_unavailable(
+        "task-gpu-delay",
+        "provider-gpu-delay",
+        "temporary GPU API unavailable",
+    )
+
+    with Session(engine) as db:
+        task = db.get(Task, "task-gpu-delay")
+        wallet = db.get(Wallet, "user-gpu-delay")
+        assert task is not None
+        assert wallet is not None
+        assert task.status == "queued"
+        assert task.error_code is None
+        assert task.params["_gpuUnavailableRetries"] == 1
+        assert task.progress_stage == "远端 GPU 暂不可用，等待自动重试（1/3）"
+        assert wallet.frozen_credits == 10
+    assert enqueued == [("task-gpu-delay", 120)]
+
+
 def test_gpu_queue_full_requeues_without_exhausting_unavailable_retries(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

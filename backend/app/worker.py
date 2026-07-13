@@ -510,13 +510,7 @@ def _requeue_provider_job_for_gpu_unavailable(task_id: str, provider_job_id: str
     if not should_requeue:
         return
 
-    time.sleep(settings.gpu_unavailable_retry_delay_seconds)
-
-    with SessionLocal() as db:
-        task = db.get(Task, task_id)
-        if task is None or task.provider_job_id != provider_job_id or task.status != "queued":
-            return
-    enqueue_provider_job(task_id)
+    enqueue_provider_job(task_id, delay_seconds=max(1, int(settings.gpu_unavailable_retry_delay_seconds)))
 
 
 def _fail_provider_job(provider_job_id: str, error_code: str, progress_stage: str = "") -> None:
