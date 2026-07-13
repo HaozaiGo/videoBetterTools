@@ -37,6 +37,11 @@ class FakeStorage:
         return True
 
 
+class MissingRemoteStorage(FakeStorage):
+    def remote_exists(self, storage_key: str) -> bool:
+        return False
+
+
 def test_finalize_result_payload_uploads_local_file(monkeypatch, tmp_path) -> None:
     output = tmp_path / "result.mp4"
     output.write_bytes(b"video")
@@ -59,6 +64,60 @@ def test_finalize_result_payload_uploads_local_file(monkeypatch, tmp_path) -> No
     }
     assert fake_storage.saved == [("model-plaza/output/videos/result.mp4", output)]
     assert fake_storage.deleted == ["model-plaza/output/videos/result.mp4"]
+
+
+def test_real_video_task_fails_before_gpu_when_input_remote_missing(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        user = User(id="user-worker-missing", email="worker-missing@example.com", name="Worker Missing", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=10)
+        asset = Asset(
+            id="asset-worker-missing",
+            user_id=user.id,
+            kind="video",
+            original_name="missing.mp4",
+            mime_type="video/mp4",
+            storage_key="missing.mp4",
+            url="https://tos.example.test/missing.mp4",
+            size_bytes=1024,
+            duration_seconds=70,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="task-worker-missing",
+            user_id=user.id,
+            tool_slug="remove-subtitle",
+            input_asset_id=asset.id,
+            status="processing",
+            params={"modelAdapter": "propainter"},
+            estimated_credits=10,
+            frozen_credits=10,
+            provider="mock",
+            provider_job_id="provider-worker-missing",
+            progress_percent=5,
+            progress_stage="worker 已领取，准备提交远端任务",
+        )
+        db.add_all([user, wallet, asset, task])
+        db.commit()
+
+    session_factory = lambda: Session(engine)
+    monkeypatch.setattr(worker, "SessionLocal", session_factory)
+    monkeypatch.setattr(worker, "storage", MissingRemoteStorage())
+    monkeypatch.setattr(worker, "process_subtitle_removal", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("GPU should not be called")))
+
+    worker._process_real_video_task("task-worker-missing")
+
+    with Session(engine) as db:
+        task = db.get(Task, "task-worker-missing")
+        wallet = db.get(Wallet, "user-worker-missing")
+        assert task is not None
+        assert wallet is not None
+        assert task.status == "failed"
+        assert task.error_code == worker.INPUT_ASSET_REMOTE_MISSING_ERROR_CODE
+        assert task.progress_stage == worker.INPUT_ASSET_REMOTE_MISSING_MESSAGE
+        assert wallet.frozen_credits == 0
 
 
 def test_finalize_remote_gpu_result_uses_direct_upload_metadata(monkeypatch) -> None:

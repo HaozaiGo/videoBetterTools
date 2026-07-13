@@ -35,6 +35,8 @@ INTERNAL_BATCH_ZIP_SUMMARY_NAME = "_batch-summary.json"
 _INTERNAL_BATCH_ZIP_LOCKS: dict[str, threading.Lock] = {}
 _INTERNAL_BATCH_ZIP_LOCKS_GUARD = threading.Lock()
 logger = logging.getLogger("model_plaza.services")
+INPUT_ASSET_REMOTE_MISSING_ERROR_CODE = "INPUT_ASSET_REMOTE_MISSING"
+INPUT_ASSET_REMOTE_MISSING_MESSAGE = "输入视频对象存储不可读，请重新上传后重试"
 
 
 def now() -> datetime:
@@ -51,6 +53,19 @@ def is_expired(value: datetime | None) -> bool:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value <= now()
+
+
+def input_asset_is_remote_readable(input_asset: Asset) -> bool:
+    if not storage.is_remote:
+        return True
+    if input_asset.url and not input_asset.url.startswith(("http://", "https://")):
+        return True
+    return storage.remote_exists(input_asset.storage_key)
+
+
+def ensure_input_asset_remote_readable(input_asset: Asset) -> None:
+    if not input_asset_is_remote_readable(input_asset):
+        raise HTTPException(status_code=400, detail=INPUT_ASSET_REMOTE_MISSING_MESSAGE)
 
 
 def public_url(storage_key: str) -> str:
@@ -744,6 +759,7 @@ def retry_internal_batch_tasks(db: Session, user_id: str, batch_id: str) -> dict
         input_asset = db.get(Asset, task.input_asset_id)
         if input_asset is None or input_asset.user_id != user_id:
             raise HTTPException(status_code=400, detail=f"missing uploaded asset for task: {task.id}")
+        ensure_input_asset_remote_readable(input_asset)
         params = dict(task.params or {})
         estimate = estimate_credits(tool, {**params, "duration": params.get("duration") or input_asset.duration_seconds or 30})
         retry_specs.append((task, tool, estimate))
@@ -798,6 +814,7 @@ def retry_failed_task_single_gpu(db: Session, user_id: str, task_id: str) -> Tas
         raise HTTPException(status_code=400, detail="missing uploaded asset for task")
     if is_expired(input_asset.expires_at):
         raise HTTPException(status_code=400, detail="uploaded asset has expired")
+    ensure_input_asset_remote_readable(input_asset)
 
     params = dict(task.params or {})
     params.update(
@@ -1216,6 +1233,7 @@ def create_task(db: Session, user_id: str, tool_slug: str, input_asset_id: str, 
     input_asset = db.get(Asset, input_asset_id)
     if input_asset is None or input_asset.user_id != user_id:
         raise HTTPException(status_code=400, detail="missing uploaded asset")
+    ensure_input_asset_remote_readable(input_asset)
     if tool_slug == "video-redraw":
         if input_asset.kind != "video":
             raise HTTPException(status_code=400, detail="video redraw requires a video asset")

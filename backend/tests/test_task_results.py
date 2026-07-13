@@ -4,13 +4,15 @@ import json
 import time
 import zipfile
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 import app.services as services
 from app.models import Asset, Base, Task, User, Wallet
 from app.storage import StoredObject
-from app.services import create_internal_batch_zip, delete_tasks_from_list, get_task_result_access, get_task_result_url, internal_batch_status, now, paginated_tasks, plan_internal_batch_zip, retry_failed_task_single_gpu, retry_internal_batch_tasks, task_to_dict
+from app.services import create_internal_batch_zip, create_task, delete_tasks_from_list, get_task_result_access, get_task_result_url, internal_batch_status, now, paginated_tasks, plan_internal_batch_zip, retry_failed_task_single_gpu, retry_internal_batch_tasks, task_to_dict
 
 
 class FakeLocalStorage:
@@ -27,6 +29,19 @@ class FakeLocalStorage:
 
     def presign_download(self, storage_key: str, filename: str | None = None) -> str:
         raise AssertionError("local result should be served through the API")
+
+
+class FakeRemoteStorage:
+    is_remote = True
+
+    def __init__(self, existing_keys: set[str] | None = None) -> None:
+        self.existing_keys = existing_keys or set()
+
+    def remote_exists(self, storage_key: str) -> bool:
+        return storage_key in self.existing_keys
+
+    def public_url(self, storage_key: str) -> str:
+        return f"https://tos.example.test/{storage_key}"
 
 
 def test_local_output_asset_result_is_served_through_api(tmp_path, monkeypatch) -> None:
@@ -90,6 +105,43 @@ def test_local_output_asset_result_is_served_through_api(tmp_path, monkeypatch) 
     assert access["mode"] == "file"
     assert access["path"] == result_path
     assert access["mime_type"] == "video/mp4"
+
+
+def test_create_task_rejects_unreadable_remote_input(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services, "storage", FakeRemoteStorage())
+    enqueued: list[str] = []
+    monkeypatch.setattr(services, "enqueue_provider_job", enqueued.append)
+
+    with Session(engine) as db:
+        user = User(id="user-create-missing", email="create-missing@example.com", name="Create Missing", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        asset = Asset(
+            id="asset-create-missing",
+            user_id=user.id,
+            kind="video",
+            original_name="missing.mp4",
+            mime_type="video/mp4",
+            storage_key="missing.mp4",
+            url="https://tos.example.test/missing.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        db.add_all([user, wallet, asset])
+        db.commit()
+
+        with pytest.raises(HTTPException) as exc:
+            create_task(db, user.id, "remove-subtitle", asset.id, {"modelAdapter": "propainter"})
+        wallet_after = db.get(Wallet, user.id)
+        task_count = db.query(Task).count()
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == services.INPUT_ASSET_REMOTE_MISSING_MESSAGE
+    assert enqueued == []
+    assert task_count == 0
+    assert wallet_after.frozen_credits == 0
 
 
 def test_internal_batch_zip_includes_succeeded_tasks_when_batch_is_partial(tmp_path, monkeypatch) -> None:
@@ -714,6 +766,64 @@ def test_internal_batch_retry_resets_failed_and_cancelled_tasks(tmp_path, monkey
         assert task.progress_stage == "等待 worker 领取任务"
 
 
+def test_internal_batch_retry_rejects_unreadable_remote_input(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(services, "storage", FakeRemoteStorage())
+    enqueued: list[str] = []
+    monkeypatch.setattr(services, "enqueue_provider_job", enqueued.append)
+
+    batch_id = "batch-retry-missing"
+
+    with Session(engine) as db:
+        user = User(id="user-retry-missing", email="retry-missing@example.com", name="Retry Missing", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        asset = Asset(
+            id="retry-missing-asset",
+            user_id=user.id,
+            kind="video",
+            original_name="retry-missing.mp4",
+            mime_type="video/mp4",
+            storage_key="missing-input.mp4",
+            url="https://tos.example.test/missing-input.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="retry-missing-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=asset.id,
+            status="failed",
+            params={"internalBatchId": batch_id, "internalBatchName": "retry missing"},
+            estimated_credits=0,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="old-retry-missing",
+            error_code="INPUT_ASSET_REMOTE_MISSING",
+            progress_percent=0,
+            progress_stage="input missing",
+            completed_at=now(),
+        )
+        db.add_all([user, wallet, asset, task])
+        db.commit()
+
+        with pytest.raises(HTTPException) as exc:
+            retry_internal_batch_tasks(db, user.id, batch_id)
+        task_after = db.get(Task, task.id)
+        wallet_after = db.get(Wallet, user.id)
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == services.INPUT_ASSET_REMOTE_MISSING_MESSAGE
+    assert enqueued == []
+    assert task_after.status == "failed"
+    assert task_after.provider_job_id == "old-retry-missing"
+    assert wallet_after.frozen_credits == 0
+
+
 def test_failed_task_serializes_specific_failure_reason() -> None:
     task = Task(
         id="oom-task",
@@ -906,6 +1016,62 @@ def test_retry_failed_task_single_gpu_marks_exclusive_retry(tmp_path, monkeypatc
     assert retried.progress_stage == "等待 worker 领取任务（单卡独占重跑）"
     assert enqueued == ["task-single-gpu"]
     assert wallet_after.frozen_credits == retried.frozen_credits
+
+
+def test_retry_failed_task_single_gpu_rejects_unreadable_remote_input(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(services, "storage", FakeRemoteStorage())
+    enqueued: list[str] = []
+    monkeypatch.setattr(services, "enqueue_provider_job", enqueued.append)
+
+    with Session(engine) as db:
+        user = User(id="user-single-missing", email="single-missing@example.com", name="Single Missing", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        asset = Asset(
+            id="asset-single-missing",
+            user_id=user.id,
+            kind="video",
+            original_name="single-missing.mp4",
+            mime_type="video/mp4",
+            storage_key="single-missing.mp4",
+            url="https://tos.example.test/single-missing.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="task-single-missing",
+            user_id=user.id,
+            tool_slug="remove-subtitle",
+            input_asset_id=asset.id,
+            status="failed",
+            params={"modelAdapter": "propainter"},
+            estimated_credits=1,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="old-single-missing",
+            error_code="VIDEO_PROCESSING_FAILED",
+            progress_percent=0,
+            progress_stage="failed",
+            completed_at=now(),
+        )
+        db.add_all([user, wallet, asset, task])
+        db.commit()
+
+        with pytest.raises(HTTPException) as exc:
+            retry_failed_task_single_gpu(db, user.id, task.id)
+        task_after = db.get(Task, task.id)
+        wallet_after = db.get(Wallet, user.id)
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == services.INPUT_ASSET_REMOTE_MISSING_MESSAGE
+    assert enqueued == []
+    assert task_after.status == "failed"
+    assert task_after.provider_job_id == "old-single-missing"
+    assert wallet_after.frozen_credits == 0
 
 
 def test_internal_batch_zip_splits_large_batches_into_parts(tmp_path, monkeypatch) -> None:

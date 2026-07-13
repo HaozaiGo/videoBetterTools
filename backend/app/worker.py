@@ -9,7 +9,12 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models import Asset, Task
 from app.queue import enqueue_provider_job, enqueue_result_finalize_job, named_queue, redis_connection, task_queue
-from app.services import create_internal_batch_zip, provider_callback
+from app.services import (
+    INPUT_ASSET_REMOTE_MISSING_ERROR_CODE,
+    INPUT_ASSET_REMOTE_MISSING_MESSAGE,
+    create_internal_batch_zip,
+    provider_callback,
+)
 from app.storage import storage
 from app.video.gpu_api import (
     RemoteGpuError,
@@ -25,6 +30,25 @@ from app.video.watermark import GpuUnavailableError, VideoProcessingError, proce
 from app.video.workflow import process_subtitle_translate_workflow
 
 logger = logging.getLogger("model_plaza.worker")
+
+
+def _input_asset_remote_readable(input_asset: Asset) -> bool:
+    if not storage.is_remote:
+        return True
+    if input_asset.url and not input_asset.url.startswith(("http://", "https://")):
+        return True
+    return storage.remote_exists(input_asset.storage_key)
+
+
+def _fail_unreadable_input_asset(db, provider_job_id: str) -> None:
+    provider_callback(
+        db,
+        provider_job_id,
+        "failed",
+        callback_id=f"{provider_job_id}:input-asset-remote-missing",
+        error_code=INPUT_ASSET_REMOTE_MISSING_ERROR_CODE,
+        progress_stage=INPUT_ASSET_REMOTE_MISSING_MESSAGE,
+    )
 
 
 def prepare_internal_batch_zip(user_id: str, batch_id: str) -> None:
@@ -138,6 +162,9 @@ def _process_gptproto_video_redraw_task(task_id: str) -> None:
                 error_code="INPUT_ASSET_NOT_FOUND",
             )
             return
+        if not _input_asset_remote_readable(input_asset):
+            _fail_unreadable_input_asset(db, task.provider_job_id)
+            return
         provider_job_id = task.provider_job_id
         input_url = storage.presign_download(input_asset.storage_key, input_asset.original_name) if storage.is_remote else input_asset.url or ""
         params = dict(task.params or {})
@@ -202,6 +229,9 @@ def _process_real_video_task(task_id: str) -> None:
                 callback_id=f"{task.provider_job_id}:missing-input",
                 error_code="INPUT_ASSET_NOT_FOUND",
             )
+            return
+        if not _input_asset_remote_readable(input_asset):
+            _fail_unreadable_input_asset(db, task.provider_job_id)
             return
         provider_job_id = task.provider_job_id
         params = dict(task.params or {})
