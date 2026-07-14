@@ -225,6 +225,8 @@ def failure_reason_for_task(task: Task) -> str:
             return "Pike 视频转绘没有收到有效视频地址，请重新上传视频后再试。"
         if "content policy" in haystack or "input may not meet the guidelines" in haystack:
             return "Pike 供应商安全审核未通过，请调整视频内容或提示词后重试。"
+        if "handshake operation timed out" in haystack or "timed out" in haystack or "timeout" in haystack:
+            return "本地连接 GPTProto 查询结果超时，供应商任务可能仍在生成。请稍后重试；如果频繁出现，需要检查本地网络或代理到 GPTProto 的连接稳定性。"
         if "no channel found" in haystack or "channel configuration" in haystack:
             return "GPTProto 未给当前账号/模型配置可用通道。请确认使用文档中的模型名，或联系 GPTProto 管理员开通对应模型通道后再试。"
         if "http 429" in haystack:

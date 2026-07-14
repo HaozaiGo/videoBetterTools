@@ -82,6 +82,37 @@ def test_video_redraw_uses_kling_pro_gptproto_endpoint(monkeypatch, tmp_path) ->
     assert result["gptproto_model"] == "kling-video-o1-pro"
 
 
+def test_video_redraw_retries_transient_poll_timeout(monkeypatch, tmp_path) -> None:
+    get_attempts = 0
+    output = tmp_path / "result.mp4"
+    output.write_bytes(b"fake mp4")
+
+    def fake_request_json(url: str, payload=None, method="POST", token=None):
+        nonlocal get_attempts
+        if url.endswith("/video-to-video"):
+            return {"data": {"id": "kling-prediction-1", "urls": {"get": "https://gptproto.example.test/api/v3/predictions/kling-prediction-1/result"}}}
+        get_attempts += 1
+        if get_attempts == 1:
+            raise gptproto.GptProtoError("GPTProto request failed: <urlopen error _ssl.c:993: The handshake operation timed out>")
+        return {"data": {"status": "completed", "outputs": ["https://cdn.example.test/result.mp4"]}}
+
+    monkeypatch.setattr(gptproto, "_api_key", lambda: "sk-test")
+    monkeypatch.setattr(gptproto, "_base_url", lambda: "https://gptproto.example.test")
+    monkeypatch.setattr(gptproto, "_request_json", fake_request_json)
+    monkeypatch.setattr(gptproto, "_download_video", lambda url, task_id: output)
+    monkeypatch.setattr(gptproto.time, "sleep", lambda seconds: None)
+
+    result = gptproto.generate_video_redraw(
+        "https://cdn.example.test/input.mp4",
+        "task-1",
+        {"videoPrompt": "anime style", "providerModel": "kling-video-o1-std"},
+        lambda percent, stage: None,
+    )
+
+    assert get_attempts == 2
+    assert result["gptproto_model"] == "kling-video-o1-std"
+
+
 def test_video_redraw_maps_legacy_kling_omni_name(monkeypatch, tmp_path) -> None:
     requested_urls: list[str] = []
     output = tmp_path / "result.mp4"

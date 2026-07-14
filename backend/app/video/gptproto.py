@@ -1,4 +1,5 @@
 import json
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -69,25 +70,49 @@ def _request_json(url: str, payload: dict | None = None, method: str = "POST", t
     }
     if _api_key():
         headers["Authorization"] = _api_key()
-    request = urllib.request.Request(
-        url,
-        data=body,
-        method=method,
-        headers=headers,
-    )
+    request = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             data = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise GptProtoError(f"GPTProto request failed: HTTP {exc.code} {detail[:500]}") from exc
-    except urllib.error.URLError as exc:
+    except (urllib.error.URLError, TimeoutError, ssl.SSLError) as exc:
         raise GptProtoError(f"GPTProto request failed: {exc}") from exc
 
     try:
         return json.loads(data or "{}")
     except json.JSONDecodeError as exc:
         raise GptProtoError(f"GPTProto returned invalid JSON: {data[:500]}") from exc
+
+
+def _is_transient_network_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "connection reset",
+            "connection aborted",
+            "remote end closed",
+            "network is unreachable",
+        )
+    )
+
+
+def _request_json_with_retries(url: str, payload: dict | None = None, method: str = "POST", token: str | None = None, retries: int = 3) -> dict:
+    last_error: GptProtoError | None = None
+    for attempt in range(max(1, retries)):
+        try:
+            return _request_json(url, payload=payload, method=method, token=token)
+        except GptProtoError as exc:
+            last_error = exc
+            if attempt >= retries - 1 or not _is_transient_network_error(exc):
+                raise
+            time.sleep(min(8, 2 * (attempt + 1)))
+    raise last_error or GptProtoError("GPTProto request failed")
 
 
 def _operation_id(operation: dict) -> str:
@@ -206,22 +231,31 @@ def _download_video(url: str, task_id: str) -> Path:
     temp_dir = settings.upload_path / "gptproto-results"
     temp_dir.mkdir(parents=True, exist_ok=True)
     output_path = temp_dir / f"{task_id}-{uuid4().hex}.mp4"
-    try:
-        request = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 ModelPlaza/0.1"},
-        )
-        with urllib.request.urlopen(request, timeout=600) as response:
-            with output_path.open("wb") as output:
-                while True:
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    output.write(chunk)
-    except Exception as exc:
-        output_path.unlink(missing_ok=True)
-        raise GptProtoError(f"Failed to download GPTProto result: {exc}") from exc
-    return output_path
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 ModelPlaza/0.1"},
+            )
+            with urllib.request.urlopen(request, timeout=600) as response:
+                with output_path.open("wb") as output:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        output.write(chunk)
+            return output_path
+        except Exception as exc:
+            output_path.unlink(missing_ok=True)
+            last_error = exc
+            if isinstance(exc, urllib.error.HTTPError) and exc.code not in {429, 500, 502, 503, 504}:
+                break
+            if not _is_transient_network_error(exc) and not isinstance(exc, urllib.error.HTTPError):
+                break
+            if attempt < 2:
+                time.sleep(min(10, 2 * (attempt + 1)))
+    raise GptProtoError(f"Failed to download GPTProto result: {last_error}") from last_error
 
 
 def generate_video_redraw(
@@ -282,7 +316,14 @@ def generate_video_redraw(
             if cancel_marker.exists():
                 raise GptProtoCancelled("task was cancelled")
 
-            polled = _request_json(result_url, method="GET", token=api_token)
+            try:
+                polled = _request_json_with_retries(result_url, method="GET", token=api_token, retries=3)
+            except GptProtoError as exc:
+                if _is_transient_network_error(exc) and time.time() < deadline:
+                    progress(20, f"GPTProto {model_label} 查询超时，正在重试")
+                    time.sleep(interval)
+                    continue
+                raise
             last_operation = polled
             data = _prediction_data(polled)
             status = str(data.get("status") or polled.get("status") or "").lower()
@@ -334,7 +375,14 @@ def generate_video_redraw(
         if cancel_marker.exists():
             raise GptProtoCancelled("task was cancelled")
 
-        polled = _request_json(f"{operation_url}/{operation_id}", token=video_token)
+        try:
+            polled = _request_json_with_retries(f"{operation_url}/{operation_id}", token=video_token, retries=3)
+        except GptProtoError as exc:
+            if _is_transient_network_error(exc) and time.time() < deadline:
+                progress(20, f"GPTProto {model_label} 查询超时，正在重试")
+                time.sleep(interval)
+                continue
+            raise
         last_operation = polled
         if polled.get("done") is True:
             if polled.get("error"):
