@@ -21,7 +21,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers.set("Authorization", `Bearer ${token}`);
   }
   const response = await fetch(path, { ...init, headers });
-  const payload = await response.json();
+  let payload: unknown = {};
+  const text = await response.text();
+  try {
+    payload = parseResponsePayload<unknown>(text);
+  } catch {
+    payload = { error: text || response.statusText };
+  }
   if (!response.ok) {
     if (response.status === 401) {
       clearAuthToken();
@@ -29,7 +35,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         location.assign("/login");
       }
     }
-    throw new Error(payload.error || "请求失败");
+    throw new Error(getErrorMessage(payload));
   }
   return payload as T;
 }
@@ -575,6 +581,20 @@ export function uploadAdminInternalBatchMissingEpisode(input: { userId: string; 
     method: "POST",
     body: form,
   });
+}
+
+export function uploadAdminInternalBatchTaskRetry(input: { userId: string; batchId: string; taskId: string; file: File; durationSeconds?: number }) {
+  const form = new FormData();
+  form.set("userId", input.userId);
+  form.set("durationSeconds", String(input.durationSeconds || 0));
+  form.set("file", input.file);
+  return request<{ asset: Asset; task: Task; batch: InternalBatchStatus }>(
+    `/api/admin/internal-batches/${encodeURIComponent(input.batchId)}/tasks/${encodeURIComponent(input.taskId)}/upload-retry`,
+    {
+      method: "POST",
+      body: form,
+    },
+  );
 }
 
 export function getAdminInternalBatchZips(page = 1, perPage = 50, status: AdminInternalBatchZipStatus = "ready", name = "") {

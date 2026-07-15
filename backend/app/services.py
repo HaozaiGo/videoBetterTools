@@ -836,6 +836,70 @@ def retry_internal_batch_tasks(db: Session, user_id: str, batch_id: str, at_fron
     return {"retried": len(retried_ids), "taskIds": retried_ids, "batch": internal_batch_status(db, user_id, batch_id)}
 
 
+def retry_internal_batch_task_with_replacement_asset(
+    db: Session,
+    user_id: str,
+    batch_id: str,
+    task_id: str,
+    input_asset_id: str,
+    duration_seconds: int = 0,
+    at_front: bool = True,
+) -> dict:
+    task = db.execute(
+        select(Task)
+        .where(Task.id == task_id, Task.user_id == user_id)
+        .options(selectinload(Task.input_asset))
+        .with_for_update()
+    ).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    params = dict(task.params or {})
+    if task.tool_slug != "subtitle-translate-workflow" or str(params.get("internalBatchId") or "") != batch_id:
+        raise HTTPException(status_code=400, detail="task does not belong to this internal batch")
+    if task.status not in {"failed", "cancelled"}:
+        raise HTTPException(status_code=409, detail="only failed or cancelled tasks can be replaced and retried")
+
+    replacement_asset = db.get(Asset, input_asset_id)
+    if replacement_asset is None or replacement_asset.user_id != user_id:
+        raise HTTPException(status_code=400, detail="missing uploaded replacement asset")
+    ensure_input_asset_remote_readable(replacement_asset)
+
+    tool = get_tool(task.tool_slug)
+    if tool is None or tool["status"] != "online":
+        raise HTTPException(status_code=400, detail=f"tool is not available: {task.tool_slug}")
+    if duration_seconds > 0:
+        params["duration"] = duration_seconds
+    elif replacement_asset.duration_seconds:
+        params["duration"] = replacement_asset.duration_seconds
+    estimate = estimate_credits(tool, {**params, "duration": params.get("duration") or replacement_asset.duration_seconds or 30})
+    wallet = get_wallet(db, user_id, lock=True)
+    if wallet.credits - wallet.frozen_credits < estimate:
+        raise HTTPException(status_code=402, detail="insufficient credits")
+
+    task.input_asset_id = replacement_asset.id
+    task.params = params
+    task.status = "queued"
+    task.provider_job_id = f"mock_{uuid4()}"
+    task.estimated_credits = estimate
+    task.frozen_credits = estimate
+    task.charged_credits = 0
+    task.error_code = None
+    task.progress_percent = 0
+    task.progress_stage = "补传视频后插队重跑，等待 worker 领取任务"
+    task.output_asset_id = None
+    task.output_url = ""
+    task.completed_at = None
+    wallet.frozen_credits += estimate
+    add_ledger(db, user_id, "freeze", 0, f"{tool['name']} 补传重跑，冻结 {estimate} 积分", task.id)
+    cancel_marker = settings.upload_path / f"{task.id}.cancel"
+    cancel_marker.unlink(missing_ok=True)
+
+    db.commit()
+    db.refresh(task)
+    enqueue_provider_job(task.id, at_front=at_front)
+    return {"task": task_to_dict(task), "batch": internal_batch_status(db, user_id, batch_id)}
+
+
 def retry_failed_task_single_gpu(db: Session, user_id: str, task_id: str) -> Task:
     task = db.execute(
         select(Task)
@@ -1277,7 +1341,7 @@ def complete_multipart_upload(db: Session, user_id: str, upload_id: str) -> Asse
     return asset
 
 
-def create_task(db: Session, user_id: str, tool_slug: str, input_asset_id: str, params: dict) -> Task:
+def create_task(db: Session, user_id: str, tool_slug: str, input_asset_id: str, params: dict, at_front: bool = False) -> Task:
     tool = get_tool(tool_slug)
     if tool is None or tool["status"] != "online":
         raise HTTPException(status_code=400, detail="tool is not available")
@@ -1323,7 +1387,7 @@ def create_task(db: Session, user_id: str, tool_slug: str, input_asset_id: str, 
     add_ledger(db, user_id, "freeze", 0, f"{tool['name']} 冻结 {estimate} 积分", task.id)
     db.commit()
     db.refresh(task)
-    enqueue_provider_job(task.id)
+    enqueue_provider_job(task.id, at_front=at_front)
     return task
 
 

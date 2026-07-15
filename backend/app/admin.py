@@ -379,7 +379,7 @@ def admin_create_internal_batch_missing_task(db: Session, user_id: str, batch_id
     if duration_seconds > 0:
         params["duration"] = duration_seconds
 
-    task = create_task(db, user_id, "subtitle-translate-workflow", input_asset_id, params)
+    task = create_task(db, user_id, "subtitle-translate-workflow", input_asset_id, params, at_front=True)
     return {"task": task_to_dict(task), "batch": internal_batch_status(db, user_id, batch_id)}
 
 

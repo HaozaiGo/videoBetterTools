@@ -1410,6 +1410,26 @@ dd {
   font-weight: 800;
 }
 
+.inline-error-message,
+.inline-success-message {
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.inline-error-message {
+  border: 1px solid rgba(229, 72, 77, 0.24);
+  background: rgba(229, 72, 77, 0.08);
+  color: var(--danger);
+}
+
+.inline-success-message {
+  border: 1px solid rgba(21, 183, 158, 0.22);
+  background: rgba(21, 183, 158, 0.08);
+  color: var(--good);
+}
+
 .internal-batch-detail-row td {
   background: var(--soft);
   padding: 0;

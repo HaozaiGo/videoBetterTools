@@ -396,8 +396,8 @@ def test_admin_create_internal_batch_missing_task_uses_template_params(tmp_path,
     Base.metadata.create_all(engine)
     monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path / "uploads"))
     monkeypatch.setattr(services, "storage", FakeLocalStorage(tmp_path))
-    enqueued: list[str] = []
-    monkeypatch.setattr(services, "enqueue_provider_job", lambda task_id: enqueued.append(task_id))
+    enqueued: list[tuple[str, bool]] = []
+    monkeypatch.setattr(services, "enqueue_provider_job", lambda task_id, at_front=False: enqueued.append((task_id, at_front)))
 
     with Session(engine) as db:
         user = User(id="batch-user", email="batch@example.com", name="Batch User", role="user", status="active")
@@ -497,7 +497,7 @@ def test_admin_create_internal_batch_missing_task_uses_template_params(tmp_path,
         assert "remoteGpuJobId" not in created_task.params
         assert payload["batch"]["created"] == 3
 
-    assert enqueued == [created_task_id]
+    assert enqueued == [(created_task_id, True)]
 
 
 def test_admin_internal_batch_zips_deletes_processing_row_without_zip(tmp_path, monkeypatch) -> None:

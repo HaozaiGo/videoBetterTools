@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 import app.services as services
 from app.models import Asset, Base, Task, User, Wallet
 from app.storage import StoredObject
-from app.services import create_internal_batch_zip, create_task, delete_tasks_from_list, get_task_result_access, get_task_result_url, internal_batch_status, now, paginated_tasks, plan_internal_batch_zip, retry_failed_task_single_gpu, retry_internal_batch_tasks, task_to_dict
+from app.services import create_internal_batch_zip, create_task, delete_tasks_from_list, get_task_result_access, get_task_result_url, internal_batch_status, now, paginated_tasks, plan_internal_batch_zip, retry_failed_task_single_gpu, retry_internal_batch_task_with_replacement_asset, retry_internal_batch_tasks, task_to_dict
 
 
 class FakeLocalStorage:
@@ -888,6 +888,88 @@ def test_internal_batch_retry_can_enqueue_at_front(tmp_path, monkeypatch) -> Non
 
     assert result["retried"] == 1
     assert enqueued == [("retry-front-task", True)]
+
+
+def test_internal_batch_retry_can_replace_unreadable_input_and_enqueue_front(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(services, "storage", FakeRemoteStorage(existing_keys={"replacement-input.mp4"}))
+    enqueued: list[tuple[str, bool]] = []
+
+    def fake_enqueue(task_id: str, at_front: bool = False) -> None:
+        enqueued.append((task_id, at_front))
+
+    monkeypatch.setattr(services, "enqueue_provider_job", fake_enqueue)
+
+    with Session(engine) as db:
+        user = User(id="user-replace-input", email="replace-input@example.com", name="Replace Input", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        old_asset = Asset(
+            id="old-input",
+            user_id=user.id,
+            kind="video",
+            original_name="old.mp4",
+            mime_type="video/mp4",
+            storage_key="missing-input.mp4",
+            url="https://tos.example.test/missing-input.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        replacement_asset = Asset(
+            id="replacement-input",
+            user_id=user.id,
+            kind="video",
+            original_name="replacement.mp4",
+            mime_type="video/mp4",
+            storage_key="replacement-input.mp4",
+            url="https://tos.example.test/replacement-input.mp4",
+            size_bytes=10,
+            duration_seconds=12,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="replace-input-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=old_asset.id,
+            output_asset_id=None,
+            status="failed",
+            params={"internalBatchId": "batch-replace-input", "internalBatchName": "replace input batch", "internalBatchIndex": 2},
+            estimated_credits=0,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="old-replace-provider",
+            error_code="INPUT_ASSET_REMOTE_MISSING",
+            output_url="",
+            progress_percent=55,
+            progress_stage="输入视频对象存储不可读，请重新上传后重试",
+            completed_at=now(),
+        )
+        db.add_all([user, wallet, old_asset, replacement_asset, task])
+        db.commit()
+
+        result = retry_internal_batch_task_with_replacement_asset(
+            db,
+            user.id,
+            "batch-replace-input",
+            task.id,
+            replacement_asset.id,
+            duration_seconds=12,
+            at_front=True,
+        )
+        retried = db.get(Task, task.id)
+        assert retried is not None
+        assert result["task"]["id"] == "replace-input-task"
+        assert retried.input_asset_id == "replacement-input"
+        assert retried.status == "queued"
+        assert retried.params["duration"] == 12
+        assert retried.error_code is None
+        assert retried.completed_at is None
+
+    assert enqueued == [("replace-input-task", True)]
 
 
 def test_internal_batch_retry_rejects_unreadable_remote_input(tmp_path, monkeypatch) -> None:

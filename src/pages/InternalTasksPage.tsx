@@ -1,6 +1,6 @@
 import { Fragment, type FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { getAdminInternalBatches, getAdminInternalBatchStatus, regenerateAdminInternalBatchZip, retryAdminInternalBatchTasks, uploadAdminInternalBatchMissingEpisode } from "../api/client";
+import { getAdminInternalBatches, getAdminInternalBatchStatus, regenerateAdminInternalBatchZip, retryAdminInternalBatchTasks, uploadAdminInternalBatchMissingEpisode, uploadAdminInternalBatchTaskRetry } from "../api/client";
 import { formatDate } from "../lib/format";
 import type { AdminInternalBatch, AdminInternalBatchStatus, Task, TaskStatus } from "../types";
 
@@ -71,6 +71,7 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState("");
   const [uploadingEpisode, setUploadingEpisode] = useState<number | null>(null);
+  const [uploadingTaskId, setUploadingTaskId] = useState("");
   const detailQuery = useQuery({
     queryKey: ["admin-internal-batch-detail", batch.userId, batch.batchId],
     queryFn: () => getAdminInternalBatchStatus(batch.userId, batch.batchId),
@@ -104,6 +105,21 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
       setUploadingEpisode(null);
     },
   });
+  const taskUploadRetryMutation = useMutation({
+    mutationFn: ({ taskId, file }: { taskId: string; file: File }) =>
+      uploadAdminInternalBatchTaskRetry({ userId: batch.userId, batchId: batch.batchId, taskId, file }),
+    onSuccess: (payload, variables) => {
+      setMessage(`已补传并插队重跑任务 ${variables.taskId}`);
+      setUploadingTaskId("");
+      queryClient.setQueryData(["admin-internal-batch-detail", batch.userId, batch.batchId], payload.batch);
+      queryClient.invalidateQueries({ queryKey: ["admin-internal-batches"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-gpu"] });
+    },
+    onError: (error) => {
+      setMessage(error instanceof Error ? error.message : "补传重跑失败");
+      setUploadingTaskId("");
+    },
+  });
   const detail = detailQuery.data;
   const retryableCount = (detail?.failed || 0) + (detail?.cancelled || 0);
   const rows = detail ? episodeRows(detail.tasks, detail.total) : [];
@@ -115,6 +131,13 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
     missingUploadMutation.mutate({ episode, file });
   }
 
+  function uploadRetryTask(taskId: string, file: File | undefined) {
+    if (!file) return;
+    setUploadingTaskId(taskId);
+    setMessage("");
+    taskUploadRetryMutation.mutate({ taskId, file });
+  }
+
   return (
     <div className="internal-batch-detail-card">
       <div className="internal-batch-detail-head">
@@ -123,7 +146,6 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
           <span>
             {detail ? `完成 ${detail.succeeded}/${detail.total}，失败 ${detail.failed}，处理中 ${detail.processing}` : "正在读取批次明细"}
           </span>
-          {message ? <em>{message}</em> : null}
         </div>
         <div>
           <button className="ghost compact" type="button" onClick={() => detailQuery.refetch()} disabled={detailQuery.isFetching}>
@@ -134,6 +156,7 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
           </button>
         </div>
       </div>
+      {message ? <div className={message.includes("失败") || message.includes("insufficient") || message.includes("missing") ? "inline-error-message" : "inline-success-message"}>{message}</div> : null}
       <div className="internal-episode-list">
         <table>
           <thead>
@@ -162,7 +185,7 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
                         className="visually-hidden"
                         type="file"
                         accept="video/*"
-                        disabled={missingUploadMutation.isPending}
+                        disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending}
                         onChange={(event) => {
                           uploadMissingEpisode(row.episode, event.target.files?.[0]);
                           event.target.value = "";
@@ -171,7 +194,7 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
                       <button
                         className="ghost compact"
                         type="button"
-                        disabled={missingUploadMutation.isPending}
+                        disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending}
                         onClick={() => document.getElementById(`missing-upload-${batch.batchId}-${row.episode}`)?.click()}
                       >
                         {uploadingEpisode === row.episode ? "补传中" : "补传视频"}
@@ -193,7 +216,33 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
                       </div>
                     </td>
                     <td>{formatDate(row.task.completedAt)}</td>
-                    <td>-</td>
+                    <td>
+                      {row.task.status === "failed" || row.task.status === "cancelled" ? (
+                        <>
+                          <input
+                            id={`task-upload-retry-${row.task.id}`}
+                            className="visually-hidden"
+                            type="file"
+                            accept="video/*"
+                            disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending}
+                            onChange={(event) => {
+                              uploadRetryTask(row.task.id, event.target.files?.[0]);
+                              event.target.value = "";
+                            }}
+                          />
+                          <button
+                            className="ghost compact"
+                            type="button"
+                            disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending}
+                            onClick={() => document.getElementById(`task-upload-retry-${row.task.id}`)?.click()}
+                          >
+                            {uploadingTaskId === row.task.id ? "补传中" : "补传重跑"}
+                          </button>
+                        </>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
                   </tr>
                 ),
               )
