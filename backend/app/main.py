@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from app.admin import admin_delete_internal_batch_zips, admin_gpu_metrics, admin_internal_batches, admin_internal_batch_zips, admin_ledger, admin_summary, admin_tasks, admin_users
+from app.admin import admin_create_internal_batch_missing_task, admin_delete_internal_batch_zips, admin_gpu_metrics, admin_internal_batches, admin_internal_batch_zips, admin_ledger, admin_regenerate_internal_batch_zip, admin_summary, admin_tasks, admin_users
 from app.auth import admin_user, create_token, current_user, find_user_by_email, verify_password
 from app.config import settings
 from app.database import SessionLocal, get_db
@@ -440,6 +440,31 @@ def admin_internal_batch_retry_endpoint(
     _admin: User = Depends(admin_user),
 ) -> dict:
     return retry_internal_batch_tasks(db, user_id, batch_id, at_front=True)
+
+
+@app.post("/api/admin/internal-batches/{batch_id}/zip/regenerate")
+def admin_internal_batch_zip_regenerate_endpoint(
+    batch_id: str,
+    user_id: str = Query(..., alias="userId"),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> dict:
+    return admin_regenerate_internal_batch_zip(db, user_id, batch_id)
+
+
+@app.post("/api/admin/internal-batches/{batch_id}/missing")
+async def admin_internal_batch_missing_upload_endpoint(
+    batch_id: str,
+    user_id: str = Form(..., alias="userId"),
+    episode: int = Form(..., ge=1),
+    duration_seconds: int = Form(0, alias="durationSeconds"),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> dict:
+    asset = await save_upload(db, user_id, file, kind="video", duration_seconds=duration_seconds)
+    payload = admin_create_internal_batch_missing_task(db, user_id, batch_id, asset.id, episode, duration_seconds=duration_seconds)
+    return {"asset": asset_to_dict(asset), **payload}
 
 
 @app.get("/api/admin/internal-batch-zips")

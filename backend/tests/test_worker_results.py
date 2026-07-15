@@ -187,6 +187,27 @@ def test_finalize_remote_gpu_result_waits_for_uploaded_object_visibility(monkeyp
         )
 
 
+def test_remember_remote_gpu_job_stores_latest_and_history() -> None:
+    task = Task(
+        id="task-remote-memory",
+        user_id="user-remote-memory",
+        tool_slug="subtitle-translate-workflow",
+        input_asset_id="asset-remote-memory",
+        status="processing",
+        params={"remoteGpuJobIds": ["remote-old"]},
+        estimated_credits=1,
+        frozen_credits=1,
+        provider="mock",
+        provider_job_id="provider-remote-memory",
+    )
+
+    worker._remember_remote_gpu_job(task, "remote-new", "subtitle_translate")
+
+    assert task.params["remoteGpuJobId"] == "remote-new"
+    assert task.params["remoteGpuJobType"] == "subtitle_translate"
+    assert task.params["remoteGpuJobIds"] == ["remote-old", "remote-new"]
+
+
 def test_gpu_unavailable_retries_exhaust_to_failed(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

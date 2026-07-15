@@ -51,11 +51,12 @@ def _result_finalize_retry() -> Retry | None:
     return Retry(max=max_retries, interval=[interval * (2**attempt) for attempt in range(max_retries)])
 
 
-def enqueue_internal_batch_zip(user_id: str, batch_id: str) -> None:
+def enqueue_internal_batch_zip(user_id: str, batch_id: str, at_front: bool = False) -> None:
     internal_batch_zip_queue().enqueue(
         "app.worker.prepare_internal_batch_zip",
         user_id,
         batch_id,
+        at_front=at_front,
         job_timeout=settings.internal_batch_zip_gpu_timeout_seconds,
         result_ttl=3600,
         failure_ttl=86400,

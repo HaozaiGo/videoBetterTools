@@ -557,6 +557,26 @@ export function retryAdminInternalBatchTasks(userId: string, batchId: string) {
   });
 }
 
+export function regenerateAdminInternalBatchZip(userId: string, batchId: string) {
+  const params = new URLSearchParams({ userId });
+  return request<{ queued: boolean; deleted: number; missing: number; failed: { partIndex: number; message: string }[]; partCount: number }>(
+    `/api/admin/internal-batches/${encodeURIComponent(batchId)}/zip/regenerate?${params.toString()}`,
+    { method: "POST" },
+  );
+}
+
+export function uploadAdminInternalBatchMissingEpisode(input: { userId: string; batchId: string; episode: number; file: File; durationSeconds?: number }) {
+  const form = new FormData();
+  form.set("userId", input.userId);
+  form.set("episode", String(input.episode));
+  form.set("durationSeconds", String(input.durationSeconds || 0));
+  form.set("file", input.file);
+  return request<{ asset: Asset; task: Task; batch: InternalBatchStatus }>(`/api/admin/internal-batches/${encodeURIComponent(input.batchId)}/missing`, {
+    method: "POST",
+    body: form,
+  });
+}
+
 export function getAdminInternalBatchZips(page = 1, perPage = 50, status: AdminInternalBatchZipStatus = "ready", name = "") {
   const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
   params.set("status", status);

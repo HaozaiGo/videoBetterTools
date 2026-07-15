@@ -7,13 +7,14 @@ from pathlib import Path
 from urllib.parse import quote
 from urllib.parse import urljoin, urlparse
 
-from sqlalchemy import case, func, select
+from fastapi import HTTPException
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
 from app.models import Asset, Task, User, Wallet, WalletLedger
-from app.queue import internal_batch_zip_queue
-from app.services import failure_reason_for_task, internal_batch_expected_total_from_name, normalize_pagination, page_info, ledger_to_dict, plan_internal_batch_zip, task_to_dict
+from app.queue import enqueue_internal_batch_zip, internal_batch_zip_queue
+from app.services import create_task, failure_reason_for_task, internal_batch_expected_total_from_name, internal_batch_expected_total_from_tasks, internal_batch_status, normalize_pagination, page_info, ledger_to_dict, plan_internal_batch_zip, task_to_dict
 from app.storage import storage
 
 
@@ -265,6 +266,10 @@ def _mark_zip_row_deleted(user_id: str, batch_id: str, part_index: int) -> None:
     )
 
 
+def _clear_zip_row_deleted(user_id: str, batch_id: str, part_index: int) -> None:
+    _zip_row_delete_marker_path(user_id, batch_id, part_index).unlink(missing_ok=True)
+
+
 def _task_episode_hint(task: Task, index: int) -> str:
     params = task.params if isinstance(task.params, dict) else {}
     for key in ("episode", "episodeNumber", "episodeIndex", "fileIndex", "index"):
@@ -306,6 +311,76 @@ def _skipped_tasks_for_batch(db: Session, user_id: str, batch_id: str) -> list[d
         for index, task in enumerate(tasks, start=1)
         if task.status in SKIPPED_TASK_STATUSES
     ]
+
+
+def _task_internal_batch_index(task: Task, fallback: int) -> int:
+    params = task.params if isinstance(task.params, dict) else {}
+    try:
+        value = int(params.get("internalBatchIndex") or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return value if value > 0 else fallback
+
+
+def _template_task_for_missing_episode(tasks: list[Task], episode: int) -> Task:
+    indexed = [(_task_internal_batch_index(task, index), task) for index, task in enumerate(tasks, start=1)]
+    return min(indexed, key=lambda item: (abs(item[0] - episode), item[0]))[1]
+
+
+def _batch_name_from_tasks(tasks: list[Task]) -> str:
+    for task in tasks:
+        params = task.params if isinstance(task.params, dict) else {}
+        batch_name = str(params.get("internalBatchName") or "").strip()
+        if batch_name:
+            return batch_name
+    return "内部批量任务"
+
+
+def _internal_batch_tasks_for_admin(db: Session, user_id: str, batch_id: str) -> list[Task]:
+    batch_id_expr = Task.params["internalBatchId"].as_string()
+    return list(
+        db.execute(
+            select(Task)
+            .where(
+                Task.user_id == user_id,
+                Task.tool_slug == "subtitle-translate-workflow",
+                batch_id_expr == batch_id,
+            )
+            .options(selectinload(Task.input_asset))
+            .order_by(Task.created_at.asc())
+        ).scalars()
+    )
+
+
+def admin_create_internal_batch_missing_task(db: Session, user_id: str, batch_id: str, input_asset_id: str, episode: int, duration_seconds: int = 0) -> dict:
+    tasks = _internal_batch_tasks_for_admin(db, user_id, batch_id)
+    if not tasks:
+        raise HTTPException(status_code=404, detail="batch not found")
+    expected_total = internal_batch_expected_total_from_tasks(tasks)
+    if episode < 1 or episode > expected_total:
+        raise HTTPException(status_code=400, detail=f"episode must be between 1 and {expected_total}")
+
+    existing_indexes = {_task_internal_batch_index(task, index) for index, task in enumerate(tasks, start=1)}
+    if episode in existing_indexes:
+        raise HTTPException(status_code=409, detail=f"episode {episode} already has a task")
+
+    template_task = _template_task_for_missing_episode(tasks, episode)
+    template_params = template_task.params if isinstance(template_task.params, dict) else {}
+    params = {
+        key: value
+        for key, value in template_params.items()
+        if key not in {"providerJobId", "remoteGpuJobId", "remoteGpuJobIds", "remoteGpuJobType", "singleGpuRetry", "singleGpuRetryAt"}
+        and not str(key).startswith("_")
+    }
+    params["internalBatchId"] = batch_id
+    params["internalBatchName"] = str(template_params.get("internalBatchName") or _batch_name_from_tasks(tasks))
+    params["internalBatchTotal"] = expected_total
+    params["internalBatchIndex"] = episode
+    if duration_seconds > 0:
+        params["duration"] = duration_seconds
+
+    task = create_task(db, user_id, "subtitle-translate-workflow", input_asset_id, params)
+    return {"task": task_to_dict(task), "batch": internal_batch_status(db, user_id, batch_id)}
 
 
 def _empty_zip_batch_item(batch: dict, zip_status: str, archive: dict | None = None, zip_job: dict | None = None, skipped_tasks: list[dict] | None = None) -> dict:
@@ -517,18 +592,61 @@ def admin_delete_internal_batch_zips(db: Session, items: list[dict]) -> dict:
     return {"deleted": deleted, "missing": missing, "failed": failed}
 
 
+def admin_regenerate_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
+    archive = plan_internal_batch_zip(db, user_id, batch_id)
+    deleted = 0
+    missing = 0
+    failed: list[dict] = []
+    for part in archive.get("parts", []):
+        part_index = int(part.get("index") or 0)
+        if part_index <= 0:
+            continue
+        _clear_zip_row_deleted(user_id, batch_id, part_index)
+        did_delete, message = _delete_zip_part_file(part)
+        if did_delete:
+            deleted += 1
+        elif message == "ZIP 文件不存在或已删除":
+            missing += 1
+        elif message:
+            failed.append({"userId": user_id, "batchId": batch_id, "partIndex": part_index, "message": message})
+    if failed:
+        return {"queued": False, "deleted": deleted, "missing": missing, "failed": failed, "partCount": int(archive.get("partCount") or 0)}
+    enqueue_internal_batch_zip(user_id, batch_id, at_front=True)
+    return {"queued": True, "deleted": deleted, "missing": missing, "failed": [], "partCount": int(archive.get("partCount") or 0)}
+
+
 def admin_ledger(db: Session) -> list[dict]:
     ledger = db.execute(select(WalletLedger).order_by(WalletLedger.created_at.desc()).limit(200)).scalars()
     return [ledger_to_dict(entry) for entry in ledger]
+
+
+def _gpu_job_lookup_keys(job: dict) -> list[str]:
+    keys: list[str] = []
+
+    def add(value: object) -> None:
+        normalized = str(value or "").strip()
+        if normalized and normalized not in keys:
+            keys.append(normalized)
+
+    for field in ("id", "providerJobId", "provider_job_id", "localJobId", "local_job_id", "taskProviderJobId"):
+        add(job.get(field))
+    for container_name in ("params", "metadata"):
+        container = job.get(container_name)
+        if not isinstance(container, dict):
+            continue
+        for field in ("providerJobId", "provider_job_id", "remoteGpuJobId", "remote_gpu_job_id"):
+            add(container.get(field))
+    return keys
 
 
 def _gpu_job_display_map(db: Session, job_ids: list[str]) -> dict[str, dict]:
     normalized_job_ids = [job_id for job_id in dict.fromkeys(job_ids) if job_id]
     if not normalized_job_ids:
         return {}
+    remote_job_id_expr = Task.params["remoteGpuJobId"].as_string()
     rows = db.execute(
         select(Task)
-        .where(Task.provider_job_id.in_(normalized_job_ids))
+        .where(or_(Task.provider_job_id.in_(normalized_job_ids), remote_job_id_expr.in_(normalized_job_ids)))
         .options(selectinload(Task.input_asset))
     ).scalars()
     display_map: dict[str, dict] = {}
@@ -548,6 +666,14 @@ def _gpu_job_display_map(db: Session, job_ids: list[str]) -> dict[str, dict]:
             "displayName": title,
             "displaySubtitle": subtitle,
         }
+        remote_job_id = str(params.get("remoteGpuJobId") or "").strip()
+        if remote_job_id:
+            display_map[remote_job_id] = display_map[task.provider_job_id]
+        remote_job_id_items = params.get("remoteGpuJobIds") if isinstance(params.get("remoteGpuJobIds"), list) else []
+        for remote_job_id_item in remote_job_id_items:
+            remote_job_id_value = str(remote_job_id_item or "").strip()
+            if remote_job_id_value:
+                display_map[remote_job_id_value] = display_map[task.provider_job_id]
     return display_map
 
 
@@ -592,9 +718,12 @@ def admin_gpu_metrics(db: Session) -> dict:
     payload.setdefault("gpus", [])
     payload.setdefault("runningJobs", [])
     running_jobs = payload.get("runningJobs") if isinstance(payload.get("runningJobs"), list) else []
-    job_ids = [str(job.get("id") or "") for job in running_jobs if isinstance(job, dict)]
+    job_ids = [job_id for job in running_jobs if isinstance(job, dict) for job_id in _gpu_job_lookup_keys(job)]
     display_map = _gpu_job_display_map(db, job_ids)
     for job in running_jobs:
         if isinstance(job, dict):
-            job.update(display_map.get(str(job.get("id") or ""), {}))
+            for lookup_key in _gpu_job_lookup_keys(job):
+                if lookup_key in display_map:
+                    job.update(display_map[lookup_key])
+                    break
     return payload

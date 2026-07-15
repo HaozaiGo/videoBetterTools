@@ -1,6 +1,6 @@
 import { Fragment, type FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { getAdminInternalBatches, getAdminInternalBatchStatus, retryAdminInternalBatchTasks } from "../api/client";
+import { getAdminInternalBatches, getAdminInternalBatchStatus, regenerateAdminInternalBatchZip, retryAdminInternalBatchTasks, uploadAdminInternalBatchMissingEpisode } from "../api/client";
 import { formatDate } from "../lib/format";
 import type { AdminInternalBatch, AdminInternalBatchStatus, Task, TaskStatus } from "../types";
 
@@ -30,6 +30,10 @@ function batchStatusText(batch: AdminInternalBatch) {
 function batchProgressPercent(batch: AdminInternalBatch) {
   if (batch.total <= 0) return 0;
   return Math.round((batch.succeeded / batch.total) * 100);
+}
+
+function batchZipReady(batch: AdminInternalBatch) {
+  return batch.total > 0 && batch.created >= batch.total && batch.succeeded >= batch.total && batch.processing <= 0 && batch.failed <= 0 && batch.cancelled <= 0;
 }
 
 function taskStatusLabel(status: TaskStatus | "missing") {
@@ -66,6 +70,7 @@ function episodeRows(tasks: Task[], total: number): EpisodeRow[] {
 function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState("");
+  const [uploadingEpisode, setUploadingEpisode] = useState<number | null>(null);
   const detailQuery = useQuery({
     queryKey: ["admin-internal-batch-detail", batch.userId, batch.batchId],
     queryFn: () => getAdminInternalBatchStatus(batch.userId, batch.batchId),
@@ -84,9 +89,31 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
     },
     onError: (error) => setMessage(error instanceof Error ? error.message : "重新生成失败"),
   });
+  const missingUploadMutation = useMutation({
+    mutationFn: ({ episode, file }: { episode: number; file: File }) =>
+      uploadAdminInternalBatchMissingEpisode({ userId: batch.userId, batchId: batch.batchId, episode, file }),
+    onSuccess: (payload, variables) => {
+      setMessage(`第 ${variables.episode} 集已补传并创建任务`);
+      setUploadingEpisode(null);
+      queryClient.setQueryData(["admin-internal-batch-detail", batch.userId, batch.batchId], payload.batch);
+      queryClient.invalidateQueries({ queryKey: ["admin-internal-batches"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-gpu"] });
+    },
+    onError: (error) => {
+      setMessage(error instanceof Error ? error.message : "补传失败");
+      setUploadingEpisode(null);
+    },
+  });
   const detail = detailQuery.data;
   const retryableCount = (detail?.failed || 0) + (detail?.cancelled || 0);
   const rows = detail ? episodeRows(detail.tasks, detail.total) : [];
+
+  function uploadMissingEpisode(episode: number, file: File | undefined) {
+    if (!file) return;
+    setUploadingEpisode(episode);
+    setMessage("");
+    missingUploadMutation.mutate({ episode, file });
+  }
 
   return (
     <div className="internal-batch-detail-card">
@@ -116,6 +143,7 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
               <th>状态</th>
               <th>进度</th>
               <th>完成时间</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -128,6 +156,27 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
                     <td><span className="status queued">{taskStatusLabel("missing")}</span></td>
                     <td>-</td>
                     <td>-</td>
+                    <td>
+                      <input
+                        id={`missing-upload-${batch.batchId}-${row.episode}`}
+                        className="visually-hidden"
+                        type="file"
+                        accept="video/*"
+                        disabled={missingUploadMutation.isPending}
+                        onChange={(event) => {
+                          uploadMissingEpisode(row.episode, event.target.files?.[0]);
+                          event.target.value = "";
+                        }}
+                      />
+                      <button
+                        className="ghost compact"
+                        type="button"
+                        disabled={missingUploadMutation.isPending}
+                        onClick={() => document.getElementById(`missing-upload-${batch.batchId}-${row.episode}`)?.click()}
+                      >
+                        {uploadingEpisode === row.episode ? "补传中" : "补传视频"}
+                      </button>
+                    </td>
                   </tr>
                 ) : (
                   <tr key={row.task.id}>
@@ -144,12 +193,13 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
                       </div>
                     </td>
                     <td>{formatDate(row.task.completedAt)}</td>
+                    <td>-</td>
                   </tr>
                 ),
               )
             ) : (
               <tr>
-                <td colSpan={5} className="empty">
+                <td colSpan={6} className="empty">
                   暂无集数明细。
                 </td>
               </tr>
@@ -169,6 +219,8 @@ export function InternalTasksPage() {
   const [searchInput, setSearchInput] = useState("");
   const [nameQuery, setNameQuery] = useState("");
   const [expandedBatchId, setExpandedBatchId] = useState("");
+  const [zipBatchId, setZipBatchId] = useState("");
+  const [zipMessage, setZipMessage] = useState("");
   const { data: batchPage, isFetching } = useQuery({
     queryKey: ["admin-internal-batches", activeStatus, pageNumber, nameQuery],
     queryFn: () => getAdminInternalBatches(pageNumber, pageSize, activeStatus, nameQuery),
@@ -188,6 +240,20 @@ export function InternalTasksPage() {
     }),
     [batches],
   );
+  const regenerateZipMutation = useMutation({
+    mutationFn: (batch: AdminInternalBatch) => regenerateAdminInternalBatchZip(batch.userId, batch.batchId),
+    onSuccess: (payload) => {
+      const failedMessage = payload.failed.length ? `，${payload.failed.length} 个分包删除失败` : "";
+      setZipMessage(payload.queued ? `已插队重新生成 ZIP，共 ${payload.partCount} 个分包，清理旧 ZIP ${payload.deleted} 个${failedMessage}` : `ZIP 未入队${failedMessage}`);
+      setZipBatchId("");
+      queryClient.invalidateQueries({ queryKey: ["admin-internal-batches"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-internal-batch-zips"] });
+    },
+    onError: (error) => {
+      setZipMessage(error instanceof Error ? error.message : "重新生成 ZIP 失败");
+      setZipBatchId("");
+    },
+  });
 
   function selectStatus(status: AdminInternalBatchStatus) {
     setActiveStatus(status);
@@ -290,6 +356,8 @@ export function InternalTasksPage() {
         </div>
       </div>
 
+      {zipMessage ? <p className="inline-status-message">{zipMessage}</p> : null}
+
       <div className="panel table-panel">
         <table className="internal-batch-table">
           <thead>
@@ -300,6 +368,7 @@ export function InternalTasksPage() {
               <th>完成集数</th>
               <th>创建时间</th>
               <th>更新时间</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -307,6 +376,9 @@ export function InternalTasksPage() {
               batches.map((batch) => {
                 const percent = batchProgressPercent(batch);
                 const isExpanded = expandedBatchId === batch.batchId;
+                const canRegenerateZip = batchZipReady(batch);
+                const zipBusy = regenerateZipMutation.isPending && zipBatchId === batch.batchId;
+                const zipDisabled = !canRegenerateZip || regenerateZipMutation.isPending;
                 return (
                   <Fragment key={batch.batchId}>
                     <tr>
@@ -347,10 +419,25 @@ export function InternalTasksPage() {
                       </td>
                       <td>{formatDate(batch.createdAt)}</td>
                       <td>{formatDate(batch.updatedAt)}</td>
+                      <td className="internal-batch-actions">
+                        <button
+                          className="primary compact"
+                          type="button"
+                          disabled={zipDisabled}
+                          title={canRegenerateZip ? "删除旧 ZIP，并把新 ZIP 任务插队到最前" : "批次全部成功后才可重新生成 ZIP"}
+                          onClick={() => {
+                            setZipBatchId(batch.batchId);
+                            setZipMessage("");
+                            regenerateZipMutation.mutate(batch);
+                          }}
+                        >
+                          {zipBusy ? "入队中" : "立刻重新生成ZIP"}
+                        </button>
+                      </td>
                     </tr>
                     {isExpanded ? (
                       <tr className="internal-batch-detail-row">
-                        <td colSpan={6}>
+                        <td colSpan={7}>
                           <InternalBatchDetail batch={batch} />
                         </td>
                       </tr>
@@ -360,7 +447,7 @@ export function InternalTasksPage() {
               })
             ) : (
               <tr>
-                <td colSpan={6} className="empty">
+                <td colSpan={7} className="empty">
                   暂无批量去字幕并翻译批次。
                 </td>
               </tr>

@@ -38,6 +38,17 @@ def test_internal_batch_zip_enqueue_can_disable_retries(monkeypatch) -> None:
     assert fake_queue.calls[0]["kwargs"]["retry"] is None
 
 
+def test_internal_batch_zip_enqueue_can_prioritize_front(monkeypatch) -> None:
+    fake_queue = FakeQueue()
+    monkeypatch.setattr(queue, "internal_batch_zip_queue", lambda: fake_queue)
+
+    queue.enqueue_internal_batch_zip("user-1", "batch-1", at_front=True)
+
+    call = fake_queue.calls[0]
+    assert call["args"] == ("app.worker.prepare_internal_batch_zip", "user-1", "batch-1")
+    assert call["kwargs"]["at_front"] is True
+
+
 def test_result_finalize_enqueue_targets_result_queue(monkeypatch) -> None:
     fake_queue = FakeQueue()
     monkeypatch.setattr(queue, "result_queue", lambda: fake_queue)

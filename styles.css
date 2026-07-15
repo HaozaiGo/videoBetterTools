@@ -1385,6 +1385,31 @@ dd {
   font-weight: 900;
 }
 
+.internal-batch-actions {
+  min-width: 150px;
+  text-align: right;
+}
+
+.internal-batch-actions .compact {
+  white-space: nowrap;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.inline-status-message {
+  margin: -6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .internal-batch-detail-row td {
   background: var(--soft);
   padding: 0;

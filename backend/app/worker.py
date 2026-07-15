@@ -51,6 +51,33 @@ def _fail_unreadable_input_asset(db, provider_job_id: str) -> None:
     )
 
 
+def _remember_remote_gpu_job(task: Task, remote_job_id: str, job_type: str = "") -> None:
+    normalized_remote_job_id = str(remote_job_id or "").strip()
+    if not normalized_remote_job_id:
+        return
+    params = dict(task.params or {})
+    params["remoteGpuJobId"] = normalized_remote_job_id
+    if job_type:
+        params["remoteGpuJobType"] = str(job_type)
+    history = params.get("remoteGpuJobIds")
+    if not isinstance(history, list):
+        history = []
+    normalized_history = [str(item).strip() for item in history if str(item or "").strip()]
+    if normalized_remote_job_id not in normalized_history:
+        normalized_history.append(normalized_remote_job_id)
+    params["remoteGpuJobIds"] = normalized_history[-6:]
+    task.params = params
+
+
+def _remember_remote_gpu_job_for_task(task_id: str, provider_job_id: str, result: dict) -> None:
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
+            return
+        _remember_remote_gpu_job(task, str(result.get("remote_job_id") or ""), str(result.get("job_type") or ""))
+        db.commit()
+
+
 def prepare_internal_batch_zip(user_id: str, batch_id: str) -> None:
     with SessionLocal() as db:
         try:
@@ -238,6 +265,7 @@ def _process_real_video_task(task_id: str) -> None:
         params["providerJobId"] = provider_job_id
         params["_defer_result_upload"] = True
         params["_async_remote_gpu"] = True
+        params["_inputAssetName"] = input_asset.original_name
         input_storage_key = input_asset.storage_key
         if input_asset.url and storage.is_remote and input_asset.url != storage.public_url(input_storage_key):
             params["_inputAssetUrl"] = input_asset.url
@@ -273,6 +301,7 @@ def _process_real_video_task(task_id: str) -> None:
             task = db.get(Task, task_id)
             if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
                 return
+            _remember_remote_gpu_job(task, str(result.get("remote_job_id") or ""), str(result.get("job_type") or tool_slug))
             provider_callback(
                 db,
                 provider_job_id,
@@ -322,6 +351,7 @@ def _sync_remote_gpu_progress(task_id: str, provider_job_id: str, remote_job_id:
         task = db.get(Task, task_id)
         if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
             return False
+        _remember_remote_gpu_job(task, remote_job_id, str(status.get("job_type") or status.get("jobType") or ""))
         state = str(status.get("status") or "queued")
         fallback_percent = {"queued": 10, "processing": 15, "uploading": 96, "succeeded": 100, "failed": 0, "cancelled": 0}.get(state, 0)
         percent = int(status.get("progress_percent") or fallback_percent)
@@ -423,6 +453,7 @@ def _finalize_subtitle_translate_workflow_result(task_id: str, provider_job_id: 
 
     translate_result = process_video_translate(str(intermediate["storage_key"]), task_id, translate_params)
     if translate_result.get("remote_job_id"):
+        _remember_remote_gpu_job_for_task(task_id, provider_job_id, translate_result)
         finalized = _finalize_remote_gpu_result(task_id, provider_job_id, translate_result)
     elif translate_result.get("local_path"):
         finalized = _finalize_result_payload(translate_result)
