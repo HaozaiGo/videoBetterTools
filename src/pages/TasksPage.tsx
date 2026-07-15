@@ -171,7 +171,11 @@ function InternalBatchDownloadPanel({ task }: { task: Task }) {
   );
 }
 
-export function TasksPage() {
+type TasksPageProps = {
+  internalBatchOnly?: boolean;
+};
+
+export function TasksPage({ internalBatchOnly = false }: TasksPageProps = {}) {
   const queryClient = useQueryClient();
   const { data } = useSuspenseQuery({ queryKey: ["bootstrap"], queryFn: getBootstrap });
   const [expandedTaskIds, setExpandedTaskIds] = useState<Set<string>>(() => new Set());
@@ -188,18 +192,20 @@ export function TasksPage() {
     completedFrom: completedDateBoundary(completedFromFilter, "start"),
     completedTo: completedDateBoundary(completedToFilter, "end"),
     batchName: batchNameFilter,
+    internalBatchOnly,
   };
   const hasTaskFilters = Boolean(statusFilter || completedFromFilter || completedToFilter || batchNameFilter.trim());
+  const taskQueryKey = internalBatchOnly ? "internal-tasks" : "tasks";
   const tasksQuery = useQuery({
-    queryKey: ["tasks", currentPage, taskFilters],
+    queryKey: [taskQueryKey, currentPage, taskFilters],
     queryFn: () => getTasksPage(currentPage, pageSize, taskFilters),
-    initialData: currentPage === 1 && !hasTaskFilters ? { items: data.tasks, page: data.taskPage } : undefined,
+    initialData: !internalBatchOnly && currentPage === 1 && !hasTaskFilters ? { items: data.tasks, page: data.taskPage } : undefined,
     refetchInterval: (query) => {
       const state = query.state.data;
       return state?.items.some((task) => ["queued", "processing"].includes(task.status)) ? taskListRefetchIntervalMs : false;
     },
   });
-  const taskPage = tasksQuery.data || { items: data.tasks, page: data.taskPage };
+  const taskPage = tasksQuery.data || (internalBatchOnly ? { items: [], page: { page: 1, perPage: pageSize, total: 0, totalPages: 1, hasPrevious: false, hasNext: false } } : { items: data.tasks, page: data.taskPage });
   const totalPages = Math.max(1, taskPage.page.totalPages);
   const pageTaskIds = useMemo(() => taskPage.items.map((task) => task.id), [taskPage.items]);
   const selectedTasks = useMemo(() => taskPage.items.filter((task) => selectedTaskIds.has(task.id)), [selectedTaskIds, taskPage.items]);
@@ -253,6 +259,7 @@ export function TasksPage() {
     onSuccess: (payload) => {
       queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state);
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["internal-tasks"] });
     },
   });
 
@@ -264,6 +271,7 @@ export function TasksPage() {
       setPageMessage(`已删除 ${payload.deleted} 条任务${payload.missing ? `，${payload.missing} 条未找到` : ""}`);
       queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state);
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["internal-tasks"] });
     },
     onError: (error) => setPageMessage(error instanceof Error ? error.message : "删除失败"),
   });
@@ -274,6 +282,7 @@ export function TasksPage() {
       setPageMessage("已加入单卡独占重跑队列");
       queryClient.setQueryData<BootstrapState>(["bootstrap"], payload.state);
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["internal-tasks"] });
     },
     onError: (error) => {
       setPageMessage(error instanceof Error ? error.message : "单卡重跑失败");
@@ -434,13 +443,16 @@ export function TasksPage() {
   const processingCount = taskPage.items.filter((task) => ["queued", "processing"].includes(task.status)).length;
   const succeededCount = taskPage.items.filter((task) => task.status === "succeeded").length;
   const failedCount = taskPage.items.filter((task) => task.status === "failed").length;
+  const pageTitle = internalBatchOnly ? "内部任务" : "任务列表";
+  const pageDescription = internalBatchOnly ? "专门查看批量去字幕并翻译的内部批次队列。" : "查看任务进度、失败原因和结果下载。";
+  const emptyText = internalBatchOnly ? "暂无批量去字幕并翻译任务。" : "暂无任务，从工具广场创建第一个任务。";
 
   return (
     <section className="task-page">
       <div className="page-head">
         <div>
-          <h1>任务列表</h1>
-          <p>查看任务进度、失败原因和结果下载。</p>
+          <h1>{pageTitle}</h1>
+          <p>{pageDescription}</p>
         </div>
         <div className="task-toolbar">
           <label>
@@ -502,7 +514,7 @@ export function TasksPage() {
             className="ghost compact"
             onClick={() => {
               queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
-              queryClient.invalidateQueries({ queryKey: ["tasks"] });
+              queryClient.invalidateQueries({ queryKey: [taskQueryKey] });
             }}
           >
             刷新
@@ -582,7 +594,7 @@ export function TasksPage() {
             ) : (
               <tr>
                 <td colSpan={columns.length} className="empty">
-                  暂无任务，从工具广场创建第一个任务。
+                  {emptyText}
                 </td>
               </tr>
             )}

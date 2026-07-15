@@ -62,6 +62,82 @@ def admin_tasks(db: Session, page: int = 1, per_page: int = 50) -> dict:
     return {"items": [task_to_dict(task) for task in tasks], "page": page_info(total, page, per_page)}
 
 
+def _internal_batch_status_from_counts(batch: dict) -> str:
+    if int(batch["processing"]) > 0:
+        return "processing"
+    if int(batch["failed"]) + int(batch["cancelled"]) > 0:
+        return "failed"
+    if int(batch["succeeded"]) >= int(batch["total"]):
+        return "succeeded"
+    return "processing"
+
+
+def admin_internal_batches(db: Session, page: int = 1, per_page: int = 50, status: str = "all", name: str = "") -> dict:
+    page, per_page = normalize_pagination(page, per_page)
+    status = status if status in ADMIN_INTERNAL_BATCH_STATUS_FILTERS else "all"
+    normalized_name = name.strip()
+    batch_id_expr = Task.params["internalBatchId"].as_string()
+    batch_name_expr = Task.params["internalBatchName"].as_string()
+    batch_total_expr = Task.params["internalBatchTotal"].as_string()
+    updated_expr = func.coalesce(Task.completed_at, Task.created_at)
+    filters = [
+        Task.tool_slug == "subtitle-translate-workflow",
+        batch_id_expr.is_not(None),
+        batch_id_expr != "",
+    ]
+    if normalized_name:
+        filters.append(batch_name_expr.ilike(f"%{normalized_name}%"))
+    rows = db.execute(
+        select(
+            Task.user_id.label("user_id"),
+            batch_id_expr.label("batch_id"),
+            func.max(batch_name_expr).label("batch_name"),
+            func.max(batch_total_expr).label("declared_total"),
+            func.count().label("total"),
+            func.sum(case((Task.status == "succeeded", 1), else_=0)).label("succeeded"),
+            func.sum(case((Task.status == "failed", 1), else_=0)).label("failed"),
+            func.sum(case((Task.status == "cancelled", 1), else_=0)).label("cancelled"),
+            func.sum(case((Task.status.in_(("queued", "processing")), 1), else_=0)).label("processing"),
+            func.min(Task.created_at).label("created_at"),
+            func.max(updated_expr).label("updated_at"),
+        )
+        .where(*filters)
+        .group_by(Task.user_id, batch_id_expr)
+        .order_by(func.max(updated_expr).desc())
+    ).all()
+    batches: list[dict] = []
+    tab_counts = {"all": 0, "processing": 0, "succeeded": 0, "failed": 0}
+    for row in rows:
+        created_total = int(row.total or 0)
+        batch_name = row.batch_name or row.batch_id or "内部批量任务"
+        expected_total = _batch_expected_total(str(batch_name), created_total, row.declared_total)
+        missing = max(0, expected_total - created_total)
+        active_processing = int(row.processing or 0)
+        batch = {
+            "userId": row.user_id,
+            "batchId": row.batch_id,
+            "batchName": batch_name,
+            "total": expected_total,
+            "created": created_total,
+            "succeeded": int(row.succeeded or 0),
+            "failed": int(row.failed or 0),
+            "cancelled": int(row.cancelled or 0),
+            "missing": missing,
+            "activeProcessing": active_processing,
+            "processing": active_processing + missing,
+            "createdAt": int(row.created_at.timestamp() * 1000),
+            "updatedAt": int(row.updated_at.timestamp() * 1000),
+        }
+        batch["status"] = _internal_batch_status_from_counts(batch)
+        tab_counts["all"] += 1
+        tab_counts[str(batch["status"])] += 1
+        if status == "all" or batch["status"] == status:
+            batches.append(batch)
+    total = len(batches)
+    start = (page - 1) * per_page
+    return {"items": batches[start : start + per_page], "page": page_info(total, page, per_page), "tabs": tab_counts}
+
+
 def _batch_id_for_task(task: Task) -> str:
     params = task.params if isinstance(task.params, dict) else {}
     return str(params.get("internalBatchId") or "").strip()
@@ -82,6 +158,7 @@ def _zip_part_source(part: dict) -> str:
 
 
 ADMIN_ZIP_STATUS_FILTERS = {"ready", "processing", "failed"}
+ADMIN_INTERNAL_BATCH_STATUS_FILTERS = {"all", "processing", "succeeded", "failed"}
 SKIPPED_TASK_STATUSES = {"failed", "cancelled", "queued", "processing"}
 
 
@@ -445,7 +522,36 @@ def admin_ledger(db: Session) -> list[dict]:
     return [ledger_to_dict(entry) for entry in ledger]
 
 
-def admin_gpu_metrics() -> dict:
+def _gpu_job_display_map(db: Session, job_ids: list[str]) -> dict[str, dict]:
+    normalized_job_ids = [job_id for job_id in dict.fromkeys(job_ids) if job_id]
+    if not normalized_job_ids:
+        return {}
+    rows = db.execute(
+        select(Task)
+        .where(Task.provider_job_id.in_(normalized_job_ids))
+        .options(selectinload(Task.input_asset))
+    ).scalars()
+    display_map: dict[str, dict] = {}
+    for task in rows:
+        params = task.params if isinstance(task.params, dict) else {}
+        batch_name = str(params.get("internalBatchName") or "").strip()
+        input_name = task.input_asset.original_name if task.input_asset else ""
+        title = batch_name or input_name or task.tool_slug
+        subtitle = input_name if batch_name and input_name else task.provider_job_id
+        display_map[task.provider_job_id] = {
+            "taskId": task.id,
+            "taskStatus": task.status,
+            "toolSlug": task.tool_slug,
+            "inputAssetName": input_name,
+            "internalBatchId": str(params.get("internalBatchId") or ""),
+            "internalBatchName": batch_name,
+            "displayName": title,
+            "displaySubtitle": subtitle,
+        }
+    return display_map
+
+
+def admin_gpu_metrics(db: Session) -> dict:
     base_url = settings.model_plaza_gpu_api_url.rstrip("/")
     if not base_url:
         return {
@@ -485,4 +591,10 @@ def admin_gpu_metrics() -> dict:
     payload.setdefault("ok", True)
     payload.setdefault("gpus", [])
     payload.setdefault("runningJobs", [])
+    running_jobs = payload.get("runningJobs") if isinstance(payload.get("runningJobs"), list) else []
+    job_ids = [str(job.get("id") or "") for job in running_jobs if isinstance(job, dict)]
+    display_map = _gpu_job_display_map(db, job_ids)
+    for job in running_jobs:
+        if isinstance(job, dict):
+            job.update(display_map.get(str(job.get("id") or ""), {}))
     return payload

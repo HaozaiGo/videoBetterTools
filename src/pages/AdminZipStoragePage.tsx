@@ -89,7 +89,11 @@ export function AdminZipStoragePage() {
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setNameQuery(searchInput.trim());
+    const nextQuery = searchInput.trim();
+    if (nextQuery === nameQuery && pageNumber === 1) {
+      refresh();
+    }
+    setNameQuery(nextQuery);
     setPageNumber(1);
     setSelectedKeys(new Set());
     setDetailZip(null);
@@ -158,7 +162,7 @@ export function AdminZipStoragePage() {
           <span>名称搜索</span>
           <input value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="输入批次名称" />
         </label>
-        <button className="primary compact" type="submit" disabled={isFetching}>
+        <button className="primary compact" type="submit">
           查询
         </button>
         <button className="ghost compact" type="button" onClick={clearSearch} disabled={!searchInput && !nameQuery}>

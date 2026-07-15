@@ -836,6 +836,60 @@ def test_internal_batch_retry_resets_failed_and_cancelled_tasks(tmp_path, monkey
         assert task.progress_stage == "等待 worker 领取任务"
 
 
+def test_internal_batch_retry_can_enqueue_at_front(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path))
+    enqueued: list[tuple[str, bool]] = []
+
+    def fake_enqueue(task_id: str, at_front: bool = False) -> None:
+        enqueued.append((task_id, at_front))
+
+    monkeypatch.setattr(services, "enqueue_provider_job", fake_enqueue)
+
+    with Session(engine) as db:
+        user = User(id="user-retry-front", email="retry-front@example.com", name="Retry Front User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        asset = Asset(
+            id="retry-front-asset",
+            user_id=user.id,
+            kind="video",
+            original_name="retry-front.mp4",
+            mime_type="video/mp4",
+            storage_key="retry-front-input.mp4",
+            url="/uploads/retry-front-input.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="retry-front-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=asset.id,
+            output_asset_id=None,
+            status="failed",
+            params={"internalBatchId": "batch-retry-front", "internalBatchName": "retry front batch"},
+            estimated_credits=0,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="old-retry-front-provider",
+            error_code="PROVIDER_FAILED",
+            output_url="",
+            progress_percent=0,
+            progress_stage="failed",
+            completed_at=now(),
+        )
+        db.add_all([user, wallet, asset, task])
+        db.commit()
+
+        result = retry_internal_batch_tasks(db, user.id, "batch-retry-front", at_front=True)
+
+    assert result["retried"] == 1
+    assert enqueued == [("retry-front-task", True)]
+
+
 def test_internal_batch_retry_rejects_unreadable_remote_input(tmp_path, monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -977,6 +1031,56 @@ def test_paginated_tasks_filters_by_status() -> None:
     assert {task["status"] for task in page["items"]} == {"failed"}
     assert completed_page["page"]["total"] == 1
     assert [task["id"] for task in completed_page["items"]] == ["filter-task-2"]
+
+
+def test_paginated_tasks_filters_internal_batch_queue() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        user = User(id="user-internal-filter", email="internal-filter@example.com", name="Internal Filter User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+
+        rows = [
+            ("internal-task", "subtitle-translate-workflow", {"internalBatchId": "batch-1", "internalBatchName": "内部批次"}),
+            ("missing-batch-id", "subtitle-translate-workflow", {"internalBatchName": "内部批次"}),
+            ("other-tool", "remove-subtitle", {"internalBatchId": "batch-2", "internalBatchName": "其它工具批次"}),
+        ]
+        for index, (task_id, tool_slug, params) in enumerate(rows, start=1):
+            asset = Asset(
+                id=f"internal-filter-asset-{index}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"internal-filter-{index}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"internal-filter-{index}.mp4",
+                url=f"/uploads/internal-filter-{index}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=task_id,
+                user_id=user.id,
+                tool_slug=tool_slug,
+                input_asset_id=asset.id,
+                status="queued",
+                params=params,
+                estimated_credits=1,
+                frozen_credits=1,
+                charged_credits=0,
+                provider="mock",
+                provider_job_id=f"internal-provider-{index}",
+                progress_stage="等待处理",
+            )
+            db.add_all([asset, task])
+        db.commit()
+
+        page = paginated_tasks(db, user.id, internal_batch_only=True)
+
+    assert page["page"]["total"] == 1
+    assert [task["id"] for task in page["items"]] == ["internal-task"]
 
 
 def test_delete_tasks_from_list_hides_selected_tasks() -> None:

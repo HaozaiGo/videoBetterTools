@@ -1,4 +1,4 @@
-import type { AdminInternalBatchZip, AdminInternalBatchZipStatus, AdminSummary, AdminUser, Asset, AuthUser, BootstrapState, GpuMetrics, InternalBatchStatus, PaginatedAdminInternalBatchZips, PaginatedLedger, PaginatedTasks, Task, UserCreateInput } from "../types";
+import type { AdminInternalBatchStatus, AdminInternalBatchZip, AdminInternalBatchZipStatus, AdminSummary, AdminUser, Asset, AuthUser, BootstrapState, GpuMetrics, InternalBatchStatus, PaginatedAdminInternalBatches, PaginatedAdminInternalBatchZips, PaginatedLedger, PaginatedTasks, Task, UserCreateInput } from "../types";
 
 const tokenKey = "model_plaza_auth_token";
 
@@ -43,6 +43,7 @@ export type TaskPageFilters = {
   completedFrom?: string;
   completedTo?: string;
   batchName?: string;
+  internalBatchOnly?: boolean;
 };
 
 export function getTasksPage(page = 1, perPage = 50, filters: TaskPageFilters = {}) {
@@ -58,6 +59,9 @@ export function getTasksPage(page = 1, perPage = 50, filters: TaskPageFilters = 
   }
   if (filters.batchName?.trim()) {
     params.set("batchName", filters.batchName.trim());
+  }
+  if (filters.internalBatchOnly) {
+    params.set("internalBatchOnly", "1");
   }
   return request<PaginatedTasks>(`/api/tasks?${params.toString()}`);
 }
@@ -530,6 +534,27 @@ export function getAdminUsers() {
 export function getAdminTasks(page = 1, perPage = 50) {
   const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
   return request<PaginatedTasks>(`/api/admin/tasks?${params.toString()}`);
+}
+
+export function getAdminInternalBatches(page = 1, perPage = 50, status: AdminInternalBatchStatus = "all", name = "") {
+  const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
+  params.set("status", status);
+  if (name.trim()) {
+    params.set("name", name.trim());
+  }
+  return request<PaginatedAdminInternalBatches>(`/api/admin/internal-batches?${params.toString()}`);
+}
+
+export function getAdminInternalBatchStatus(userId: string, batchId: string) {
+  const params = new URLSearchParams({ userId });
+  return request<InternalBatchStatus>(`/api/admin/internal-batches/${encodeURIComponent(batchId)}?${params.toString()}`);
+}
+
+export function retryAdminInternalBatchTasks(userId: string, batchId: string) {
+  const params = new URLSearchParams({ userId });
+  return request<{ retried: number; taskIds: string[]; batch: InternalBatchStatus }>(`/api/admin/internal-batches/${encodeURIComponent(batchId)}/retry?${params.toString()}`, {
+    method: "POST",
+  });
 }
 
 export function getAdminInternalBatchZips(page = 1, perPage = 50, status: AdminInternalBatchZipStatus = "ready", name = "") {

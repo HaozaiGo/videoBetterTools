@@ -9,6 +9,7 @@ function isActive(pathname: string, target: string) {
   if (target === "/tools") return pathname === "/tools" || pathname.startsWith("/tools/");
   if (target === "/admin") return pathname === "/admin";
   if (target === "/admin/zips") return pathname === "/admin/zips";
+  if (target === "/internal/tasks") return pathname === "/internal/tasks";
   if (target === "/billing") return pathname === "/billing";
   return pathname === target;
 }
@@ -16,6 +17,7 @@ function isActive(pathname: string, target: string) {
 const navItems = [
   { to: "/tools", label: "工具广场", icon: "⌕" },
   { to: "/tasks", label: "任务列表", icon: "☑" },
+  { to: "/internal/tasks", label: "内部任务", icon: "▦", adminOnly: true },
   { to: "/billing", label: "充值消耗", icon: "¥" },
   { to: "/admin", label: "后台管理", icon: "⚙", adminOnly: true },
   { to: "/admin/zips", label: "ZIP储存", icon: "▣", adminOnly: true },

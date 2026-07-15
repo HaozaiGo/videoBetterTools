@@ -61,3 +61,14 @@ def test_provider_enqueue_can_delay_with_scheduler(monkeypatch) -> None:
     assert delay.total_seconds() == 300
     assert call["args"][1:] == ("app.worker.process_provider_job", "task-1")
     assert call["kwargs"]["result_ttl"] == 3600
+
+
+def test_provider_enqueue_can_prioritize_front(monkeypatch) -> None:
+    fake_queue = FakeQueue()
+    monkeypatch.setattr(queue, "task_queue", lambda: fake_queue)
+
+    queue.enqueue_provider_job("task-priority", at_front=True)
+
+    call = fake_queue.calls[0]
+    assert call["args"] == ("app.worker.process_provider_job", "task-priority")
+    assert call["kwargs"]["at_front"] is True

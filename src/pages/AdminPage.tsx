@@ -176,8 +176,8 @@ export function AdminPage() {
             runningJobs.map((job) => (
               <div className="gpu-job-row" key={job.id}>
                 <div>
-                  <strong>{job.jobType || "video"}</strong>
-                  <span>{job.id}</span>
+                  <strong>{job.displayName || job.inputAssetName || job.jobType || "video"}</strong>
+                  <span>{job.displaySubtitle || job.id}</span>
                 </div>
                 <span>GPU {job.assignedGpu || "-"}</span>
                 <span>{job.progressPercent}%</span>

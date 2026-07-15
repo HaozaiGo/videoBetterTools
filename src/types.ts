@@ -83,6 +83,14 @@ export type GpuRunningJob = {
   id: string;
   status: string;
   jobType: string;
+  displayName?: string;
+  displaySubtitle?: string;
+  inputAssetName?: string;
+  internalBatchId?: string;
+  internalBatchName?: string;
+  taskId?: string;
+  taskStatus?: TaskStatus;
+  toolSlug?: string;
   assignedGpu: string;
   progressPercent: number;
   progressStage: string;
@@ -170,6 +178,7 @@ export type PageInfo = {
 };
 
 export type AdminInternalBatchZipStatus = "ready" | "processing" | "failed";
+export type AdminInternalBatchStatus = "all" | "processing" | "succeeded" | "failed";
 
 export type AdminInternalBatchZipSkippedTask = {
   taskId: string;
@@ -186,6 +195,29 @@ export type AdminInternalBatchZipSkippedTask = {
 export type PaginatedTasks = {
   items: Task[];
   page: PageInfo;
+};
+
+export type AdminInternalBatch = {
+  userId: string;
+  batchId: string;
+  batchName: string;
+  status: Exclude<AdminInternalBatchStatus, "all">;
+  total: number;
+  created: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  missing: number;
+  activeProcessing: number;
+  processing: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type PaginatedAdminInternalBatches = {
+  items: AdminInternalBatch[];
+  page: PageInfo;
+  tabs: Record<AdminInternalBatchStatus, number>;
 };
 
 export type AdminInternalBatchZip = {
@@ -240,9 +272,11 @@ export type InternalBatchStatus = {
   id: string;
   name: string;
   total: number;
+  created: number;
   succeeded: number;
   failed: number;
   cancelled: number;
+  missing: number;
   processing: number;
   downloadReady: boolean;
   tasks: Task[];

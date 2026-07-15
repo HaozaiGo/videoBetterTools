@@ -25,6 +25,63 @@ class FakeLocalStorage:
         raise AssertionError("local storage should not presign downloads")
 
 
+def test_admin_internal_batches_groups_batch_progress() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        user = User(id="batch-admin-user", email="batch-admin@example.com", name="Batch Admin User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+
+        for index, status in enumerate(["succeeded", "succeeded", "failed"], start=1):
+            asset = Asset(
+                id=f"batch-admin-asset-{index}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"episode-{index}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"episode-{index}.mp4",
+                url=f"/uploads/episode-{index}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=f"batch-admin-task-{index}",
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=asset.id,
+                status=status,
+                params={"internalBatchId": "batch-admin", "internalBatchName": "101.批次聚合测试（4集）"},
+                estimated_credits=1,
+                frozen_credits=0,
+                charged_credits=1 if status == "succeeded" else 0,
+                provider="mock",
+                provider_job_id=f"batch-admin-provider-{index}",
+                progress_percent=100 if status != "queued" else 5,
+                progress_stage="done" if status == "succeeded" else "failed",
+                completed_at=now(),
+            )
+            db.add_all([asset, task])
+        db.commit()
+
+        payload = admin.admin_internal_batches(db)
+        processing_payload = admin.admin_internal_batches(db, status="processing")
+
+    assert payload["tabs"] == {"all": 1, "processing": 1, "succeeded": 0, "failed": 0}
+    item = payload["items"][0]
+    assert item["batchName"] == "101.批次聚合测试（4集）"
+    assert item["total"] == 4
+    assert item["created"] == 3
+    assert item["succeeded"] == 2
+    assert item["failed"] == 1
+    assert item["missing"] == 1
+    assert item["processing"] == 1
+    assert item["status"] == "processing"
+    assert processing_payload["page"]["total"] == 1
+
+
 def test_admin_internal_batch_zips_lists_ready_local_zip(tmp_path, monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

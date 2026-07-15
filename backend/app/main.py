@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from app.admin import admin_delete_internal_batch_zips, admin_gpu_metrics, admin_internal_batch_zips, admin_ledger, admin_summary, admin_tasks, admin_users
+from app.admin import admin_delete_internal_batch_zips, admin_gpu_metrics, admin_internal_batches, admin_internal_batch_zips, admin_ledger, admin_summary, admin_tasks, admin_users
 from app.auth import admin_user, create_token, current_user, find_user_by_email, verify_password
 from app.config import settings
 from app.database import SessionLocal, get_db
@@ -122,6 +122,7 @@ def list_tasks(
     completed_from: str | None = Query(None, alias="completedFrom"),
     completed_to: str | None = Query(None, alias="completedTo"),
     batch_name: str | None = Query(None, alias="batchName"),
+    internal_batch_only: bool = Query(False, alias="internalBatchOnly"),
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
 ) -> dict:
@@ -134,6 +135,7 @@ def list_tasks(
         completed_from=completed_from,
         completed_to=completed_to,
         batch_name=batch_name,
+        internal_batch_only=internal_batch_only,
     )
 
 
@@ -408,6 +410,38 @@ def admin_tasks_endpoint(
     return admin_tasks(db, page=page, per_page=per_page)
 
 
+@app.get("/api/admin/internal-batches")
+def admin_internal_batches_endpoint(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, alias="perPage", ge=1, le=100),
+    status: str = Query("all"),
+    name: str = Query(""),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> dict:
+    return admin_internal_batches(db, page=page, per_page=per_page, status=status, name=name)
+
+
+@app.get("/api/admin/internal-batches/{batch_id}")
+def admin_internal_batch_detail_endpoint(
+    batch_id: str,
+    user_id: str = Query(..., alias="userId"),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> dict:
+    return internal_batch_status(db, user_id, batch_id)
+
+
+@app.post("/api/admin/internal-batches/{batch_id}/retry")
+def admin_internal_batch_retry_endpoint(
+    batch_id: str,
+    user_id: str = Query(..., alias="userId"),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> dict:
+    return retry_internal_batch_tasks(db, user_id, batch_id, at_front=True)
+
+
 @app.get("/api/admin/internal-batch-zips")
 def admin_internal_batch_zips_endpoint(
     page: int = Query(1, ge=1),
@@ -448,8 +482,8 @@ def admin_internal_batch_zip_download_endpoint(
 
 
 @app.get("/api/admin/gpu")
-def admin_gpu_endpoint(_admin: User = Depends(admin_user)) -> dict:
-    return admin_gpu_metrics()
+def admin_gpu_endpoint(db: Session = Depends(get_db), _admin: User = Depends(admin_user)) -> dict:
+    return admin_gpu_metrics(db)
 
 
 @app.get("/api/admin/ledger")

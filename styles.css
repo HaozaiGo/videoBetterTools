@@ -1291,6 +1291,18 @@ dd {
   min-width: 220px;
 }
 
+.internal-batch-filter {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.internal-batch-filter label {
+  display: grid;
+  gap: 6px;
+}
+
 .task-toolbar > .remove-file-button {
   margin-left: auto;
 }
@@ -1305,6 +1317,160 @@ dd {
   width: 18px;
   min-height: 18px;
   accent-color: var(--accent);
+}
+
+.internal-batch-table {
+  min-width: 1040px;
+}
+
+.internal-batch-table th:first-child,
+.internal-batch-table td:first-child {
+  width: 48px;
+  min-width: 48px;
+  text-align: center;
+}
+
+.internal-batch-table th:nth-child(2),
+.internal-batch-table td:nth-child(2) {
+  width: auto;
+  min-width: 340px;
+  text-align: left;
+}
+
+.internal-batch-table td:nth-child(2) strong,
+.internal-batch-table .subtle {
+  display: block;
+}
+
+.internal-batch-table td:nth-child(2) strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.internal-batch-expand-cell {
+  width: 48px;
+  text-align: center;
+}
+
+.detail-toggle.icon-only {
+  display: inline-grid;
+  width: 34px;
+  min-height: 34px;
+  place-items: center;
+  padding: 0;
+  font-size: 16px;
+}
+
+.internal-batch-progress {
+  display: grid;
+  min-width: 180px;
+  gap: 6px;
+}
+
+.internal-batch-progress > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.internal-batch-progress strong {
+  font-size: 15px;
+}
+
+.internal-batch-progress span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.internal-batch-detail-row td {
+  background: var(--soft);
+  padding: 0;
+}
+
+.internal-batch-detail-card {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.internal-batch-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.internal-batch-detail-head > div:first-child {
+  min-width: 0;
+}
+
+.internal-batch-detail-head strong,
+.internal-batch-detail-head span,
+.internal-batch-detail-head em {
+  display: block;
+}
+
+.internal-batch-detail-head span,
+.internal-batch-detail-head em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+  margin-top: 4px;
+}
+
+.internal-batch-detail-head > div:last-child {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.internal-episode-list {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.internal-episode-list table {
+  min-width: 860px;
+}
+
+.internal-episode-list td:first-child,
+.internal-episode-list th:first-child {
+  width: 96px;
+  text-align: left;
+}
+
+.internal-episode-list td:nth-child(2) {
+  min-width: 280px;
+}
+
+.internal-episode-list td:nth-child(2) strong,
+.internal-episode-list td:nth-child(2) em {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.internal-episode-progress {
+  display: grid;
+  gap: 3px;
+}
+
+.internal-episode-progress span {
+  font-weight: 900;
+}
+
+.internal-episode-progress em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
 }
 
 .admin-stats {
@@ -1365,6 +1531,17 @@ dd {
 .gpu-monitor-row strong,
 .gpu-job-row strong {
   display: block;
+}
+
+.gpu-job-row > div:first-child {
+  min-width: 0;
+}
+
+.gpu-job-row > div:first-child strong,
+.gpu-job-row > div:first-child span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .gpu-monitor-row span,

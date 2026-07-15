@@ -779,7 +779,7 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: in
     return {"path": first_part["path"], "filename": first_part["filename"], "parts": parts, "partCount": len(parts)}
 
 
-def retry_internal_batch_tasks(db: Session, user_id: str, batch_id: str) -> dict:
+def retry_internal_batch_tasks(db: Session, user_id: str, batch_id: str, at_front: bool = False) -> dict:
     tasks = _internal_batch_tasks(db, user_id, batch_id)
     if not tasks:
         raise HTTPException(status_code=404, detail="batch not found")
@@ -828,7 +828,10 @@ def retry_internal_batch_tasks(db: Session, user_id: str, batch_id: str) -> dict
 
     db.commit()
     for task_id in retried_ids:
-        enqueue_provider_job(task_id)
+        if at_front:
+            enqueue_provider_job(task_id, at_front=True)
+        else:
+            enqueue_provider_job(task_id)
 
     return {"retried": len(retried_ids), "taskIds": retried_ids, "batch": internal_batch_status(db, user_id, batch_id)}
 
@@ -946,10 +949,20 @@ def paginated_tasks(
     completed_from: str | None = None,
     completed_to: str | None = None,
     batch_name: str | None = None,
+    internal_batch_only: bool = False,
 ) -> dict:
     page, per_page = normalize_pagination(page, per_page)
     deleted_expr = Task.params["taskListDeletedAt"].as_string()
     filters = [Task.user_id == user_id, deleted_expr.is_(None)]
+    if internal_batch_only:
+        batch_id_expr = Task.params["internalBatchId"].as_string()
+        filters.extend(
+            [
+                Task.tool_slug == "subtitle-translate-workflow",
+                batch_id_expr.is_not(None),
+                batch_id_expr != "",
+            ]
+        )
     if status:
         if status not in TASK_STATUS_FILTERS:
             raise HTTPException(status_code=400, detail="invalid task status filter")
