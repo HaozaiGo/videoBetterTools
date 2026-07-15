@@ -373,6 +373,8 @@ export function InternalBatchWorkflowPage() {
               inpaintRadius,
               internalBatchId,
               internalBatchName: trimmedBatchName,
+              internalBatchTotal: files.length,
+              internalBatchIndex: index + 1,
               targetLanguage,
               subtitlePlacement,
               keepAudio,

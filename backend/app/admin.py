@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.config import settings
 from app.models import Asset, Task, User, Wallet, WalletLedger
 from app.queue import internal_batch_zip_queue
-from app.services import failure_reason_for_task, normalize_pagination, page_info, ledger_to_dict, plan_internal_batch_zip, task_to_dict
+from app.services import failure_reason_for_task, internal_batch_expected_total_from_name, normalize_pagination, page_info, ledger_to_dict, plan_internal_batch_zip, task_to_dict
 from app.storage import storage
 
 
@@ -129,12 +129,17 @@ def _zip_job_states() -> dict[tuple[str, str], dict]:
 
 def _zip_process_message(batch: dict, zip_status: str, zip_job: dict | None) -> tuple[str, str]:
     processing = int(batch["processing"])
+    missing = int(batch.get("missing") or 0)
+    active_processing = int(batch.get("activeProcessing") or max(0, processing - missing))
     succeeded = int(batch["succeeded"])
     total = int(batch["total"])
     failed = int(batch["failed"])
     cancelled = int(batch["cancelled"])
+    if missing > 0 and active_processing <= 0:
+        return "failed", f"批次任务数不完整：缺少 {missing} 个任务，当前已创建 {batch.get('created', total - missing)}/{total}；请补传或重新创建完整批次"
     if processing > 0:
-        return "tasks", f"任务还没全部完成：{processing} 个仍在生成，已成功 {succeeded}/{total}"
+        suffix = f"，缺少 {missing} 个未创建任务" if missing else ""
+        return "tasks", f"任务还没全部完成：{processing} 个仍未完成，已成功 {succeeded}/{total}{suffix}"
     if zip_job:
         state = str(zip_job.get("state") or "")
         if state == "queued":
@@ -153,6 +158,16 @@ def _zip_process_message(batch: dict, zip_status: str, zip_job: dict | None) -> 
     if succeeded <= 0:
         return "tasks", "还没有成功结果可打包"
     return "waiting", "批次已有成功结果，等待自动入 ZIP 队列"
+
+
+def _batch_expected_total(batch_name: str, created_total: int, declared_total: object = None) -> int:
+    declared = None
+    try:
+        declared = int(declared_total) if declared_total not in {None, ""} else None
+    except (TypeError, ValueError):
+        declared = None
+    name_total = internal_batch_expected_total_from_name(batch_name)
+    return max(value for value in (created_total, declared or 0, name_total or 0) if value >= 0)
 
 
 def _zip_row_delete_marker_path(user_id: str, batch_id: str, part_index: int) -> Path:
@@ -247,6 +262,7 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
     normalized_name = name.strip()
     batch_id_expr = Task.params["internalBatchId"].as_string()
     batch_name_expr = Task.params["internalBatchName"].as_string()
+    batch_total_expr = Task.params["internalBatchTotal"].as_string()
     updated_expr = func.coalesce(Task.completed_at, Task.created_at)
     filters = [
         Task.tool_slug == "subtitle-translate-workflow",
@@ -260,6 +276,7 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
             Task.user_id.label("user_id"),
             batch_id_expr.label("batch_id"),
             func.max(batch_name_expr).label("batch_name"),
+            func.max(batch_total_expr).label("declared_total"),
             func.count().label("total"),
             func.sum(case((Task.status == "succeeded", 1), else_=0)).label("succeeded"),
             func.sum(case((Task.status == "failed", 1), else_=0)).label("failed"),
@@ -272,21 +289,30 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
         .group_by(Task.user_id, batch_id_expr)
         .order_by(func.max(updated_expr).desc())
     ).all()
-    batches = [
-        {
-            "userId": row.user_id,
-            "batchId": row.batch_id,
-            "batchName": row.batch_name or row.batch_id or "内部批量任务",
-            "total": int(row.total or 0),
-            "succeeded": int(row.succeeded or 0),
-            "failed": int(row.failed or 0),
-            "cancelled": int(row.cancelled or 0),
-            "processing": int(row.processing or 0),
-            "createdAt": int(row.created_at.timestamp() * 1000),
-            "updatedAt": int(row.updated_at.timestamp() * 1000),
-        }
-        for row in rows
-    ]
+    batches = []
+    for row in rows:
+        created_total = int(row.total or 0)
+        batch_name = row.batch_name or row.batch_id or "内部批量任务"
+        expected_total = _batch_expected_total(str(batch_name), created_total, row.declared_total)
+        missing = max(0, expected_total - created_total)
+        active_processing = int(row.processing or 0)
+        batches.append(
+            {
+                "userId": row.user_id,
+                "batchId": row.batch_id,
+                "batchName": batch_name,
+                "total": expected_total,
+                "created": created_total,
+                "succeeded": int(row.succeeded or 0),
+                "failed": int(row.failed or 0),
+                "cancelled": int(row.cancelled or 0),
+                "missing": missing,
+                "activeProcessing": active_processing,
+                "processing": active_processing + missing,
+                "createdAt": int(row.created_at.timestamp() * 1000),
+                "updatedAt": int(row.updated_at.timestamp() * 1000),
+            }
+        )
     items: list[dict] = []
     tab_counts = {"ready": 0, "processing": 0, "failed": 0}
     zip_jobs = _zip_job_states()
@@ -339,6 +365,8 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
         zip_job = zip_jobs.get((str(batch["userId"]), str(batch["batchId"])))
         pending_status = "processing"
         if zip_job and zip_job.get("state") == "failed":
+            pending_status = "failed"
+        elif int(batch.get("missing") or 0) > 0 and int(batch.get("activeProcessing") or 0) <= 0:
             pending_status = "failed"
         elif int(batch["failed"]) + int(batch["cancelled"]) > 0 and int(batch["processing"]) <= 0:
             pending_status = "failed"

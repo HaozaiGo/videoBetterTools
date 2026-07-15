@@ -193,9 +193,12 @@ export type AdminInternalBatchZip = {
   batchId: string;
   batchName: string;
   total: number;
+  created: number;
   succeeded: number;
   failed: number;
   cancelled: number;
+  missing: number;
+  activeProcessing: number;
   processing: number;
   createdAt: number;
   updatedAt: number;

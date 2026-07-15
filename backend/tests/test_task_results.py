@@ -198,11 +198,21 @@ def test_internal_batch_zip_includes_succeeded_tasks_when_batch_is_partial(tmp_p
         result_path.write_bytes(b"succeeded-video")
 
         status = internal_batch_status(db, user.id, batch_id)
+        with pytest.raises(HTTPException) as exc:
+            create_internal_batch_zip(db, user.id, batch_id)
+        tasks[2].status = "cancelled"
+        tasks[2].error_code = "USER_CANCELLED"
+        tasks[2].completed_at = now()
+        db.commit()
+        ready_status = internal_batch_status(db, user.id, batch_id)
         archive = create_internal_batch_zip(db, user.id, batch_id)
 
-    assert status["downloadReady"] is True
+    assert exc.value.status_code == 409
+    assert status["downloadReady"] is False
     assert status["succeeded"] == 1
     assert status["total"] == 3
+    assert status["processing"] == 1
+    assert ready_status["downloadReady"] is True
 
     with zipfile.ZipFile(archive["path"]) as zip_file:
         names = zip_file.namelist()
@@ -213,9 +223,69 @@ def test_internal_batch_zip_includes_succeeded_tasks_when_batch_is_partial(tmp_p
     assert video_names[0].startswith("001-clip-1-task-1")
     assert summary["succeeded"] == 1
     assert summary["failed"] == 1
-    assert summary["processing"] == 1
+    assert summary["cancelled"] == 1
+    assert summary["processing"] == 0
     assert summary["includedTaskIds"] == ["task-1"]
     assert {task["id"] for task in summary["skippedTasks"]} == {"task-2", "task-3"}
+
+
+def test_internal_batch_zip_waits_for_declared_episode_total(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path))
+
+    batch_id = "batch-65"
+    batch_name = "91.闺蜜误良缘（65集）"
+
+    with Session(engine) as db:
+        user = User(id="user-batch-65", email="batch65@example.com", name="Batch 65 User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+
+        for index in range(1, 24):
+            asset = Asset(
+                id=f"asset-65-{index}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"clip-{index}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"input-65-{index}.mp4",
+                url=f"/uploads/input-65-{index}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=f"task-65-{index}",
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=asset.id,
+                output_asset_id=None,
+                status="succeeded",
+                params={"internalBatchId": batch_id, "internalBatchName": batch_name},
+                estimated_credits=1,
+                frozen_credits=0,
+                charged_credits=1,
+                provider="mock",
+                provider_job_id=f"provider-65-{index}",
+                output_url="",
+                progress_percent=100,
+                progress_stage="处理完成",
+            )
+            db.add_all([asset, task])
+        db.commit()
+
+        status = internal_batch_status(db, user.id, batch_id)
+        with pytest.raises(HTTPException) as exc:
+            create_internal_batch_zip(db, user.id, batch_id)
+
+    assert status["total"] == 65
+    assert status["created"] == 23
+    assert status["succeeded"] == 23
+    assert status["missing"] == 42
+    assert status["processing"] == 42
+    assert status["downloadReady"] is False
+    assert exc.value.status_code == 409
 
 
 def test_internal_batch_zip_releases_db_before_materializing_remote_files(tmp_path, monkeypatch) -> None:

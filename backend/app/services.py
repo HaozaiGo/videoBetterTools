@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import logging
 from pathlib import Path
+import re
 import shutil
 import threading
 import urllib.error
@@ -37,6 +38,7 @@ _INTERNAL_BATCH_ZIP_LOCKS_GUARD = threading.Lock()
 logger = logging.getLogger("model_plaza.services")
 INPUT_ASSET_REMOTE_MISSING_ERROR_CODE = "INPUT_ASSET_REMOTE_MISSING"
 INPUT_ASSET_REMOTE_MISSING_MESSAGE = "输入视频对象存储不可读，请重新上传后重试"
+EPISODE_TOTAL_PATTERN = re.compile(r"[（(]?\s*(\d{1,4})\s*集\s*[）)]?")
 
 
 def now() -> datetime:
@@ -76,6 +78,32 @@ def serialize_datetime(value: datetime | None) -> int | None:
     if value is None:
         return None
     return int(value.timestamp() * 1000)
+
+
+def _positive_int(value: object) -> int | None:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def internal_batch_expected_total_from_name(batch_name: str) -> int | None:
+    match = EPISODE_TOTAL_PATTERN.search(batch_name or "")
+    return _positive_int(match.group(1)) if match else None
+
+
+def internal_batch_expected_total_from_tasks(tasks: list[Task]) -> int:
+    declared_totals: list[int] = []
+    for task in tasks:
+        params = task.params if isinstance(task.params, dict) else {}
+        value = _positive_int(params.get("internalBatchTotal"))
+        if value is not None:
+            declared_totals.append(value)
+        name_total = internal_batch_expected_total_from_name(str(params.get("internalBatchName") or ""))
+        if name_total is not None:
+            declared_totals.append(name_total)
+    return max([len(tasks), *declared_totals])
 
 
 def ensure_demo_user(db: Session) -> None:
@@ -334,20 +362,25 @@ def internal_batch_status(db: Session, user_id: str, batch_id: str) -> dict:
     if not tasks:
         raise HTTPException(status_code=404, detail="batch not found")
     batch_name = str((tasks[0].params or {}).get("internalBatchName") or "内部批量任务")
-    total = len(tasks)
+    created = len(tasks)
+    total = internal_batch_expected_total_from_tasks(tasks)
+    missing = max(0, total - created)
     succeeded = sum(1 for task in tasks if task.status == "succeeded")
     failed = sum(1 for task in tasks if task.status == "failed")
     cancelled = sum(1 for task in tasks if task.status == "cancelled")
-    processing = sum(1 for task in tasks if task.status in {"queued", "processing"})
+    active_processing = sum(1 for task in tasks if task.status in {"queued", "processing"})
+    processing = active_processing + missing
     return {
         "id": batch_id,
         "name": batch_name,
         "total": total,
+        "created": created,
         "succeeded": succeeded,
         "failed": failed,
         "cancelled": cancelled,
+        "missing": missing,
         "processing": processing,
-        "downloadReady": succeeded > 0,
+        "downloadReady": succeeded > 0 and missing == 0 and active_processing == 0,
         "tasks": [task_to_dict(task) for task in tasks],
     }
 
@@ -355,7 +388,7 @@ def internal_batch_status(db: Session, user_id: str, batch_id: str) -> dict:
 def _internal_batch_zip_entries(db: Session, user_id: str, batch_id: str) -> tuple[dict, list[dict], list[dict]]:
     batch = internal_batch_status(db, user_id, batch_id)
     if not batch["downloadReady"]:
-        raise HTTPException(status_code=409, detail=f"batch has no succeeded tasks: {batch['succeeded']}/{batch['total']} succeeded")
+        raise HTTPException(status_code=409, detail=f"batch is not complete: {batch['succeeded']}/{batch['total']} succeeded, {batch['processing']} pending")
 
     tasks = _internal_batch_tasks(db, user_id, batch_id)
     succeeded_tasks = [task for task in tasks if task.status == "succeeded"]
@@ -552,6 +585,8 @@ def _completed_internal_batch_id_for_auto_zip(db: Session, task: Task) -> str | 
     tasks = _internal_batch_tasks(db, task.user_id, batch_id)
     if not tasks or not any(item.status == "succeeded" for item in tasks):
         return None
+    if len(tasks) < internal_batch_expected_total_from_tasks(tasks):
+        return None
     terminal_statuses = {"succeeded", "failed", "cancelled"}
     if any(item.status not in terminal_statuses for item in tasks):
         return None
@@ -570,9 +605,11 @@ def _internal_batch_zip_summary(batch: dict, task_summaries: list[dict], selecte
         "id": batch["id"],
         "name": batch["name"],
         "total": batch["total"],
+        "created": batch.get("created", batch["total"]),
         "succeeded": batch["succeeded"],
         "failed": batch["failed"],
         "cancelled": batch["cancelled"],
+        "missing": batch.get("missing", 0),
         "processing": batch["processing"],
         "partIndex": selected_part["index"],
         "partCount": selected_part["partCount"],

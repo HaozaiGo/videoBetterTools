@@ -16,8 +16,8 @@ function sourceLabel(source: AdminInternalBatchZip["source"]) {
 }
 
 function completionText(zip: AdminInternalBatchZip) {
-  const skipped = zip.failed + zip.cancelled + zip.processing;
-  return skipped ? `${zip.succeeded}/${zip.total}，跳过 ${skipped}` : `${zip.succeeded}/${zip.total}`;
+  const unfinished = zip.failed + zip.cancelled + zip.processing;
+  return unfinished ? `${zip.succeeded}/${zip.total}，未完成 ${unfinished}` : `${zip.succeeded}/${zip.total}`;
 }
 
 function zipKey(zip: Pick<AdminInternalBatchZip, "userId" | "batchId" | "partIndex">) {
