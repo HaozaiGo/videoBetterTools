@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 import app.services as services
 from app.models import Asset, Base, Task, User, Wallet
 from app.storage import StoredObject
-from app.services import create_internal_batch_zip, create_task, delete_tasks_from_list, get_task_result_access, get_task_result_url, internal_batch_status, now, paginated_tasks, plan_internal_batch_zip, retry_failed_task_single_gpu, retry_internal_batch_task_with_replacement_asset, retry_internal_batch_tasks, task_to_dict
+from app.services import create_internal_batch_zip, create_task, delete_tasks_from_list, get_task_result_access, get_task_result_url, internal_batch_status, now, paginated_tasks, plan_internal_batch_zip, retry_failed_task_single_gpu, retry_internal_batch_missing_result_task, retry_internal_batch_task_with_replacement_asset, retry_internal_batch_tasks, task_to_dict
 
 
 class FakeLocalStorage:
@@ -970,6 +970,158 @@ def test_internal_batch_retry_can_replace_unreadable_input_and_enqueue_front(tmp
         assert retried.completed_at is None
 
     assert enqueued == [("replace-input-task", True)]
+
+
+def test_internal_batch_status_flags_succeeded_task_with_missing_result(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services, "storage", FakeRemoteStorage(existing_keys={"input-ok.mp4"}))
+
+    with Session(engine) as db:
+        user = User(id="user-missing-result", email="missing-result@example.com", name="Missing Result", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=90, frozen_credits=0)
+        input_asset = Asset(
+            id="missing-result-input",
+            user_id=user.id,
+            kind="video",
+            original_name="episode-1.mp4",
+            mime_type="video/mp4",
+            storage_key="input-ok.mp4",
+            url="https://tos.example.test/input-ok.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        output_asset = Asset(
+            id="missing-result-output",
+            user_id=user.id,
+            kind="result",
+            original_name="episode-1-result.mp4",
+            mime_type="video/mp4",
+            storage_key="missing-result.mp4",
+            url="https://tos.example.test/missing-result.mp4",
+            size_bytes=10,
+            duration_seconds=0,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="missing-result-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=input_asset.id,
+            output_asset_id=output_asset.id,
+            status="succeeded",
+            params={"internalBatchId": "batch-missing-result", "internalBatchName": "missing result batch", "internalBatchTotal": 1},
+            estimated_credits=10,
+            frozen_credits=0,
+            charged_credits=10,
+            provider="mock",
+            provider_job_id="missing-result-provider",
+            output_url="https://tos.example.test/missing-result.mp4",
+            progress_percent=100,
+            progress_stage="处理完成，结果已入库",
+            completed_at=now(),
+        )
+        db.add_all([user, wallet, input_asset, output_asset, task])
+        db.commit()
+
+        status = internal_batch_status(db, user.id, "batch-missing-result")
+
+    assert status["tasks"][0]["resultMissing"] is True
+    assert "对象存储文件不存在" in status["tasks"][0]["resultMissingReason"]
+    assert status["tasks"][0]["previewUrl"] == ""
+
+
+def test_missing_result_retry_fronts_queue_without_double_charge(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services, "storage", FakeRemoteStorage(existing_keys={"input-ok.mp4"}))
+    enqueued: list[tuple[str, bool]] = []
+
+    def fake_enqueue(task_id: str, at_front: bool = False) -> None:
+        enqueued.append((task_id, at_front))
+
+    monkeypatch.setattr(services, "enqueue_provider_job", fake_enqueue)
+
+    with Session(engine) as db:
+        user = User(id="user-missing-result-retry", email="missing-result-retry@example.com", name="Missing Result Retry", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=90, frozen_credits=0)
+        input_asset = Asset(
+            id="missing-result-retry-input",
+            user_id=user.id,
+            kind="video",
+            original_name="episode-1.mp4",
+            mime_type="video/mp4",
+            storage_key="input-ok.mp4",
+            url="https://tos.example.test/input-ok.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        output_asset = Asset(
+            id="missing-result-retry-output",
+            user_id=user.id,
+            kind="result",
+            original_name="episode-1-result.mp4",
+            mime_type="video/mp4",
+            storage_key="missing-result.mp4",
+            url="https://tos.example.test/missing-result.mp4",
+            size_bytes=10,
+            duration_seconds=0,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="missing-result-retry-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=input_asset.id,
+            output_asset_id=output_asset.id,
+            status="succeeded",
+            params={"internalBatchId": "batch-missing-result-retry", "internalBatchName": "missing result retry", "internalBatchTotal": 1},
+            estimated_credits=10,
+            frozen_credits=0,
+            charged_credits=10,
+            provider="mock",
+            provider_job_id="old-missing-result-retry",
+            output_url="https://tos.example.test/missing-result.mp4",
+            progress_percent=100,
+            progress_stage="处理完成，结果已入库",
+            completed_at=now(),
+        )
+        db.add_all([user, wallet, input_asset, output_asset, task])
+        db.commit()
+
+        result = retry_internal_batch_missing_result_task(db, user.id, "batch-missing-result-retry", task.id, at_front=True)
+        retried = db.get(Task, task.id)
+        provider_job_id = retried.provider_job_id
+        wallet_after_retry = db.get(Wallet, user.id)
+
+        assert result["task"]["id"] == task.id
+        assert retried.status == "queued"
+        assert retried.output_asset_id is None
+        assert retried.charged_credits == 10
+        assert retried.frozen_credits == 0
+        assert retried.params["_noChargeRetry"] is True
+        assert wallet_after_retry.credits == 90
+        assert wallet_after_retry.frozen_credits == 0
+
+        services.provider_callback(
+            db,
+            provider_job_id,
+            "succeeded",
+            output_storage_key="new-result.mp4",
+            output_url="https://tos.example.test/new-result.mp4",
+            output_mime_type="video/mp4",
+            output_size_bytes=10,
+        )
+        completed = db.get(Task, task.id)
+        wallet_after_callback = db.get(Wallet, user.id)
+
+    assert enqueued == [("missing-result-retry-task", True)]
+    assert completed.status == "succeeded"
+    assert completed.charged_credits == 10
+    assert wallet_after_callback.credits == 90
+    assert wallet_after_callback.frozen_credits == 0
 
 
 def test_internal_batch_retry_rejects_unreadable_remote_input(tmp_path, monkeypatch) -> None:

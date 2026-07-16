@@ -194,10 +194,34 @@ def asset_to_dict(asset: Asset) -> dict:
     }
 
 
-def task_to_dict(task: Task) -> dict:
+def task_result_missing_reason(task: Task) -> str:
+    if task.status != "succeeded":
+        return ""
+    preview_path = task_preview_path(task)
+    if preview_path.exists() and preview_path.is_file():
+        return ""
+    output_asset = getattr(task, "output_asset", None)
+    if output_asset is None:
+        return "结果 Asset 记录缺失"
+    if not output_asset.storage_key:
+        return "结果对象存储 key 缺失"
+    if getattr(storage, "is_remote", False):
+        remote_exists = getattr(storage, "remote_exists", None)
+        if not callable(remote_exists) or remote_exists(output_asset.storage_key):
+            return ""
+        return "结果对象存储文件不存在，可能已过期清理"
+    local_path_for_key = getattr(storage, "local_path", None)
+    if not callable(local_path_for_key):
+        return ""
+    local_path = local_path_for_key(output_asset.storage_key)
+    return "" if local_path.exists() and local_path.is_file() else "结果本地文件不存在，可能已过期清理"
+
+
+def task_to_dict(task: Task, verify_result: bool = False) -> dict:
     preview_path = task_preview_path(task)
     input_asset = getattr(task, "input_asset", None)
-    has_result_access = bool(preview_path.exists() or task.output_asset_id)
+    result_missing_reason = task_result_missing_reason(task) if verify_result else ""
+    has_result_access = bool((preview_path.exists() and preview_path.is_file()) or (task.output_asset_id and not result_missing_reason))
     return {
         "id": task.id,
         "userId": task.user_id,
@@ -220,6 +244,8 @@ def task_to_dict(task: Task) -> dict:
         "completedAt": serialize_datetime(task.completed_at),
         "outputUrl": task.output_url,
         "previewUrl": f"/api/tasks/{task.id}/preview-result" if has_result_access else "",
+        "resultMissing": bool(result_missing_reason),
+        "resultMissingReason": result_missing_reason,
     }
 
 
@@ -352,7 +378,7 @@ def _internal_batch_tasks(db: Session, user_id: str, batch_id: str) -> list[Task
             Task.tool_slug == "subtitle-translate-workflow",
             batch_id_expr == batch_id,
         )
-        .options(selectinload(Task.input_asset))
+        .options(selectinload(Task.input_asset), selectinload(Task.output_asset))
         .order_by(Task.created_at.asc())
     ).scalars())
 
@@ -381,7 +407,7 @@ def internal_batch_status(db: Session, user_id: str, batch_id: str) -> dict:
         "missing": missing,
         "processing": processing,
         "downloadReady": succeeded > 0 and missing == 0 and active_processing == 0,
-        "tasks": [task_to_dict(task) for task in tasks],
+        "tasks": [task_to_dict(task, verify_result=True) for task in tasks],
     }
 
 
@@ -891,6 +917,61 @@ def retry_internal_batch_task_with_replacement_asset(
     task.completed_at = None
     wallet.frozen_credits += estimate
     add_ledger(db, user_id, "freeze", 0, f"{tool['name']} 补传重跑，冻结 {estimate} 积分", task.id)
+    cancel_marker = settings.upload_path / f"{task.id}.cancel"
+    cancel_marker.unlink(missing_ok=True)
+
+    db.commit()
+    db.refresh(task)
+    enqueue_provider_job(task.id, at_front=at_front)
+    return {"task": task_to_dict(task), "batch": internal_batch_status(db, user_id, batch_id)}
+
+
+def retry_internal_batch_missing_result_task(
+    db: Session,
+    user_id: str,
+    batch_id: str,
+    task_id: str,
+    at_front: bool = True,
+) -> dict:
+    task = db.execute(
+        select(Task)
+        .where(Task.id == task_id, Task.user_id == user_id)
+        .options(selectinload(Task.input_asset), selectinload(Task.output_asset))
+        .with_for_update()
+    ).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    params = dict(task.params or {})
+    if task.tool_slug != "subtitle-translate-workflow" or str(params.get("internalBatchId") or "") != batch_id:
+        raise HTTPException(status_code=400, detail="task does not belong to this internal batch")
+    if task.status != "succeeded":
+        raise HTTPException(status_code=409, detail="only succeeded tasks can use missing-result retry")
+
+    missing_reason = task_result_missing_reason(task)
+    if not missing_reason:
+        raise HTTPException(status_code=409, detail="task result object still exists; no retry needed")
+    input_asset = getattr(task, "input_asset", None) or db.get(Asset, task.input_asset_id)
+    if input_asset is None or input_asset.user_id != user_id:
+        raise HTTPException(status_code=400, detail="missing uploaded asset for task")
+    ensure_input_asset_remote_readable(input_asset)
+
+    tool = get_tool(task.tool_slug)
+    if tool is None or tool["status"] != "online":
+        raise HTTPException(status_code=400, detail=f"tool is not available: {task.tool_slug}")
+
+    params["_noChargeRetry"] = True
+    params["_missingResultRetryAt"] = int(now().timestamp() * 1000)
+    params["_missingResultReason"] = missing_reason
+    task.params = params
+    task.status = "queued"
+    task.provider_job_id = f"mock_{uuid4()}"
+    task.frozen_credits = 0
+    task.error_code = None
+    task.progress_percent = 0
+    task.progress_stage = "结果文件缺失，已插队重跑，等待 worker 领取任务"
+    task.output_asset_id = None
+    task.output_url = ""
+    task.completed_at = None
     cancel_marker = settings.upload_path / f"{task.id}.cancel"
     cancel_marker.unlink(missing_ok=True)
 
@@ -1480,7 +1561,9 @@ def provider_callback(
             task.progress_stage = "worker 已领取，准备提交远端任务"
 
     if status == "succeeded" and task.status not in {"succeeded", "failed", "cancelled"}:
-        charge = min(charged_credits or task.estimated_credits, task.frozen_credits)
+        no_charge_retry = bool((task.params or {}).get("_noChargeRetry"))
+        previous_charged = int(task.charged_credits or 0)
+        charge = 0 if no_charge_retry else min(charged_credits or task.estimated_credits, task.frozen_credits)
         # 本地 worker 或真实供应商都可以传入结果文件；未传时用文本占位，方便其他 mock 工具继续跑通。
         storage_key = output_storage_key or f"{task.id}-result.txt"
         result_url = output_url or public_url(storage_key)
@@ -1503,11 +1586,12 @@ def provider_callback(
         task.progress_stage = "处理完成，结果已入库"
         task.output_asset_id = output_asset.id
         task.output_url = output_asset.url
-        task.charged_credits = charge
+        task.charged_credits = previous_charged if no_charge_retry else charge
         task.completed_at = now()
         wallet.frozen_credits = max(0, wallet.frozen_credits - task.frozen_credits)
         wallet.credits = max(0, wallet.credits - charge)
-        add_ledger(db, task.user_id, "charge", -charge, f"{tool['name']} 扣费完成", task.id)
+        if charge:
+            add_ledger(db, task.user_id, "charge", -charge, f"{tool['name']} 扣费完成", task.id)
         auto_zip_batch_id = _completed_internal_batch_id_for_auto_zip(db, task)
 
     if status == "failed" and task.status not in {"succeeded", "failed", "cancelled"}:

@@ -597,6 +597,14 @@ export function uploadAdminInternalBatchTaskRetry(input: { userId: string; batch
   );
 }
 
+export function retryAdminInternalBatchMissingResultTask(userId: string, batchId: string, taskId: string) {
+  const params = new URLSearchParams({ userId });
+  return request<{ task: Task; batch: InternalBatchStatus }>(
+    `/api/admin/internal-batches/${encodeURIComponent(batchId)}/tasks/${encodeURIComponent(taskId)}/retry-missing-result?${params.toString()}`,
+    { method: "POST" },
+  );
+}
+
 export function getAdminInternalBatchZips(page = 1, perPage = 50, status: AdminInternalBatchZipStatus = "ready", name = "") {
   const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
   params.set("status", status);

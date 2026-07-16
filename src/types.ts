@@ -151,6 +151,8 @@ export type Task = {
   providerJobId: string;
   errorCode: string | null;
   failureReason?: string;
+  resultMissing?: boolean;
+  resultMissingReason?: string;
   progressPercent: number;
   progressStage: string;
   createdAt: number;

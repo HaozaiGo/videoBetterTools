@@ -1,6 +1,6 @@
 import { Fragment, type FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { getAdminInternalBatches, getAdminInternalBatchStatus, regenerateAdminInternalBatchZip, retryAdminInternalBatchTasks, uploadAdminInternalBatchMissingEpisode, uploadAdminInternalBatchTaskRetry } from "../api/client";
+import { getAdminInternalBatches, getAdminInternalBatchStatus, regenerateAdminInternalBatchZip, retryAdminInternalBatchMissingResultTask, retryAdminInternalBatchTasks, uploadAdminInternalBatchMissingEpisode, uploadAdminInternalBatchTaskRetry } from "../api/client";
 import { formatDate } from "../lib/format";
 import type { AdminInternalBatch, AdminInternalBatchStatus, Task, TaskStatus } from "../types";
 
@@ -72,6 +72,7 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
   const [message, setMessage] = useState("");
   const [uploadingEpisode, setUploadingEpisode] = useState<number | null>(null);
   const [uploadingTaskId, setUploadingTaskId] = useState("");
+  const [retryingMissingResultTaskId, setRetryingMissingResultTaskId] = useState("");
   const detailQuery = useQuery({
     queryKey: ["admin-internal-batch-detail", batch.userId, batch.batchId],
     queryFn: () => getAdminInternalBatchStatus(batch.userId, batch.batchId),
@@ -120,8 +121,23 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
       setUploadingTaskId("");
     },
   });
+  const missingResultRetryMutation = useMutation({
+    mutationFn: (taskId: string) => retryAdminInternalBatchMissingResultTask(batch.userId, batch.batchId, taskId),
+    onSuccess: (payload, taskId) => {
+      setMessage(`结果缺失任务已插队重跑：${taskId}`);
+      setRetryingMissingResultTaskId("");
+      queryClient.setQueryData(["admin-internal-batch-detail", batch.userId, batch.batchId], payload.batch);
+      queryClient.invalidateQueries({ queryKey: ["admin-internal-batches"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-gpu"] });
+    },
+    onError: (error) => {
+      setMessage(error instanceof Error ? error.message : "结果缺失重跑失败");
+      setRetryingMissingResultTaskId("");
+    },
+  });
   const detail = detailQuery.data;
   const retryableCount = (detail?.failed || 0) + (detail?.cancelled || 0);
+  const missingResultCount = detail?.tasks.filter((task) => task.status === "succeeded" && task.resultMissing).length ?? 0;
   const rows = detail ? episodeRows(detail.tasks, detail.total) : [];
 
   function uploadMissingEpisode(episode: number, file: File | undefined) {
@@ -138,13 +154,19 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
     taskUploadRetryMutation.mutate({ taskId, file });
   }
 
+  function retryMissingResultTask(taskId: string) {
+    setRetryingMissingResultTaskId(taskId);
+    setMessage("");
+    missingResultRetryMutation.mutate(taskId);
+  }
+
   return (
     <div className="internal-batch-detail-card">
       <div className="internal-batch-detail-head">
         <div>
           <strong>{detail?.name || batch.batchName}</strong>
           <span>
-            {detail ? `完成 ${detail.succeeded}/${detail.total}，失败 ${detail.failed}，处理中 ${detail.processing}` : "正在读取批次明细"}
+            {detail ? `完成 ${detail.succeeded}/${detail.total}，失败 ${detail.failed}，处理中 ${detail.processing}，结果缺失 ${missingResultCount}` : "正在读取批次明细"}
           </span>
         </div>
         <div>
@@ -156,7 +178,7 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
           </button>
         </div>
       </div>
-      {message ? <div className={message.includes("失败") || message.includes("insufficient") || message.includes("missing") ? "inline-error-message" : "inline-success-message"}>{message}</div> : null}
+      {message ? <div className={message.includes("失败") || message.includes("insufficient") || message.includes("missing") || message.includes("缺失重跑失败") ? "inline-error-message" : "inline-success-message"}>{message}</div> : null}
       <div className="internal-episode-list">
         <table>
           <thead>
@@ -208,7 +230,10 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
                       <strong>{row.task.inputAssetName || row.task.id}</strong>
                       <em className="subtle">{row.task.providerJobId}</em>
                     </td>
-                    <td><span className={`status ${row.task.status}`}>{taskStatusLabel(row.task.status)}</span></td>
+                    <td>
+                      <span className={`status ${row.task.resultMissing ? "failed" : row.task.status}`}>{row.task.resultMissing ? "结果缺失" : taskStatusLabel(row.task.status)}</span>
+                      {row.task.resultMissingReason ? <em className="subtle">{row.task.resultMissingReason}</em> : null}
+                    </td>
                     <td>
                       <div className="internal-episode-progress">
                         <span>{row.task.progressPercent}%</span>
@@ -239,6 +264,16 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
                             {uploadingTaskId === row.task.id ? "补传中" : "补传重跑"}
                           </button>
                         </>
+                      ) : row.task.status === "succeeded" && row.task.resultMissing ? (
+                        <button
+                          className="primary compact"
+                          type="button"
+                          disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending || missingResultRetryMutation.isPending}
+                          title="原始输入视频仍可读取时，将该集插队到队列最前重跑，不重复扣费"
+                          onClick={() => retryMissingResultTask(row.task.id)}
+                        >
+                          {retryingMissingResultTaskId === row.task.id ? "入队中" : "插队重跑"}
+                        </button>
                       ) : (
                         "-"
                       )}

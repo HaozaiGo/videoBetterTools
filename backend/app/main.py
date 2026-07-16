@@ -33,6 +33,7 @@ from app.services import (
     provider_callback,
     recharge_wallet,
     retry_failed_task_single_gpu,
+    retry_internal_batch_missing_result_task,
     retry_internal_batch_task_with_replacement_asset,
     retry_internal_batch_tasks,
     save_upload,
@@ -481,6 +482,17 @@ async def admin_internal_batch_task_upload_retry_endpoint(
     asset = await save_upload(db, user_id, file, kind="video", duration_seconds=duration_seconds)
     payload = retry_internal_batch_task_with_replacement_asset(db, user_id, batch_id, task_id, asset.id, duration_seconds=duration_seconds, at_front=True)
     return {"asset": asset_to_dict(asset), **payload}
+
+
+@app.post("/api/admin/internal-batches/{batch_id}/tasks/{task_id}/retry-missing-result")
+def admin_internal_batch_task_missing_result_retry_endpoint(
+    batch_id: str,
+    task_id: str,
+    user_id: str = Query(..., alias="userId"),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> dict:
+    return retry_internal_batch_missing_result_task(db, user_id, batch_id, task_id, at_front=True)
 
 
 @app.get("/api/admin/internal-batch-zips")
