@@ -146,7 +146,7 @@ def finalize_provider_job_result(task_id: str, provider_job_id: str, result: dic
 def process_provider_job(task_id: str) -> None:
     with SessionLocal() as db:
         task = db.get(Task, task_id)
-        if task is None:
+        if task is None or task.status != "queued":
             return
         provider_job_id = task.provider_job_id
         provider_callback(db, provider_job_id, "processing", callback_id=f"{provider_job_id}:processing")

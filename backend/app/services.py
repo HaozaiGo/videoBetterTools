@@ -981,6 +981,46 @@ def retry_internal_batch_missing_result_task(
     return {"task": task_to_dict(task), "batch": internal_batch_status(db, user_id, batch_id)}
 
 
+def prioritize_internal_batch_queued_task(
+    db: Session,
+    user_id: str,
+    batch_id: str,
+    task_id: str,
+    at_front: bool = True,
+) -> dict:
+    task = db.execute(
+        select(Task)
+        .where(Task.id == task_id, Task.user_id == user_id)
+        .options(selectinload(Task.input_asset))
+        .with_for_update()
+    ).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    params = dict(task.params or {})
+    if task.tool_slug != "subtitle-translate-workflow" or str(params.get("internalBatchId") or "") != batch_id:
+        raise HTTPException(status_code=400, detail="task does not belong to this internal batch")
+    if task.status != "queued":
+        raise HTTPException(status_code=409, detail="only queued tasks can be prioritized")
+    input_asset = getattr(task, "input_asset", None) or db.get(Asset, task.input_asset_id)
+    if input_asset is None or input_asset.user_id != user_id:
+        raise HTTPException(status_code=400, detail="missing uploaded asset for task")
+    ensure_input_asset_remote_readable(input_asset)
+
+    params["_manualPriorityBoostCount"] = int(params.get("_manualPriorityBoostCount") or 0) + 1
+    params["_manualPriorityBoostAt"] = int(now().timestamp() * 1000)
+    task.params = params
+    task.error_code = None
+    task.progress_percent = max(5, task.progress_percent)
+    task.progress_stage = "已插队到最高优先级，等待 worker 领取任务"
+    cancel_marker = settings.upload_path / f"{task.id}.cancel"
+    cancel_marker.unlink(missing_ok=True)
+
+    db.commit()
+    db.refresh(task)
+    enqueue_provider_job(task.id, at_front=at_front)
+    return {"task": task_to_dict(task), "batch": internal_batch_status(db, user_id, batch_id)}
+
+
 def retry_failed_task_single_gpu(db: Session, user_id: str, task_id: str) -> Task:
     task = db.execute(
         select(Task)

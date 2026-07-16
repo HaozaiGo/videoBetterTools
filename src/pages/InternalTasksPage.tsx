@@ -1,6 +1,6 @@
 import { Fragment, type FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { getAdminInternalBatches, getAdminInternalBatchStatus, regenerateAdminInternalBatchZip, retryAdminInternalBatchMissingResultTask, retryAdminInternalBatchTasks, uploadAdminInternalBatchMissingEpisode, uploadAdminInternalBatchTaskRetry } from "../api/client";
+import { getAdminInternalBatches, getAdminInternalBatchStatus, prioritizeAdminInternalBatchTask, regenerateAdminInternalBatchZip, retryAdminInternalBatchMissingResultTask, retryAdminInternalBatchTasks, uploadAdminInternalBatchMissingEpisode, uploadAdminInternalBatchTaskRetry } from "../api/client";
 import { formatDate } from "../lib/format";
 import type { AdminInternalBatch, AdminInternalBatchStatus, Task, TaskStatus } from "../types";
 
@@ -73,6 +73,7 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
   const [uploadingEpisode, setUploadingEpisode] = useState<number | null>(null);
   const [uploadingTaskId, setUploadingTaskId] = useState("");
   const [retryingMissingResultTaskId, setRetryingMissingResultTaskId] = useState("");
+  const [prioritizingTaskId, setPrioritizingTaskId] = useState("");
   const detailQuery = useQuery({
     queryKey: ["admin-internal-batch-detail", batch.userId, batch.batchId],
     queryFn: () => getAdminInternalBatchStatus(batch.userId, batch.batchId),
@@ -135,6 +136,20 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
       setRetryingMissingResultTaskId("");
     },
   });
+  const prioritizeMutation = useMutation({
+    mutationFn: (taskId: string) => prioritizeAdminInternalBatchTask(batch.userId, batch.batchId, taskId),
+    onSuccess: (payload, taskId) => {
+      setMessage(`已插队到最高优先级：${taskId}`);
+      setPrioritizingTaskId("");
+      queryClient.setQueryData(["admin-internal-batch-detail", batch.userId, batch.batchId], payload.batch);
+      queryClient.invalidateQueries({ queryKey: ["admin-internal-batches"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-gpu"] });
+    },
+    onError: (error) => {
+      setMessage(error instanceof Error ? error.message : "插队失败");
+      setPrioritizingTaskId("");
+    },
+  });
   const detail = detailQuery.data;
   const retryableCount = (detail?.failed || 0) + (detail?.cancelled || 0);
   const missingResultCount = detail?.tasks.filter((task) => task.status === "succeeded" && task.resultMissing).length ?? 0;
@@ -160,6 +175,12 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
     missingResultRetryMutation.mutate(taskId);
   }
 
+  function prioritizeTask(taskId: string) {
+    setPrioritizingTaskId(taskId);
+    setMessage("");
+    prioritizeMutation.mutate(taskId);
+  }
+
   return (
     <div className="internal-batch-detail-card">
       <div className="internal-batch-detail-head">
@@ -178,7 +199,7 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
           </button>
         </div>
       </div>
-      {message ? <div className={message.includes("失败") || message.includes("insufficient") || message.includes("missing") || message.includes("缺失重跑失败") ? "inline-error-message" : "inline-success-message"}>{message}</div> : null}
+      {message ? <div className={message.includes("失败") || message.includes("insufficient") || message.includes("missing") || message.includes("缺失重跑失败") || message.includes("插队失败") ? "inline-error-message" : "inline-success-message"}>{message}</div> : null}
       <div className="internal-episode-list">
         <table>
           <thead>
@@ -207,7 +228,7 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
                         className="visually-hidden"
                         type="file"
                         accept="video/*"
-                        disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending}
+                        disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending || prioritizeMutation.isPending}
                         onChange={(event) => {
                           uploadMissingEpisode(row.episode, event.target.files?.[0]);
                           event.target.value = "";
@@ -216,7 +237,7 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
                       <button
                         className="ghost compact"
                         type="button"
-                        disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending}
+                        disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending || prioritizeMutation.isPending}
                         onClick={() => document.getElementById(`missing-upload-${batch.batchId}-${row.episode}`)?.click()}
                       >
                         {uploadingEpisode === row.episode ? "补传中" : "补传视频"}
@@ -249,7 +270,7 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
                             className="visually-hidden"
                             type="file"
                             accept="video/*"
-                            disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending}
+                            disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending || prioritizeMutation.isPending}
                             onChange={(event) => {
                               uploadRetryTask(row.task.id, event.target.files?.[0]);
                               event.target.value = "";
@@ -258,7 +279,7 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
                           <button
                             className="ghost compact"
                             type="button"
-                            disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending}
+                            disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending || prioritizeMutation.isPending}
                             onClick={() => document.getElementById(`task-upload-retry-${row.task.id}`)?.click()}
                           >
                             {uploadingTaskId === row.task.id ? "补传中" : "补传重跑"}
@@ -268,11 +289,21 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
                         <button
                           className="primary compact"
                           type="button"
-                          disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending || missingResultRetryMutation.isPending}
+                          disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending || missingResultRetryMutation.isPending || prioritizeMutation.isPending}
                           title="原始输入视频仍可读取时，将该集插队到队列最前重跑，不重复扣费"
                           onClick={() => retryMissingResultTask(row.task.id)}
                         >
                           {retryingMissingResultTaskId === row.task.id ? "入队中" : "插队重跑"}
+                        </button>
+                      ) : row.task.status === "queued" ? (
+                        <button
+                          className="primary compact"
+                          type="button"
+                          disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending || missingResultRetryMutation.isPending || prioritizeMutation.isPending}
+                          title="把当前排队任务重新推到 worker 队列最前，不重建任务、不重复冻结积分"
+                          onClick={() => prioritizeTask(row.task.id)}
+                        >
+                          {prioritizingTaskId === row.task.id ? "插队中" : "插队优先"}
                         </button>
                       ) : (
                         "-"

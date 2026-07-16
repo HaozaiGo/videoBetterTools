@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 import app.services as services
 from app.models import Asset, Base, Task, User, Wallet
 from app.storage import StoredObject
-from app.services import create_internal_batch_zip, create_task, delete_tasks_from_list, get_task_result_access, get_task_result_url, internal_batch_status, now, paginated_tasks, plan_internal_batch_zip, retry_failed_task_single_gpu, retry_internal_batch_missing_result_task, retry_internal_batch_task_with_replacement_asset, retry_internal_batch_tasks, task_to_dict
+from app.services import create_internal_batch_zip, create_task, delete_tasks_from_list, get_task_result_access, get_task_result_url, internal_batch_status, now, paginated_tasks, plan_internal_batch_zip, prioritize_internal_batch_queued_task, retry_failed_task_single_gpu, retry_internal_batch_missing_result_task, retry_internal_batch_task_with_replacement_asset, retry_internal_batch_tasks, task_to_dict
 
 
 class FakeLocalStorage:
@@ -1122,6 +1122,65 @@ def test_missing_result_retry_fronts_queue_without_double_charge(monkeypatch) ->
     assert completed.charged_credits == 10
     assert wallet_after_callback.credits == 90
     assert wallet_after_callback.frozen_credits == 0
+
+
+def test_prioritize_internal_batch_queued_task_enqueues_front_without_refreeze(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services, "storage", FakeRemoteStorage(existing_keys={"priority-input.mp4"}))
+    enqueued: list[tuple[str, bool]] = []
+
+    def fake_enqueue(task_id: str, at_front: bool = False) -> None:
+        enqueued.append((task_id, at_front))
+
+    monkeypatch.setattr(services, "enqueue_provider_job", fake_enqueue)
+
+    with Session(engine) as db:
+        user = User(id="user-priority", email="priority@example.com", name="Priority User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=32)
+        asset = Asset(
+            id="priority-input",
+            user_id=user.id,
+            kind="video",
+            original_name="priority.mp4",
+            mime_type="video/mp4",
+            storage_key="priority-input.mp4",
+            url="https://tos.example.test/priority-input.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="priority-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=asset.id,
+            output_asset_id=None,
+            status="queued",
+            params={"internalBatchId": "batch-priority", "internalBatchName": "priority batch", "internalBatchTotal": 1},
+            estimated_credits=32,
+            frozen_credits=32,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="priority-provider",
+            output_url="",
+            progress_percent=5,
+            progress_stage="远端 GPU 队列已满，等待空位自动重试（第 813 次）",
+        )
+        db.add_all([user, wallet, asset, task])
+        db.commit()
+
+        result = prioritize_internal_batch_queued_task(db, user.id, "batch-priority", task.id, at_front=True)
+        prioritized = db.get(Task, task.id)
+        wallet_after = db.get(Wallet, user.id)
+
+    assert result["task"]["id"] == "priority-task"
+    assert prioritized.status == "queued"
+    assert prioritized.frozen_credits == 32
+    assert prioritized.params["_manualPriorityBoostCount"] == 1
+    assert prioritized.progress_stage == "已插队到最高优先级，等待 worker 领取任务"
+    assert wallet_after.frozen_credits == 32
+    assert enqueued == [("priority-task", True)]
 
 
 def test_internal_batch_retry_rejects_unreadable_remote_input(tmp_path, monkeypatch) -> None:

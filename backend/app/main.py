@@ -31,6 +31,7 @@ from app.services import (
     paginated_tasks,
     plan_internal_batch_zip,
     provider_callback,
+    prioritize_internal_batch_queued_task,
     recharge_wallet,
     retry_failed_task_single_gpu,
     retry_internal_batch_missing_result_task,
@@ -493,6 +494,17 @@ def admin_internal_batch_task_missing_result_retry_endpoint(
     _admin: User = Depends(admin_user),
 ) -> dict:
     return retry_internal_batch_missing_result_task(db, user_id, batch_id, task_id, at_front=True)
+
+
+@app.post("/api/admin/internal-batches/{batch_id}/tasks/{task_id}/prioritize")
+def admin_internal_batch_task_prioritize_endpoint(
+    batch_id: str,
+    task_id: str,
+    user_id: str = Query(..., alias="userId"),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> dict:
+    return prioritize_internal_batch_queued_task(db, user_id, batch_id, task_id, at_front=True)
 
 
 @app.get("/api/admin/internal-batch-zips")
