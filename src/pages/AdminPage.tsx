@@ -129,6 +129,7 @@ export function AdminPage() {
   const gpuStatusText = !gpuMetrics ? "检查中" : gpuMetrics.ok ? "远端在线" : "远端异常";
   const gpus = gpuMetrics?.gpus || [];
   const runningJobs = gpuMetrics?.runningJobs || [];
+  const queuedJobs = gpuMetrics?.queuedJobs || [];
   const busyGpuCount = gpus.filter((gpu) => gpu.utilizationGpuPercent > 5 || gpu.workerSlotsUsed > 0).length;
   const freeGpuCount = gpus.filter((gpu) => gpu.utilizationGpuPercent <= 5 && gpu.memoryUsedMiB < 1024 && gpu.workerSlotsUsed === 0).length;
 
@@ -217,6 +218,25 @@ export function AdminPage() {
             ))
           ) : (
             <div className="empty">当前没有运行中的远端任务。</div>
+          )}
+        </div>
+        <div className="gpu-job-list">
+          <h3>接下来排队处理</h3>
+          {queuedJobs.length ? (
+            queuedJobs.map((job) => (
+              <div className="gpu-job-row" key={`${job.position}-${job.id}`}>
+                <div>
+                  <strong>{job.displayName || job.inputAssetName || job.toolSlug || "video"}</strong>
+                  <span>{job.displaySubtitle || job.taskId || job.id}</span>
+                </div>
+                <span>第 {job.position} 位</span>
+                <span>{job.taskStatus ? statusLabel(job.taskStatus) : "排队中"}</span>
+                <span>{job.progressPercent}%</span>
+                <em>{job.progressStage || "等待 worker 领取任务"}</em>
+              </div>
+            ))
+          ) : (
+            <div className="empty">当前没有等待 worker 领取的任务。</div>
           )}
         </div>
       </div>

@@ -98,16 +98,34 @@ export type GpuRunningJob = {
   logPath: string;
 };
 
+export type GpuQueuedJob = {
+  id: string;
+  position: number;
+  displayName?: string;
+  displaySubtitle?: string;
+  inputAssetName?: string;
+  internalBatchId?: string;
+  internalBatchName?: string;
+  taskId?: string;
+  taskStatus?: TaskStatus;
+  toolSlug?: string;
+  progressPercent: number;
+  progressStage: string;
+  createdAt: number;
+};
+
 export type GpuMetrics = {
   ok: boolean;
   timestamp: number;
   error?: string;
   gpuDevices: string[];
+  monitorGpuDevices?: string[];
   workersPerGpu: number;
   slotCapacity: number;
   runningByGpu: Record<string, number>;
   gpus: GpuDeviceMetric[];
   runningJobs: GpuRunningJob[];
+  queuedJobs: GpuQueuedJob[];
 };
 
 export type AuthUser = {

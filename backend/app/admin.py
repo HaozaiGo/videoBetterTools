@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
 from app.models import Asset, Task, User, Wallet, WalletLedger
-from app.queue import enqueue_internal_batch_zip, internal_batch_zip_queue
+from app.queue import enqueue_internal_batch_zip, internal_batch_zip_queue, task_queue
 from app.services import create_task, failure_reason_for_task, internal_batch_expected_total_from_name, internal_batch_expected_total_from_tasks, internal_batch_status, normalize_pagination, page_info, ledger_to_dict, plan_internal_batch_zip, task_to_dict
 from app.storage import storage
 
@@ -652,20 +652,7 @@ def _gpu_job_display_map(db: Session, job_ids: list[str]) -> dict[str, dict]:
     display_map: dict[str, dict] = {}
     for task in rows:
         params = task.params if isinstance(task.params, dict) else {}
-        batch_name = str(params.get("internalBatchName") or "").strip()
-        input_name = task.input_asset.original_name if task.input_asset else ""
-        title = batch_name or input_name or task.tool_slug
-        subtitle = input_name if batch_name and input_name else task.provider_job_id
-        display_map[task.provider_job_id] = {
-            "taskId": task.id,
-            "taskStatus": task.status,
-            "toolSlug": task.tool_slug,
-            "inputAssetName": input_name,
-            "internalBatchId": str(params.get("internalBatchId") or ""),
-            "internalBatchName": batch_name,
-            "displayName": title,
-            "displaySubtitle": subtitle,
-        }
+        display_map[task.provider_job_id] = _gpu_task_display_payload(task)
         remote_job_id = str(params.get("remoteGpuJobId") or "").strip()
         if remote_job_id:
             display_map[remote_job_id] = display_map[task.provider_job_id]
@@ -677,6 +664,73 @@ def _gpu_job_display_map(db: Session, job_ids: list[str]) -> dict[str, dict]:
     return display_map
 
 
+def _gpu_task_display_payload(task: Task) -> dict:
+    params = task.params if isinstance(task.params, dict) else {}
+    batch_name = str(params.get("internalBatchName") or "").strip()
+    input_name = task.input_asset.original_name if task.input_asset else ""
+    title = batch_name or input_name or task.tool_slug
+    try:
+        batch_index = int(params.get("internalBatchIndex") or 0)
+    except (TypeError, ValueError):
+        batch_index = 0
+    subtitle_parts = []
+    if batch_index > 0:
+        subtitle_parts.append(f"第 {batch_index} 集")
+    if input_name:
+        subtitle_parts.append(input_name)
+    return {
+        "taskId": task.id,
+        "taskStatus": task.status,
+        "toolSlug": task.tool_slug,
+        "inputAssetName": input_name,
+        "internalBatchId": str(params.get("internalBatchId") or ""),
+        "internalBatchName": batch_name,
+        "displayName": title,
+        "displaySubtitle": " · ".join(subtitle_parts) or task.provider_job_id,
+    }
+
+
+def _queued_gpu_jobs(db: Session, limit: int = 10) -> list[dict]:
+    try:
+        queue = task_queue()
+        job_ids = queue.get_job_ids()[:limit]
+        queued_task_ids = []
+        for job_id in job_ids:
+            job = queue.fetch_job(job_id)
+            if job is None or not job.args:
+                continue
+            task_id = str(job.args[0] or "").strip()
+            if task_id:
+                queued_task_ids.append(task_id)
+    except Exception:
+        return []
+    if not queued_task_ids:
+        return []
+    tasks = db.execute(
+        select(Task)
+        .where(Task.id.in_(queued_task_ids))
+        .options(selectinload(Task.input_asset))
+    ).scalars()
+    task_by_id = {task.id: task for task in tasks}
+    queued_jobs = []
+    for position, task_id in enumerate(queued_task_ids, start=1):
+        task = task_by_id.get(task_id)
+        if task is None:
+            continue
+        payload = _gpu_task_display_payload(task)
+        payload.update(
+            {
+                "id": task.provider_job_id,
+                "position": position,
+                "progressPercent": task.progress_percent,
+                "progressStage": task.progress_stage,
+                "createdAt": int(task.created_at.timestamp() * 1000),
+            }
+        )
+        queued_jobs.append(payload)
+    return queued_jobs
+
+
 def admin_gpu_metrics(db: Session) -> dict:
     base_url = settings.model_plaza_gpu_api_url.rstrip("/")
     if not base_url:
@@ -686,6 +740,7 @@ def admin_gpu_metrics(db: Session) -> dict:
             "error": "GPU API 未配置",
             "gpus": [],
             "runningJobs": [],
+            "queuedJobs": _queued_gpu_jobs(db),
         }
     parsed_base_url = urlparse(base_url)
     target = f"{parsed_base_url.scheme}://{parsed_base_url.netloc}" if parsed_base_url.scheme and parsed_base_url.netloc else base_url
@@ -705,6 +760,7 @@ def admin_gpu_metrics(db: Session) -> dict:
             "error": f"GPU API HTTP {exc.code} ({target}){suffix}",
             "gpus": [],
             "runningJobs": [],
+            "queuedJobs": _queued_gpu_jobs(db),
         }
     except Exception as exc:
         return {
@@ -713,10 +769,12 @@ def admin_gpu_metrics(db: Session) -> dict:
             "error": f"GPU API 请求失败 ({target})：{exc}",
             "gpus": [],
             "runningJobs": [],
+            "queuedJobs": _queued_gpu_jobs(db),
         }
     payload.setdefault("ok", True)
     payload.setdefault("gpus", [])
     payload.setdefault("runningJobs", [])
+    payload["queuedJobs"] = _queued_gpu_jobs(db)
     running_jobs = payload.get("runningJobs") if isinstance(payload.get("runningJobs"), list) else []
     job_ids = [job_id for job in running_jobs if isinstance(job, dict) for job_id in _gpu_job_lookup_keys(job)]
     display_map = _gpu_job_display_map(db, job_ids)
