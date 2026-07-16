@@ -101,6 +101,7 @@ export type GpuRunningJob = {
 export type GpuQueuedJob = {
   id: string;
   position: number;
+  queueState?: "queued" | "scheduled";
   displayName?: string;
   displaySubtitle?: string;
   inputAssetName?: string;

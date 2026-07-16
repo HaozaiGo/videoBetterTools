@@ -693,19 +693,27 @@ def _gpu_task_display_payload(task: Task) -> dict:
 def _queued_gpu_jobs(db: Session, limit: int = 10) -> list[dict]:
     try:
         queue = task_queue()
-        job_ids = queue.get_job_ids()[:limit]
-        queued_task_ids = []
-        for job_id in job_ids:
+        queued_job_specs = [(job_id, "queued") for job_id in queue.get_job_ids()]
+        scheduled_registry = getattr(queue, "scheduled_job_registry", None)
+        if scheduled_registry is not None:
+            queued_job_specs.extend((job_id, "scheduled") for job_id in scheduled_registry.get_job_ids())
+        queued_task_specs = []
+        seen_task_ids: set[str] = set()
+        for job_id, queue_state in queued_job_specs:
+            if len(queued_task_specs) >= limit:
+                break
             job = queue.fetch_job(job_id)
             if job is None or not job.args:
                 continue
             task_id = str(job.args[0] or "").strip()
-            if task_id:
-                queued_task_ids.append(task_id)
+            if task_id and task_id not in seen_task_ids:
+                seen_task_ids.add(task_id)
+                queued_task_specs.append((task_id, queue_state))
     except Exception:
         return []
-    if not queued_task_ids:
+    if not queued_task_specs:
         return []
+    queued_task_ids = [task_id for task_id, _queue_state in queued_task_specs]
     tasks = db.execute(
         select(Task)
         .where(Task.id.in_(queued_task_ids))
@@ -713,7 +721,7 @@ def _queued_gpu_jobs(db: Session, limit: int = 10) -> list[dict]:
     ).scalars()
     task_by_id = {task.id: task for task in tasks}
     queued_jobs = []
-    for position, task_id in enumerate(queued_task_ids, start=1):
+    for position, (task_id, queue_state) in enumerate(queued_task_specs, start=1):
         task = task_by_id.get(task_id)
         if task is None:
             continue
@@ -722,6 +730,7 @@ def _queued_gpu_jobs(db: Session, limit: int = 10) -> list[dict]:
             {
                 "id": task.provider_job_id,
                 "position": position,
+                "queueState": queue_state,
                 "progressPercent": task.progress_percent,
                 "progressStage": task.progress_stage,
                 "createdAt": int(task.created_at.timestamp() * 1000),

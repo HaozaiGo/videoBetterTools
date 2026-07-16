@@ -172,6 +172,37 @@ def test_gpu_api_server_watchdog_treats_log_mtime_as_activity(tmp_path, monkeypa
     assert module.running_progress_snapshots[job_id][1] == 100.0
 
 
+def test_gpu_api_server_metrics_can_monitor_non_worker_gpus(monkeypatch) -> None:
+    module = _load_script_module("propainter_api_server_monitor_test", "scripts/gpu/propainter_api_server.py")
+    monkeypatch.setattr(module, "GPU_DEVICE_IDS", ["6", "7"])
+    monkeypatch.setattr(module, "GPU_MONITOR_DEVICE_IDS", ["0", "1", "6", "7"])
+    monkeypatch.setattr(module, "GPU_WORKERS_PER_DEVICE", 2)
+    monkeypatch.setattr(module, "GPU_SLOT_CAPACITY", 4)
+
+    def fake_run_command(command, timeout=5):
+        assert command[1] == "--id=0,1,6,7"
+        return "\n".join(
+            [
+                "index, name, utilization.gpu [%], utilization.memory [%], memory.used [MiB], memory.total [MiB], temperature.gpu, power.draw [W]",
+                "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 1 %, 0 %, 100 MiB, 97894 MiB, 40, 80 W",
+                "1, NVIDIA RTX PRO 6000 Blackwell Server Edition, 2 %, 0 %, 200 MiB, 97894 MiB, 41, 82 W",
+                "6, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3 %, 1 %, 300 MiB, 97894 MiB, 42, 84 W",
+                "7, NVIDIA RTX PRO 6000 Blackwell Server Edition, 4 %, 1 %, 400 MiB, 97894 MiB, 43, 86 W",
+            ]
+        )
+
+    monkeypatch.setattr(module, "_run_command", fake_run_command)
+    module.running_gpu_devices = {"job-7": "7"}
+
+    payload = module._gpu_metrics()
+
+    assert payload["gpuDevices"] == ["6", "7"]
+    assert payload["monitorGpuDevices"] == ["0", "1", "6", "7"]
+    assert [gpu["index"] for gpu in payload["gpus"]] == ["0", "1", "6", "7"]
+    assert [gpu["workerSlotsTotal"] for gpu in payload["gpus"]] == [0, 0, 2, 2]
+    assert payload["runningByGpu"] == {"0": 0, "1": 0, "6": 0, "7": 1}
+
+
 def test_gpu_api_server_rejects_unsafe_result_cache_paths() -> None:
     module = _load_script_module("propainter_api_server_cache_path_test", "scripts/gpu/propainter_api_server.py")
 

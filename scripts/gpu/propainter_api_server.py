@@ -78,6 +78,7 @@ GPU_DEVICE_IDS = _csv_values(
     or os.environ.get("CUDA_VISIBLE_DEVICES")
     or "0"
 )
+GPU_MONITOR_DEVICE_IDS = _csv_values(os.environ.get("MODEL_PLAZA_GPU_MONITOR_DEVICE_IDS") or ",".join(GPU_DEVICE_IDS))
 GPU_WORKERS_PER_DEVICE = max(1, int(os.environ.get("MODEL_PLAZA_GPU_WORKERS_PER_DEVICE", "1")))
 GPU_SLOT_CAPACITY = max(1, len(GPU_DEVICE_IDS) * GPU_WORKERS_PER_DEVICE)
 MAX_WORKERS = max(1, int(os.environ.get("MODEL_PLAZA_GPU_MAX_WORKERS", str(GPU_SLOT_CAPACITY))))
@@ -138,24 +139,26 @@ def _empty_gpu_metric(gpu_device: str, running_by_gpu: dict[str, int]) -> dict:
         "temperatureGpu": 0,
         "powerDrawW": 0,
         "workerSlotsUsed": running_by_gpu.get(gpu_device, 0),
-        "workerSlotsTotal": GPU_WORKERS_PER_DEVICE,
+        "workerSlotsTotal": GPU_WORKERS_PER_DEVICE if gpu_device in GPU_DEVICE_IDS else 0,
     }
 
 
 def _attach_worker_slots(gpus: list[dict], running_by_gpu: dict[str, int]) -> list[dict]:
     for gpu in gpus:
-        gpu["workerSlotsUsed"] = running_by_gpu.get(str(gpu["index"]), 0)
-        gpu["workerSlotsTotal"] = GPU_WORKERS_PER_DEVICE
+        gpu_device = str(gpu["index"])
+        gpu["workerSlotsUsed"] = running_by_gpu.get(gpu_device, 0)
+        gpu["workerSlotsTotal"] = GPU_WORKERS_PER_DEVICE if gpu_device in GPU_DEVICE_IDS else 0
     return gpus
 
 
-def _query_configured_gpu_metrics(running_by_gpu: dict[str, int]) -> tuple[list[dict], str]:
+def _query_configured_gpu_metrics(running_by_gpu: dict[str, int], gpu_device_ids: list[str] | None = None) -> tuple[list[dict], str]:
+    gpu_device_ids = gpu_device_ids or GPU_DEVICE_IDS
     query_args = [
         "--query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw",
         "--format=csv",
     ]
     try:
-        query_output = _run_command(["nvidia-smi", f"--id={','.join(GPU_DEVICE_IDS)}", *query_args], timeout=5)
+        query_output = _run_command(["nvidia-smi", f"--id={','.join(gpu_device_ids)}", *query_args], timeout=5)
         return _attach_worker_slots(_parse_gpu_csv(query_output), running_by_gpu), ""
     except Exception as exc:
         configured_error = str(exc)
@@ -165,17 +168,17 @@ def _query_configured_gpu_metrics(running_by_gpu: dict[str, int]) -> tuple[list[
         visible_gpus = _parse_gpu_csv(query_output)
     except Exception as exc:
         error = f"{configured_error}; fallback without --id failed: {exc}"
-        return [_empty_gpu_metric(gpu_device, running_by_gpu) for gpu_device in GPU_DEVICE_IDS], error
+        return [_empty_gpu_metric(gpu_device, running_by_gpu) for gpu_device in gpu_device_ids], error
 
-    if len(visible_gpus) == len(GPU_DEVICE_IDS):
+    if len(visible_gpus) == len(gpu_device_ids):
         remapped = []
-        for gpu_device, metric in zip(GPU_DEVICE_IDS, visible_gpus):
+        for gpu_device, metric in zip(gpu_device_ids, visible_gpus):
             remapped.append({**metric, "index": gpu_device})
         return _attach_worker_slots(remapped, running_by_gpu), configured_error
 
     visible_by_index = {str(metric.get("index", "")): metric for metric in visible_gpus}
     metrics = []
-    for gpu_device in GPU_DEVICE_IDS:
+    for gpu_device in gpu_device_ids:
         metric = visible_by_index.get(gpu_device)
         metrics.append({**metric} if metric else _empty_gpu_metric(gpu_device, running_by_gpu))
     return _attach_worker_slots(metrics, running_by_gpu), configured_error
@@ -366,15 +369,16 @@ def _active_job_count() -> int:
 
 
 def _gpu_metrics() -> dict:
-    running_by_gpu = {gpu_device: 0 for gpu_device in GPU_DEVICE_IDS}
+    running_by_gpu = {gpu_device: 0 for gpu_device in GPU_MONITOR_DEVICE_IDS}
     with running_processes_lock:
         for gpu_device in running_gpu_devices.values():
             running_by_gpu[gpu_device] = running_by_gpu.get(gpu_device, 0) + 1
-    gpus, gpu_metrics_error = _query_configured_gpu_metrics(running_by_gpu)
+    gpus, gpu_metrics_error = _query_configured_gpu_metrics(running_by_gpu, GPU_MONITOR_DEVICE_IDS)
     return {
         "ok": not bool(gpu_metrics_error),
         "timestamp": time.time(),
         "gpuDevices": GPU_DEVICE_IDS,
+        "monitorGpuDevices": GPU_MONITOR_DEVICE_IDS,
         "workersPerGpu": GPU_WORKERS_PER_DEVICE,
         "slotCapacity": GPU_SLOT_CAPACITY,
         "runningByGpu": running_by_gpu,

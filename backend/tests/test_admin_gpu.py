@@ -13,9 +13,18 @@ class FakeJob:
         self.args = (task_id,)
 
 
-class FakeQueue:
+class FakeScheduledRegistry:
     def __init__(self, task_ids: list[str]) -> None:
         self.task_ids = task_ids
+
+    def get_job_ids(self) -> list[str]:
+        return [f"job-{task_id}" for task_id in self.task_ids]
+
+
+class FakeQueue:
+    def __init__(self, task_ids: list[str], scheduled_task_ids: list[str] | None = None) -> None:
+        self.task_ids = task_ids
+        self.scheduled_job_registry = FakeScheduledRegistry(scheduled_task_ids or [])
 
     def get_job_ids(self) -> list[str]:
         return [f"job-{task_id}" for task_id in self.task_ids]
@@ -30,7 +39,7 @@ class FakeQueue:
 def test_queued_gpu_jobs_uses_queue_order_and_precise_names(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
-    monkeypatch.setattr(admin, "task_queue", lambda: FakeQueue(["task-2", "task-1"]))
+    monkeypatch.setattr(admin, "task_queue", lambda: FakeQueue(["task-2"], ["task-1"]))
 
     with Session(engine) as db:
         user = User(id="user-gpu-queue", email="gpu-queue@example.com", name="GPU Queue", role="user", status="active")
@@ -71,5 +80,8 @@ def test_queued_gpu_jobs_uses_queue_order_and_precise_names(monkeypatch) -> None
 
     assert [job["taskId"] for job in queued_jobs] == ["task-2", "task-1"]
     assert queued_jobs[0]["position"] == 1
+    assert queued_jobs[0]["queueState"] == "queued"
+    assert queued_jobs[1]["position"] == 2
+    assert queued_jobs[1]["queueState"] == "scheduled"
     assert queued_jobs[0]["displayName"] == "143.和离后，我停了他的续命香（59集）"
     assert queued_jobs[0]["displaySubtitle"] == "第 2 集 · episode-2.mp4"
