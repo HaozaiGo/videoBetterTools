@@ -415,6 +415,16 @@ def admin_tasks_endpoint(
     return admin_tasks(db, page=page, per_page=per_page)
 
 
+@app.get("/api/admin/tasks/{task_id}/result-link")
+def admin_task_result_link_endpoint(
+    task_id: str,
+    user_id: str = Query(..., alias="userId"),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> dict:
+    return {"url": get_task_result_url(db, user_id, task_id)}
+
+
 @app.get("/api/admin/internal-batches")
 def admin_internal_batches_endpoint(
     page: int = Query(1, ge=1),

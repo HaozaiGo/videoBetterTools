@@ -1,6 +1,6 @@
 import { Fragment, type FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { getAdminInternalBatches, getAdminInternalBatchStatus, prioritizeAdminInternalBatchTask, regenerateAdminInternalBatchZip, retryAdminInternalBatchMissingResultTask, retryAdminInternalBatchTasks, uploadAdminInternalBatchMissingEpisode, uploadAdminInternalBatchTaskRetry } from "../api/client";
+import { getAdminInternalBatches, getAdminInternalBatchStatus, openAdminTaskResult, prioritizeAdminInternalBatchTask, regenerateAdminInternalBatchZip, retryAdminInternalBatchMissingResultTask, retryAdminInternalBatchTasks, uploadAdminInternalBatchMissingEpisode, uploadAdminInternalBatchTaskRetry } from "../api/client";
 import { formatDate } from "../lib/format";
 import type { AdminInternalBatch, AdminInternalBatchStatus, Task, TaskStatus } from "../types";
 
@@ -74,6 +74,7 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
   const [uploadingTaskId, setUploadingTaskId] = useState("");
   const [retryingMissingResultTaskId, setRetryingMissingResultTaskId] = useState("");
   const [prioritizingTaskId, setPrioritizingTaskId] = useState("");
+  const [downloadingTaskId, setDownloadingTaskId] = useState("");
   const detailQuery = useQuery({
     queryKey: ["admin-internal-batch-detail", batch.userId, batch.batchId],
     queryFn: () => getAdminInternalBatchStatus(batch.userId, batch.batchId),
@@ -179,6 +180,19 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
     setPrioritizingTaskId(taskId);
     setMessage("");
     prioritizeMutation.mutate(taskId);
+  }
+
+  async function downloadTaskResult(taskId: string) {
+    setDownloadingTaskId(taskId);
+    setMessage("");
+    try {
+      await openAdminTaskResult(batch.userId, taskId);
+      setMessage("已开始下载单集结果");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "单集下载失败");
+    } finally {
+      setDownloadingTaskId("");
+    }
   }
 
   return (
@@ -305,6 +319,15 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
                           onClick={() => prioritizeTask(row.task.id)}
                         >
                           {prioritizingTaskId === row.task.id ? "插队中" : "插队优先"}
+                        </button>
+                      ) : row.task.status === "succeeded" ? (
+                        <button
+                          className="primary compact"
+                          type="button"
+                          disabled={downloadingTaskId === row.task.id}
+                          onClick={() => void downloadTaskResult(row.task.id)}
+                        >
+                          {downloadingTaskId === row.task.id ? "打开中" : "下载"}
                         </button>
                       ) : (
                         "-"

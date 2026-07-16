@@ -123,6 +123,27 @@ export async function openTaskResult(taskId: string) {
   }
 }
 
+export async function openAdminTaskResult(userId: string, taskId: string) {
+  const previewWindow = window.open("about:blank", "_blank");
+  try {
+    const params = new URLSearchParams({ userId });
+    const payload = await request<{ url: string }>(`/api/admin/tasks/${encodeURIComponent(taskId)}/result-link?${params.toString()}`);
+    const token = getAuthToken();
+    const resultUrl = new URL(payload.url, window.location.origin);
+    if (token && resultUrl.origin === window.location.origin && resultUrl.pathname.startsWith("/api/")) {
+      resultUrl.searchParams.set("access_token", token);
+    }
+    if (previewWindow) {
+      previewWindow.location.href = resultUrl.href;
+    } else {
+      window.open(resultUrl.href, "_blank");
+    }
+  } catch (error) {
+    previewWindow?.close();
+    throw error;
+  }
+}
+
 export function getInternalBatchStatus(batchId: string) {
   return request<InternalBatchStatus>(`/api/internal/batches/${encodeURIComponent(batchId)}`);
 }
