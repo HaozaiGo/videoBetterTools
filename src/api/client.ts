@@ -596,6 +596,22 @@ export function regenerateAdminInternalBatchZip(userId: string, batchId: string)
   );
 }
 
+export function deleteAdminInternalBatch(userId: string, batchId: string) {
+  const params = new URLSearchParams({ userId });
+  return request<{ deleted: number; cancelled: number; releasedCredits: number }>(
+    `/api/admin/internal-batches/${encodeURIComponent(batchId)}?${params.toString()}`,
+    { method: "DELETE" },
+  );
+}
+
+export function deleteAdminInternalBatches(items: { userId: string; batchId: string }[]) {
+  return request<{ deleted: number; cancelled: number; releasedCredits: number; failed: { userId: string; batchId: string; message: string }[] }>("/api/admin/internal-batches", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items }),
+  });
+}
+
 export function uploadAdminInternalBatchMissingEpisode(input: { userId: string; batchId: string; episode: number; file: File; durationSeconds?: number }) {
   const form = new FormData();
   form.set("userId", input.userId);

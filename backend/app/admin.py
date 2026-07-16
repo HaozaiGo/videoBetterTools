@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.config import settings
 from app.models import Asset, Task, User, Wallet, WalletLedger
 from app.queue import enqueue_internal_batch_zip, internal_batch_zip_queue
-from app.services import create_task, failure_reason_for_task, internal_batch_expected_total_from_name, internal_batch_expected_total_from_tasks, internal_batch_status, normalize_pagination, page_info, ledger_to_dict, plan_internal_batch_zip, task_to_dict
+from app.services import add_ledger, create_task, failure_reason_for_task, get_tool, get_wallet, internal_batch_expected_total_from_name, internal_batch_expected_total_from_tasks, internal_batch_status, normalize_pagination, now, page_info, ledger_to_dict, plan_internal_batch_zip, serialize_datetime, task_to_dict
 from app.storage import storage
 
 
@@ -86,6 +86,7 @@ def admin_internal_batches(db: Session, page: int = 1, per_page: int = 50, statu
         Task.tool_slug == "subtitle-translate-workflow",
         batch_id_expr.is_not(None),
         batch_id_expr != "",
+        Task.params["internalBatchDeletedAt"].as_string().is_(None),
     ]
     if normalized_name:
         filters.append(batch_name_expr.ilike(f"%{normalized_name}%"))
@@ -273,6 +274,7 @@ def _zip_queue_jobs(db: Session, limit: int = 10) -> list[dict]:
             Task.tool_slug == "subtitle-translate-workflow",
             Task.user_id.in_(user_ids),
             batch_id_expr.in_(batch_ids),
+            Task.params["internalBatchDeletedAt"].as_string().is_(None),
         )
         .group_by(Task.user_id, batch_id_expr)
     ).all()
@@ -431,6 +433,7 @@ def _batch_name_from_tasks(tasks: list[Task]) -> str:
 
 def _internal_batch_tasks_for_admin(db: Session, user_id: str, batch_id: str) -> list[Task]:
     batch_id_expr = Task.params["internalBatchId"].as_string()
+    deleted_expr = Task.params["internalBatchDeletedAt"].as_string()
     return list(
         db.execute(
             select(Task)
@@ -438,6 +441,7 @@ def _internal_batch_tasks_for_admin(db: Session, user_id: str, batch_id: str) ->
                 Task.user_id == user_id,
                 Task.tool_slug == "subtitle-translate-workflow",
                 batch_id_expr == batch_id,
+                deleted_expr.is_(None),
             )
             .options(selectinload(Task.input_asset))
             .order_by(Task.created_at.asc())
@@ -513,6 +517,7 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
         Task.tool_slug == "subtitle-translate-workflow",
         batch_id_expr.is_not(None),
         batch_id_expr != "",
+        Task.params["internalBatchDeletedAt"].as_string().is_(None),
     ]
     if normalized_name:
         filters.append(batch_name_expr.ilike(f"%{normalized_name}%"))
@@ -709,6 +714,77 @@ def admin_regenerate_internal_batch_zip(db: Session, user_id: str, batch_id: str
         return {"queued": False, "deleted": deleted, "missing": missing, "failed": failed, "partCount": int(archive.get("partCount") or 0)}
     enqueue_internal_batch_zip(user_id, batch_id, at_front=True)
     return {"queued": True, "deleted": deleted, "missing": missing, "failed": [], "partCount": int(archive.get("partCount") or 0)}
+
+
+def _delete_internal_batch_once(db: Session, user_id: str, batch_id: str) -> dict:
+    batch_id_expr = Task.params["internalBatchId"].as_string()
+    tasks = list(
+        db.execute(
+            select(Task)
+            .where(
+                Task.user_id == user_id,
+                Task.tool_slug == "subtitle-translate-workflow",
+                batch_id_expr == batch_id,
+                Task.params["internalBatchDeletedAt"].as_string().is_(None),
+            )
+            .with_for_update()
+        ).scalars()
+    )
+    if not tasks:
+        raise HTTPException(status_code=404, detail="batch not found")
+
+    deleted_at = serialize_datetime(now())
+    wallet = get_wallet(db, user_id, lock=True)
+    released = 0
+    cancelled = 0
+    for task in tasks:
+        params = dict(task.params or {})
+        params["internalBatchDeletedAt"] = deleted_at
+        params["taskListDeletedAt"] = deleted_at
+        task.params = params
+        if task.status in {"queued", "processing"}:
+            tool = get_tool(task.tool_slug) or {"name": task.tool_slug}
+            released += int(task.frozen_credits or 0)
+            cancelled += 1
+            task.status = "cancelled"
+            task.error_code = "ADMIN_DELETED"
+            task.progress_percent = 0
+            task.progress_stage = "管理员手动删除内部批次，任务已取消"
+            task.completed_at = now()
+            add_ledger(db, user_id, "refund", 0, f"{tool['name']} 已删除，释放 {task.frozen_credits} 积分", task.id)
+            cancel_marker = settings.upload_path / f"{task.id}.cancel"
+            cancel_marker.parent.mkdir(parents=True, exist_ok=True)
+            cancel_marker.write_text("cancelled", encoding="utf-8")
+    wallet.frozen_credits = max(0, wallet.frozen_credits - released)
+    db.commit()
+    return {"deleted": len(tasks), "cancelled": cancelled, "releasedCredits": released}
+
+
+def admin_delete_internal_batch(db: Session, user_id: str, batch_id: str) -> dict:
+    return _delete_internal_batch_once(db, user_id, batch_id)
+
+
+def admin_delete_internal_batches(db: Session, items: list[dict]) -> dict:
+    deleted = 0
+    cancelled = 0
+    released_credits = 0
+    failed: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        user_id = str(item.get("userId") or "").strip()
+        batch_id = str(item.get("batchId") or "").strip()
+        key = (user_id, batch_id)
+        if not user_id or not batch_id or key in seen:
+            continue
+        seen.add(key)
+        try:
+            payload = _delete_internal_batch_once(db, user_id, batch_id)
+            deleted += int(payload.get("deleted") or 0)
+            cancelled += int(payload.get("cancelled") or 0)
+            released_credits += int(payload.get("releasedCredits") or 0)
+        except Exception as exc:
+            failed.append({"userId": user_id, "batchId": batch_id, "message": str(exc)})
+    return {"deleted": deleted, "cancelled": cancelled, "releasedCredits": released_credits, "failed": failed}
 
 
 def admin_ledger(db: Session) -> list[dict]:

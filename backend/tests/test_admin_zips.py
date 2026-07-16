@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -234,6 +235,124 @@ def test_admin_summary_includes_active_zip_queue(monkeypatch) -> None:
     assert payload["zipJobs"][0]["position"] == 3
     assert payload["zipJobs"][0]["succeeded"] == 2
     assert payload["zipJobs"][0]["total"] == 2
+
+
+def test_admin_delete_internal_batch_hides_batch_and_cancels_active_tasks(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(admin.settings, "upload_dir", str(tmp_path / "uploads"))
+
+    with Session(engine) as db:
+        user = User(id="delete-internal-user", email="delete-internal@example.com", name="Delete Internal", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=3)
+        db.add_all([user, wallet])
+        for index, (status, frozen) in enumerate([("queued", 3), ("succeeded", 0)], start=1):
+            asset = Asset(
+                id=f"delete-internal-input-{index}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"episode-{index}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"episode-{index}.mp4",
+                url=f"/uploads/episode-{index}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=f"delete-internal-task-{index}",
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=asset.id,
+                status=status,
+                params={"internalBatchId": "delete-internal-batch", "internalBatchName": "删除测试批次（2集）", "internalBatchTotal": 2},
+                estimated_credits=frozen,
+                frozen_credits=frozen,
+                charged_credits=0,
+                provider="mock",
+                provider_job_id=f"delete-internal-provider-{index}",
+                progress_percent=5 if status == "queued" else 100,
+                progress_stage="等待处理" if status == "queued" else "done",
+                completed_at=now() if status == "succeeded" else None,
+            )
+            db.add_all([asset, task])
+        db.commit()
+
+        before = admin.admin_internal_batches(db)
+        payload = admin.admin_delete_internal_batch(db, user.id, "delete-internal-batch")
+        after = admin.admin_internal_batches(db)
+        cancelled_task = db.get(Task, "delete-internal-task-1")
+        succeeded_task = db.get(Task, "delete-internal-task-2")
+        wallet_after = db.get(Wallet, user.id)
+
+        with pytest.raises(Exception):
+            services.internal_batch_status(db, user.id, "delete-internal-batch")
+
+    assert before["page"]["total"] == 1
+    assert payload == {"deleted": 2, "cancelled": 1, "releasedCredits": 3}
+    assert after["page"]["total"] == 0
+    assert cancelled_task.status == "cancelled"
+    assert cancelled_task.error_code == "ADMIN_DELETED"
+    assert cancelled_task.params["internalBatchDeletedAt"]
+    assert succeeded_task.params["internalBatchDeletedAt"]
+    assert wallet_after.frozen_credits == 0
+    assert (tmp_path / "uploads" / "delete-internal-task-1.cancel").exists()
+
+
+def test_admin_delete_internal_batches_bulk_deduplicates_and_summarizes(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(admin.settings, "upload_dir", str(tmp_path / "uploads"))
+
+    with Session(engine) as db:
+        user = User(id="bulk-delete-user", email="bulk-delete@example.com", name="Bulk Delete", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=5)
+        db.add_all([user, wallet])
+        for index, (batch_id, frozen) in enumerate([("bulk-batch-1", 2), ("bulk-batch-2", 3)], start=1):
+            asset = Asset(
+                id=f"bulk-delete-input-{index}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"bulk-{index}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"bulk-{index}.mp4",
+                url=f"/uploads/bulk-{index}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=f"bulk-delete-task-{index}",
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=asset.id,
+                status="queued",
+                params={"internalBatchId": batch_id, "internalBatchName": f"批量删除测试 {index}", "internalBatchTotal": 1},
+                estimated_credits=frozen,
+                frozen_credits=frozen,
+                charged_credits=0,
+                provider="mock",
+                provider_job_id=f"bulk-delete-provider-{index}",
+                progress_percent=5,
+                progress_stage="等待处理",
+            )
+            db.add_all([asset, task])
+        db.commit()
+
+        payload = admin.admin_delete_internal_batches(
+            db,
+            [
+                {"userId": user.id, "batchId": "bulk-batch-1"},
+                {"userId": user.id, "batchId": "bulk-batch-1"},
+                {"userId": user.id, "batchId": "bulk-batch-2"},
+            ],
+        )
+        page = admin.admin_internal_batches(db)
+        wallet_after = db.get(Wallet, user.id)
+
+    assert payload == {"deleted": 2, "cancelled": 2, "releasedCredits": 5, "failed": []}
+    assert page["page"]["total"] == 0
+    assert wallet_after.frozen_credits == 0
 
 
 def test_admin_regenerate_internal_batch_zip_deletes_old_zip_and_prioritizes_queue(tmp_path, monkeypatch) -> None:

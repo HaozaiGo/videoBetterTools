@@ -30,6 +30,15 @@ class AdminInternalBatchZipDeleteRequest(BaseModel):
     items: list[AdminInternalBatchZipDeleteItem]
 
 
+class AdminInternalBatchDeleteItem(BaseModel):
+    userId: str
+    batchId: str
+
+
+class AdminInternalBatchDeleteRequest(BaseModel):
+    items: list[AdminInternalBatchDeleteItem]
+
+
 class TaskCreate(BaseModel):
     toolSlug: str
     inputAssetId: str

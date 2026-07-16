@@ -1,6 +1,6 @@
 import { Fragment, type FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { getAdminInternalBatches, getAdminInternalBatchStatus, openAdminTaskResult, prioritizeAdminInternalBatchTask, regenerateAdminInternalBatchZip, retryAdminInternalBatchMissingResultTask, retryAdminInternalBatchTasks, uploadAdminInternalBatchMissingEpisode, uploadAdminInternalBatchTaskRetry } from "../api/client";
+import { deleteAdminInternalBatch, deleteAdminInternalBatches, getAdminInternalBatches, getAdminInternalBatchStatus, openAdminTaskResult, prioritizeAdminInternalBatchTask, regenerateAdminInternalBatchZip, retryAdminInternalBatchMissingResultTask, retryAdminInternalBatchTasks, uploadAdminInternalBatchMissingEpisode, uploadAdminInternalBatchTaskRetry } from "../api/client";
 import { formatDate } from "../lib/format";
 import type { AdminInternalBatch, AdminInternalBatchStatus, Task, TaskStatus } from "../types";
 
@@ -359,6 +359,8 @@ export function InternalTasksPage() {
   const [nameQuery, setNameQuery] = useState("");
   const [expandedBatchId, setExpandedBatchId] = useState("");
   const [zipBatchId, setZipBatchId] = useState("");
+  const [deletingBatchId, setDeletingBatchId] = useState("");
+  const [selectedBatchIds, setSelectedBatchIds] = useState<Set<string>>(() => new Set());
   const [zipMessage, setZipMessage] = useState("");
   const { data: batchPage, isFetching } = useQuery({
     queryKey: ["admin-internal-batches", activeStatus, pageNumber, nameQuery],
@@ -379,6 +381,10 @@ export function InternalTasksPage() {
     }),
     [batches],
   );
+  const pageBatchIds = useMemo(() => batches.map((batch) => batch.batchId), [batches]);
+  const selectedBatches = useMemo(() => batches.filter((batch) => selectedBatchIds.has(batch.batchId)), [batches, selectedBatchIds]);
+  const allPageSelected = pageBatchIds.length > 0 && pageBatchIds.every((batchId) => selectedBatchIds.has(batchId));
+  const somePageSelected = pageBatchIds.some((batchId) => selectedBatchIds.has(batchId));
   const regenerateZipMutation = useMutation({
     mutationFn: (batch: AdminInternalBatch) => regenerateAdminInternalBatchZip(batch.userId, batch.batchId),
     onSuccess: (payload) => {
@@ -393,12 +399,84 @@ export function InternalTasksPage() {
       setZipBatchId("");
     },
   });
+  const deleteBatchMutation = useMutation({
+    mutationFn: (batch: AdminInternalBatch) => deleteAdminInternalBatch(batch.userId, batch.batchId),
+    onSuccess: (payload) => {
+      setZipMessage(`已删除内部批次任务 ${payload.deleted} 条${payload.cancelled ? `，取消进行中 ${payload.cancelled} 条` : ""}${payload.releasedCredits ? `，释放 ${payload.releasedCredits} 积分` : ""}`);
+      setDeletingBatchId("");
+      setExpandedBatchId("");
+      queryClient.invalidateQueries({ queryKey: ["admin-internal-batches"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-internal-batch-zips"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-summary"] });
+    },
+    onError: (error) => {
+      setZipMessage(error instanceof Error ? error.message : "删除内部批次失败");
+      setDeletingBatchId("");
+    },
+  });
+  const deleteBatchesMutation = useMutation({
+    mutationFn: (items: AdminInternalBatch[]) => deleteAdminInternalBatches(items.map((batch) => ({ userId: batch.userId, batchId: batch.batchId }))),
+    onSuccess: (payload) => {
+      const failedText = payload.failed.length ? `，${payload.failed.length} 个批次删除失败` : "";
+      setZipMessage(`已批量删除内部批次任务 ${payload.deleted} 条${payload.cancelled ? `，取消进行中 ${payload.cancelled} 条` : ""}${payload.releasedCredits ? `，释放 ${payload.releasedCredits} 积分` : ""}${failedText}`);
+      setSelectedBatchIds(new Set());
+      setExpandedBatchId("");
+      queryClient.invalidateQueries({ queryKey: ["admin-internal-batches"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-internal-batch-zips"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-summary"] });
+    },
+    onError: (error) => {
+      setZipMessage(error instanceof Error ? error.message : "批量删除内部批次失败");
+    },
+  });
+
+  function deleteInternalBatch(batch: AdminInternalBatch) {
+    if (deleteBatchMutation.isPending) return;
+    const confirmed = window.confirm(`确认删除内部批次「${batch.batchName}」？任务会从内部任务列表和 ZIP 统计中隐藏，素材文件不会删除。`);
+    if (!confirmed) return;
+    setDeletingBatchId(batch.batchId);
+    setZipMessage("");
+    deleteBatchMutation.mutate(batch);
+  }
+
+  function toggleBatchSelection(batchId: string) {
+    setSelectedBatchIds((current) => {
+      const next = new Set(current);
+      if (next.has(batchId)) {
+        next.delete(batchId);
+      } else {
+        next.add(batchId);
+      }
+      return next;
+    });
+  }
+
+  function togglePageSelection() {
+    setSelectedBatchIds((current) => {
+      const next = new Set(current);
+      if (allPageSelected) {
+        pageBatchIds.forEach((batchId) => next.delete(batchId));
+      } else {
+        pageBatchIds.forEach((batchId) => next.add(batchId));
+      }
+      return next;
+    });
+  }
+
+  function deleteSelectedBatches() {
+    if (!selectedBatches.length || deleteBatchesMutation.isPending) return;
+    const confirmed = window.confirm(`确认批量删除选中的 ${selectedBatches.length} 个内部批次？任务会从内部任务列表和 ZIP 统计中隐藏，素材文件不会删除。`);
+    if (!confirmed) return;
+    setZipMessage("");
+    deleteBatchesMutation.mutate(selectedBatches);
+  }
 
   function selectStatus(status: AdminInternalBatchStatus) {
     setActiveStatus(status);
     setPageNumber(1);
     setPageInput("1");
     setExpandedBatchId("");
+    setSelectedBatchIds(new Set());
   }
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
@@ -411,6 +489,7 @@ export function InternalTasksPage() {
     setPageNumber(1);
     setPageInput("1");
     setExpandedBatchId("");
+    setSelectedBatchIds(new Set());
   }
 
   function clearSearch() {
@@ -419,6 +498,7 @@ export function InternalTasksPage() {
     setPageNumber(1);
     setPageInput("1");
     setExpandedBatchId("");
+    setSelectedBatchIds(new Set());
   }
 
   function goToPage(pageValue: number) {
@@ -426,6 +506,7 @@ export function InternalTasksPage() {
     setPageNumber(nextPage);
     setPageInput(String(nextPage));
     setExpandedBatchId("");
+    setSelectedBatchIds(new Set());
   }
 
   function handlePageJump(event: FormEvent<HTMLFormElement>) {
@@ -460,6 +541,9 @@ export function InternalTasksPage() {
           </form>
           <button className="ghost compact" type="button" onClick={() => queryClient.invalidateQueries({ queryKey: ["admin-internal-batches"] })}>
             {isFetching ? "刷新中" : "刷新"}
+          </button>
+          <button className="remove-file-button" type="button" onClick={deleteSelectedBatches} disabled={!selectedBatches.length || deleteBatchMutation.isPending || deleteBatchesMutation.isPending || regenerateZipMutation.isPending}>
+            {deleteBatchesMutation.isPending ? "删除中" : `删除所选${selectedBatches.length ? ` ${selectedBatches.length}` : ""}`}
           </button>
         </div>
       </div>
@@ -501,6 +585,17 @@ export function InternalTasksPage() {
         <table className="internal-batch-table">
           <thead>
             <tr>
+              <th>
+                <input
+                  type="checkbox"
+                  aria-label="选择当前页内部批次"
+                  checked={allPageSelected}
+                  ref={(node) => {
+                    if (node) node.indeterminate = somePageSelected && !allPageSelected;
+                  }}
+                  onChange={togglePageSelection}
+                />
+              </th>
               <th className="internal-batch-expand-cell"></th>
               <th>批次</th>
               <th>处理情况</th>
@@ -518,9 +613,18 @@ export function InternalTasksPage() {
                 const canRegenerateZip = batchZipReady(batch);
                 const zipBusy = regenerateZipMutation.isPending && zipBatchId === batch.batchId;
                 const zipDisabled = !canRegenerateZip || regenerateZipMutation.isPending;
+                const deleteBusy = deleteBatchMutation.isPending && deletingBatchId === batch.batchId;
                 return (
                   <Fragment key={batch.batchId}>
                     <tr>
+                      <td>
+                        <input
+                          type="checkbox"
+                          aria-label={`选择内部批次 ${batch.batchName}`}
+                          checked={selectedBatchIds.has(batch.batchId)}
+                          onChange={() => toggleBatchSelection(batch.batchId)}
+                        />
+                      </td>
                       <td className="internal-batch-expand-cell">
                         <button
                           className="detail-toggle icon-only"
@@ -562,7 +666,7 @@ export function InternalTasksPage() {
                         <button
                           className="primary compact"
                           type="button"
-                          disabled={zipDisabled}
+                          disabled={zipDisabled || deleteBatchMutation.isPending}
                           title={canRegenerateZip ? "删除旧 ZIP，并把新 ZIP 任务插队到最前" : "批次全部成功后才可重新生成 ZIP"}
                           onClick={() => {
                             setZipBatchId(batch.batchId);
@@ -572,11 +676,20 @@ export function InternalTasksPage() {
                         >
                           {zipBusy ? "入队中" : "立刻重新生成ZIP"}
                         </button>
+                        <button
+                          className="remove-file-button compact"
+                          type="button"
+                          disabled={deleteBatchMutation.isPending || regenerateZipMutation.isPending}
+                          title="从内部任务列表和 ZIP 统计中隐藏该批次，不删除素材文件"
+                          onClick={() => deleteInternalBatch(batch)}
+                        >
+                          {deleteBusy ? "删除中" : "删除"}
+                        </button>
                       </td>
                     </tr>
                     {isExpanded ? (
                       <tr className="internal-batch-detail-row">
-                        <td colSpan={7}>
+                        <td colSpan={8}>
                           <InternalBatchDetail batch={batch} />
                         </td>
                       </tr>
@@ -586,7 +699,7 @@ export function InternalTasksPage() {
               })
             ) : (
               <tr>
-                <td colSpan={7} className="empty">
+                <td colSpan={8} className="empty">
                   暂无批量去字幕并翻译批次。
                 </td>
               </tr>
