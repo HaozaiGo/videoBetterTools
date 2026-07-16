@@ -187,14 +187,16 @@ export function TasksPage({ internalBatchOnly = false }: TasksPageProps = {}) {
   const [completedFromFilter, setCompletedFromFilter] = useState("");
   const [completedToFilter, setCompletedToFilter] = useState("");
   const [batchNameFilter, setBatchNameFilter] = useState("");
+  const [assetNameFilter, setAssetNameFilter] = useState("");
   const taskFilters = {
     status: statusFilter,
     completedFrom: completedDateBoundary(completedFromFilter, "start"),
     completedTo: completedDateBoundary(completedToFilter, "end"),
     batchName: batchNameFilter,
+    assetName: assetNameFilter,
     internalBatchOnly,
   };
-  const hasTaskFilters = Boolean(statusFilter || completedFromFilter || completedToFilter || batchNameFilter.trim());
+  const hasTaskFilters = Boolean(statusFilter || completedFromFilter || completedToFilter || batchNameFilter.trim() || assetNameFilter.trim());
   const taskQueryKey = internalBatchOnly ? "internal-tasks" : "tasks";
   const tasksQuery = useQuery({
     queryKey: [taskQueryKey, currentPage, taskFilters],
@@ -251,6 +253,7 @@ export function TasksPage({ internalBatchOnly = false }: TasksPageProps = {}) {
     setCompletedFromFilter("");
     setCompletedToFilter("");
     setBatchNameFilter("");
+    setAssetNameFilter("");
     resetTaskListPage();
   };
 
@@ -362,7 +365,11 @@ export function TasksPage({ internalBatchOnly = false }: TasksPageProps = {}) {
         return (
           <>
             <strong>{tool?.name || row.original.toolSlug}</strong>
-            {row.original.inputAssetName ? <span className="task-file-name" title={row.original.inputAssetName}>{row.original.inputAssetName}</span> : null}
+            {row.original.inputAssetName ? (
+              <span className="task-file-name" title={`原视频：${row.original.inputAssetName}`}>
+                原视频：{row.original.inputAssetName}
+              </span>
+            ) : null}
             <span className="subtle">{row.original.providerJobId}</span>
           </>
         );
@@ -497,6 +504,19 @@ export function TasksPage({ internalBatchOnly = false }: TasksPageProps = {}) {
               value={batchNameFilter}
               onChange={(event) => {
                 setBatchNameFilter(event.target.value);
+                resetTaskListPage();
+              }}
+              disabled={tasksQuery.isFetching}
+            />
+          </label>
+          <label>
+            <span>原视频名称</span>
+            <input
+              type="search"
+              placeholder="搜索原视频名称"
+              value={assetNameFilter}
+              onChange={(event) => {
+                setAssetNameFilter(event.target.value);
                 resetTaskListPage();
               }}
               disabled={tasksQuery.isFetching}

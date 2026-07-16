@@ -631,3 +631,47 @@ def test_admin_internal_batch_zips_deletes_processing_row_without_zip(tmp_path, 
     assert payload["items"][0]["partIndex"] == 0
     assert delete_payload == {"deleted": 1, "missing": 0, "failed": []}
     assert after_delete["page"]["total"] == 0
+
+
+def test_admin_internal_batch_zips_processing_does_not_plan_archives(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(admin, "plan_internal_batch_zip", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not plan incomplete zip")))
+
+    with Session(engine) as db:
+        user = User(id="zip-fast-user", email="zip-fast@example.com", name="Zip Fast", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        asset = Asset(
+            id="zip-fast-input",
+            user_id=user.id,
+            kind="video",
+            original_name="waiting.mp4",
+            mime_type="video/mp4",
+            storage_key="waiting-input.mp4",
+            url="/uploads/waiting-input.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="zip-fast-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=asset.id,
+            status="processing",
+            params={"internalBatchId": "zip-fast-batch", "internalBatchName": "快速打开测试"},
+            estimated_credits=1,
+            frozen_credits=1,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="zip-fast-provider",
+            progress_percent=30,
+            progress_stage="生成中",
+        )
+        db.add_all([user, wallet, asset, task])
+        db.commit()
+
+        payload = admin.admin_internal_batch_zips(db, status="processing")
+
+    assert payload["page"]["total"] == 1
+    assert payload["items"][0]["batchId"] == "zip-fast-batch"

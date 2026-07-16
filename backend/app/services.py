@@ -1142,6 +1142,7 @@ def paginated_tasks(
     completed_from: str | None = None,
     completed_to: str | None = None,
     batch_name: str | None = None,
+    asset_name: str | None = None,
     internal_batch_only: bool = False,
 ) -> dict:
     page, per_page = normalize_pagination(page, per_page)
@@ -1169,6 +1170,9 @@ def paginated_tasks(
     normalized_batch_name = (batch_name or "").strip()
     if normalized_batch_name:
         filters.append(Task.params["internalBatchName"].as_string().ilike(f"%{normalized_batch_name}%"))
+    normalized_asset_name = (asset_name or "").strip()
+    if normalized_asset_name:
+        filters.append(Task.input_asset.has(Asset.original_name.ilike(f"%{normalized_asset_name}%")))
     total = db.execute(select(func.count()).select_from(Task).where(*filters)).scalar_one()
     tasks = db.execute(
         select(Task)

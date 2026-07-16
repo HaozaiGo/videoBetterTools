@@ -49,6 +49,7 @@ export type TaskPageFilters = {
   completedFrom?: string;
   completedTo?: string;
   batchName?: string;
+  assetName?: string;
   internalBatchOnly?: boolean;
 };
 
@@ -65,6 +66,9 @@ export function getTasksPage(page = 1, perPage = 50, filters: TaskPageFilters = 
   }
   if (filters.batchName?.trim()) {
     params.set("batchName", filters.batchName.trim());
+  }
+  if (filters.assetName?.trim()) {
+    params.set("assetName", filters.assetName.trim());
   }
   if (filters.internalBatchOnly) {
     params.set("internalBatchOnly", "1");

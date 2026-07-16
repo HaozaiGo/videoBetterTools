@@ -1,14 +1,31 @@
 import { type FormEvent, useEffect, useMemo, useState } from "react";
-import { useMutation, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { deleteAdminInternalBatchZips, downloadAdminInternalBatchZip, getAdminInternalBatchZips } from "../api/client";
 import { formatBytes, formatDate } from "../lib/format";
-import type { AdminInternalBatchZip, AdminInternalBatchZipSkippedTask, AdminInternalBatchZipStatus, TaskStatus } from "../types";
+import type { AdminInternalBatchZip, AdminInternalBatchZipSkippedTask, AdminInternalBatchZipStatus, PaginatedAdminInternalBatchZips, TaskStatus } from "../types";
 
 const zipTabs: { status: AdminInternalBatchZipStatus; label: string; empty: string }[] = [
   { status: "ready", label: "可下载", empty: "暂无可直接下载的 ZIP。" },
   { status: "processing", label: "处理中", empty: "暂无正在打包或上传的 ZIP。" },
   { status: "failed", label: "失败重试", empty: "暂无需要重试的 ZIP。" },
 ];
+
+const emptyZipPage: PaginatedAdminInternalBatchZips = {
+  items: [],
+  page: {
+    page: 1,
+    perPage: 50,
+    total: 0,
+    totalPages: 1,
+    hasNext: false,
+    hasPrevious: false,
+  },
+  tabs: {
+    ready: 0,
+    processing: 0,
+    failed: 0,
+  },
+};
 
 function sourceLabel(source: AdminInternalBatchZip["source"]) {
   if (!source) return "等待中";
@@ -49,9 +66,10 @@ export function AdminZipStoragePage() {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set());
   const [detailZip, setDetailZip] = useState<AdminInternalBatchZip | null>(null);
   const [notice, setNotice] = useState("");
-  const { data: zipPage, isFetching } = useSuspenseQuery({
+  const { data: zipPage = emptyZipPage, isFetching, isLoading } = useQuery({
     queryKey: ["admin-internal-batch-zips", activeStatus, pageNumber, nameQuery],
     queryFn: () => getAdminInternalBatchZips(pageNumber, 50, activeStatus, nameQuery),
+    placeholderData: keepPreviousData,
     refetchInterval: 15_000,
   });
 
@@ -218,7 +236,9 @@ export function AdminZipStoragePage() {
             </tr>
           </thead>
           <tbody>
-            {zips.length ? (
+            {isLoading ? (
+              <tr><td className="empty" colSpan={8}>正在加载 ZIP 储存记录...</td></tr>
+            ) : zips.length ? (
               zips.map((zip) => (
                 <tr key={`${zip.batchId}-${zip.partIndex}`}>
                   <td className="zip-select-cell">

@@ -80,7 +80,21 @@ GPU_DEVICE_IDS = _csv_values(
 )
 GPU_MONITOR_DEVICE_IDS = _csv_values(os.environ.get("MODEL_PLAZA_GPU_MONITOR_DEVICE_IDS") or ",".join(GPU_DEVICE_IDS))
 GPU_WORKERS_PER_DEVICE = max(1, int(os.environ.get("MODEL_PLAZA_GPU_WORKERS_PER_DEVICE", "1")))
-GPU_SLOT_CAPACITY = max(1, len(GPU_DEVICE_IDS) * GPU_WORKERS_PER_DEVICE)
+def _gpu_slot_capacity_by_device() -> dict[str, int]:
+    capacities = {gpu_device: GPU_WORKERS_PER_DEVICE for gpu_device in GPU_DEVICE_IDS}
+    for item in _csv_values(os.environ.get("MODEL_PLAZA_GPU_DEVICE_SLOT_CAPACITY", "")):
+        gpu_device, separator, capacity = item.partition(":")
+        if not separator or gpu_device not in capacities:
+            continue
+        try:
+            capacities[gpu_device] = max(0, int(capacity))
+        except ValueError:
+            continue
+    return capacities
+
+
+GPU_SLOT_CAPACITY_BY_DEVICE = _gpu_slot_capacity_by_device()
+GPU_SLOT_CAPACITY = max(1, sum(GPU_SLOT_CAPACITY_BY_DEVICE.values()))
 MAX_WORKERS = max(1, int(os.environ.get("MODEL_PLAZA_GPU_MAX_WORKERS", str(GPU_SLOT_CAPACITY))))
 
 app = FastAPI(title="片刻修AI GPU Worker")
@@ -139,7 +153,7 @@ def _empty_gpu_metric(gpu_device: str, running_by_gpu: dict[str, int]) -> dict:
         "temperatureGpu": 0,
         "powerDrawW": 0,
         "workerSlotsUsed": running_by_gpu.get(gpu_device, 0),
-        "workerSlotsTotal": GPU_WORKERS_PER_DEVICE if gpu_device in GPU_DEVICE_IDS else 0,
+        "workerSlotsTotal": GPU_SLOT_CAPACITY_BY_DEVICE.get(gpu_device, 0),
     }
 
 
@@ -147,7 +161,7 @@ def _attach_worker_slots(gpus: list[dict], running_by_gpu: dict[str, int]) -> li
     for gpu in gpus:
         gpu_device = str(gpu["index"])
         gpu["workerSlotsUsed"] = running_by_gpu.get(gpu_device, 0)
-        gpu["workerSlotsTotal"] = GPU_WORKERS_PER_DEVICE if gpu_device in GPU_DEVICE_IDS else 0
+        gpu["workerSlotsTotal"] = GPU_SLOT_CAPACITY_BY_DEVICE.get(gpu_device, 0)
     return gpus
 
 
@@ -380,6 +394,7 @@ def _gpu_metrics() -> dict:
         "gpuDevices": GPU_DEVICE_IDS,
         "monitorGpuDevices": GPU_MONITOR_DEVICE_IDS,
         "workersPerGpu": GPU_WORKERS_PER_DEVICE,
+        "workerSlotCapacityByGpu": GPU_SLOT_CAPACITY_BY_DEVICE,
         "slotCapacity": GPU_SLOT_CAPACITY,
         "runningByGpu": running_by_gpu,
         "gpus": gpus,
@@ -405,16 +420,19 @@ def _acquire_gpu_slot(job_id: str, preferred_gpu: str = "", exclusive: bool = Fa
     with gpu_slot_condition:
         while True:
             for gpu_device in candidates:
+                slot_capacity = GPU_SLOT_CAPACITY_BY_DEVICE.get(gpu_device, 0)
+                if slot_capacity <= 0:
+                    continue
                 if exclusive:
                     if gpu_slot_usage.get(gpu_device, 0) == 0 and gpu_device not in exclusive_gpu_jobs:
-                        gpu_slot_usage[gpu_device] = GPU_WORKERS_PER_DEVICE
+                        gpu_slot_usage[gpu_device] = slot_capacity
                         exclusive_gpu_jobs[gpu_device] = job_id
                         _write_status(job_id, assigned_gpu=gpu_device, exclusive_gpu=True)
                         return gpu_device
                     continue
                 if gpu_device in exclusive_gpu_jobs:
                     continue
-                if gpu_slot_usage.get(gpu_device, 0) < GPU_WORKERS_PER_DEVICE:
+                if gpu_slot_usage.get(gpu_device, 0) < slot_capacity:
                     gpu_slot_usage[gpu_device] = gpu_slot_usage.get(gpu_device, 0) + 1
                     _write_status(job_id, assigned_gpu=gpu_device, exclusive_gpu=False)
                     return gpu_device

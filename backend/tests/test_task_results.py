@@ -1414,12 +1414,16 @@ def test_paginated_tasks_filters_by_status() -> None:
             completed_to=(now() + timedelta(days=1)).isoformat(),
             batch_name="仙王开局",
         )
+        asset_name_page = paginated_tasks(db, user.id, asset_name="filter-2")
 
     assert page["page"]["total"] == 2
     assert {task["id"] for task in page["items"]} == {"filter-task-1", "filter-task-3"}
     assert {task["status"] for task in page["items"]} == {"failed"}
     assert completed_page["page"]["total"] == 1
     assert [task["id"] for task in completed_page["items"]] == ["filter-task-2"]
+    assert asset_name_page["page"]["total"] == 1
+    assert asset_name_page["items"][0]["id"] == "filter-task-2"
+    assert asset_name_page["items"][0]["inputAssetName"] == "filter-2.mp4"
 
 
 def test_paginated_tasks_filters_internal_batch_queue() -> None:

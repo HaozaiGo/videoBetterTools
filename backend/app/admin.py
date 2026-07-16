@@ -565,11 +565,14 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
         archive = None
         ready_items: list[dict] = []
         ready_part_count = 0
-        skipped_tasks = _skipped_tasks_for_batch(db, str(batch["userId"]), str(batch["batchId"]))
-        try:
-            archive = plan_internal_batch_zip(db, str(batch["userId"]), str(batch["batchId"]))
-        except Exception:
-            archive = None
+        user_id = str(batch["userId"])
+        batch_id = str(batch["batchId"])
+        can_have_ready_zip = int(batch["succeeded"]) > 0 and int(batch.get("missing") or 0) <= 0 and int(batch.get("activeProcessing") or 0) <= 0
+        if can_have_ready_zip:
+            try:
+                archive = plan_internal_batch_zip(db, user_id, batch_id)
+            except Exception:
+                archive = None
         if archive is not None:
             for part in archive["parts"]:
                 source = _zip_part_source(part)
@@ -577,11 +580,10 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
                 if not source or size_bytes <= 0:
                     continue
                 part_index = int(part["index"])
-                batch_id = str(batch["batchId"])
-                user_id = str(batch["userId"])
                 ready_part_count += 1
                 if _is_zip_row_deleted(user_id, batch_id, part_index):
                     continue
+                skipped_tasks = _skipped_tasks_for_batch(db, user_id, batch_id)
                 ready_items.append(
                     {
                         **batch,
@@ -607,7 +609,7 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
             continue
         if ready_part_count > 0:
             continue
-        zip_job = zip_jobs.get((str(batch["userId"]), str(batch["batchId"])))
+        zip_job = zip_jobs.get((user_id, batch_id))
         pending_status = "processing"
         if zip_job and zip_job.get("state") == "failed":
             pending_status = "failed"
@@ -616,10 +618,11 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
         elif int(batch["failed"]) + int(batch["cancelled"]) > 0 and int(batch["processing"]) <= 0:
             pending_status = "failed"
         pending_part_index = int(archive["parts"][0].get("index") or 0) if archive and archive.get("parts") else 0
-        if _is_zip_row_deleted(str(batch["userId"]), str(batch["batchId"]), pending_part_index):
+        if _is_zip_row_deleted(user_id, batch_id, pending_part_index):
             continue
         tab_counts[pending_status] += 1
         if status == pending_status:
+            skipped_tasks = _skipped_tasks_for_batch(db, user_id, batch_id)
             items.append(_empty_zip_batch_item(batch, pending_status, archive, zip_job, skipped_tasks))
 
     items.sort(key=lambda item: (int(item["updatedAt"]), str(item["batchId"]), int(item["partIndex"])), reverse=True)

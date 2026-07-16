@@ -125,6 +125,7 @@ def list_tasks(
     completed_from: str | None = Query(None, alias="completedFrom"),
     completed_to: str | None = Query(None, alias="completedTo"),
     batch_name: str | None = Query(None, alias="batchName"),
+    asset_name: str | None = Query(None, alias="assetName"),
     internal_batch_only: bool = Query(False, alias="internalBatchOnly"),
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
@@ -138,6 +139,7 @@ def list_tasks(
         completed_from=completed_from,
         completed_to=completed_to,
         batch_name=batch_name,
+        asset_name=asset_name,
         internal_batch_only=internal_batch_only,
     )
 
