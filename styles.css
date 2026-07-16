@@ -2032,6 +2032,17 @@ th {
   min-width: 520px;
 }
 
+.admin-task-name {
+  max-width: 260px;
+  min-width: 0;
+}
+
+.admin-task-name strong,
+.admin-task-name .subtle {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .admin-task-monitor-table thead th {
   position: sticky;
   top: 0;

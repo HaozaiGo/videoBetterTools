@@ -26,6 +26,24 @@ function formatGpuTimestamp(timestamp?: number) {
   return new Date(timestamp * 1000).toLocaleString("zh-CN");
 }
 
+function taskMonitorName(task: Task) {
+  const params = task.params || {};
+  const batchName = typeof params.internalBatchName === "string" ? params.internalBatchName.trim() : "";
+  const batchIndex = typeof params.internalBatchIndex === "number" && Number.isFinite(params.internalBatchIndex) ? params.internalBatchIndex : null;
+  const primary = batchName || task.inputAssetName || task.toolSlug;
+  const secondaryParts = [];
+  if (batchIndex) {
+    secondaryParts.push(`第 ${batchIndex} 集`);
+  }
+  if (task.inputAssetName && task.inputAssetName !== primary) {
+    secondaryParts.push(task.inputAssetName);
+  }
+  if (!secondaryParts.length && primary !== task.toolSlug) {
+    secondaryParts.push(task.toolSlug);
+  }
+  return { primary, secondary: secondaryParts.join(" · ") || task.providerJobId };
+}
+
 export function AdminPage() {
   const queryClient = useQueryClient();
   const [taskPageNumber, setTaskPageNumber] = useState(1);
@@ -89,7 +107,19 @@ export function AdminPage() {
   const taskTable = useReactTable({
     data: taskPage.items,
     columns: [
-      taskColumns.accessor("toolSlug", { header: "工具" }),
+      taskColumns.display({
+        id: "taskName",
+        header: "任务",
+        cell: ({ row }) => {
+          const display = taskMonitorName(row.original);
+          return (
+            <div className="admin-task-name" title={display.secondary ? `${display.primary}\n${display.secondary}` : display.primary}>
+              <strong>{display.primary}</strong>
+              <span className="subtle">{display.secondary}</span>
+            </div>
+          );
+        },
+      }),
       taskColumns.accessor("status", { header: "状态", cell: (info) => statusLabel(info.getValue()) }),
       taskColumns.accessor("estimatedCredits", { header: "预估", cell: (info) => formatCredits(info.getValue()) }),
       taskColumns.accessor("createdAt", { header: "创建时间", cell: (info) => formatDate(info.getValue()) }),
