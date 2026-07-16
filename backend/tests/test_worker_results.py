@@ -438,6 +438,6 @@ def test_gpu_queue_full_requeues_without_exhausting_unavailable_retries(monkeypa
         assert task.error_code is None
         assert task.params["_gpuUnavailableRetries"] == 3
         assert task.params["_gpuQueueFullRetries"] == 8
-        assert task.progress_stage == "远端 GPU 队列已满，等待空位自动重试（第 8 次）"
+        assert task.progress_stage == "远端 GPU 队列已满，保持队列顺序等待调度（第 8 次）"
         assert wallet.frozen_credits == 10
-    assert enqueued == ["task-gpu-full:300"]
+    assert enqueued == []

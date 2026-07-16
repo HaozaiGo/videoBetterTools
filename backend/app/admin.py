@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
 from app.models import Asset, Task, User, Wallet, WalletLedger
-from app.queue import enqueue_internal_batch_zip, internal_batch_zip_queue, task_queue
+from app.queue import enqueue_internal_batch_zip, internal_batch_zip_queue
 from app.services import create_task, failure_reason_for_task, internal_batch_expected_total_from_name, internal_batch_expected_total_from_tasks, internal_batch_status, normalize_pagination, page_info, ledger_to_dict, plan_internal_batch_zip, task_to_dict
 from app.storage import storage
 
@@ -30,6 +30,7 @@ def admin_summary(db: Session) -> dict:
         "queuedTasks": db.execute(select(func.count()).select_from(Task).where(Task.status == "queued")).scalar_one(),
         "processingTasks": db.execute(select(func.count()).select_from(Task).where(Task.status == "processing")).scalar_one(),
         "failedTasks": db.execute(select(func.count()).select_from(Task).where(Task.status == "failed")).scalar_one(),
+        "zipJobs": _zip_queue_jobs(db),
     }
 
 
@@ -167,7 +168,7 @@ def _serialize_job_time(value) -> int | None:
     return int(value.timestamp() * 1000) if value else None
 
 
-def _zip_job_states() -> dict[tuple[str, str], dict]:
+def _zip_job_states(include_failed: bool = True) -> dict[tuple[str, str], dict]:
     states: dict[tuple[str, str], dict] = {}
     try:
         queue = internal_batch_zip_queue()
@@ -175,8 +176,9 @@ def _zip_job_states() -> dict[tuple[str, str], dict]:
             ("queued", queue.get_job_ids()),
             ("started", queue.started_job_registry.get_job_ids()),
             ("scheduled", queue.scheduled_job_registry.get_job_ids()),
-            ("failed", queue.failed_job_registry.get_job_ids()),
         ]
+        if include_failed:
+            registry_sets.append(("failed", queue.failed_job_registry.get_job_ids()))
     except Exception:
         return states
     priority = {"queued": 1, "scheduled": 2, "failed": 3, "started": 4}
@@ -236,6 +238,97 @@ def _zip_process_message(batch: dict, zip_status: str, zip_job: dict | None) -> 
     if succeeded <= 0:
         return "tasks", "还没有成功结果可打包"
     return "waiting", "批次已有成功结果，等待自动入 ZIP 队列"
+
+
+def _zip_queue_jobs(db: Session, limit: int = 10) -> list[dict]:
+    zip_jobs = {
+        key: job
+        for key, job in _zip_job_states(include_failed=False).items()
+        if str(job.get("state") or "") in {"queued", "started", "scheduled"}
+    }
+    if not zip_jobs:
+        return []
+
+    batch_ids = {batch_id for _user_id, batch_id in zip_jobs}
+    user_ids = {user_id for user_id, _batch_id in zip_jobs}
+    batch_id_expr = Task.params["internalBatchId"].as_string()
+    batch_name_expr = Task.params["internalBatchName"].as_string()
+    batch_total_expr = Task.params["internalBatchTotal"].as_string()
+    updated_expr = func.coalesce(Task.completed_at, Task.created_at)
+    rows = db.execute(
+        select(
+            Task.user_id.label("user_id"),
+            batch_id_expr.label("batch_id"),
+            func.max(batch_name_expr).label("batch_name"),
+            func.max(batch_total_expr).label("declared_total"),
+            func.count().label("total"),
+            func.sum(case((Task.status == "succeeded", 1), else_=0)).label("succeeded"),
+            func.sum(case((Task.status == "failed", 1), else_=0)).label("failed"),
+            func.sum(case((Task.status == "cancelled", 1), else_=0)).label("cancelled"),
+            func.sum(case((Task.status.in_(("queued", "processing")), 1), else_=0)).label("processing"),
+            func.min(Task.created_at).label("created_at"),
+            func.max(updated_expr).label("updated_at"),
+        )
+        .where(
+            Task.tool_slug == "subtitle-translate-workflow",
+            Task.user_id.in_(user_ids),
+            batch_id_expr.in_(batch_ids),
+        )
+        .group_by(Task.user_id, batch_id_expr)
+    ).all()
+
+    items: list[dict] = []
+    for row in rows:
+        key = (str(row.user_id), str(row.batch_id))
+        zip_job = zip_jobs.get(key)
+        if not zip_job:
+            continue
+        created_total = int(row.total or 0)
+        batch_name = str(row.batch_name or row.batch_id or "内部批量任务")
+        expected_total = _batch_expected_total(batch_name, created_total, row.declared_total)
+        missing = max(0, expected_total - created_total)
+        active_processing = int(row.processing or 0)
+        batch = {
+            "userId": row.user_id,
+            "batchId": row.batch_id,
+            "batchName": batch_name,
+            "total": expected_total,
+            "created": created_total,
+            "succeeded": int(row.succeeded or 0),
+            "failed": int(row.failed or 0),
+            "cancelled": int(row.cancelled or 0),
+            "missing": missing,
+            "activeProcessing": active_processing,
+            "processing": active_processing + missing,
+            "createdAt": int(row.created_at.timestamp() * 1000),
+            "updatedAt": int(row.updated_at.timestamp() * 1000),
+        }
+        stage, message = _zip_process_message(batch, "processing", zip_job)
+        state = str(zip_job.get("state") or "")
+        items.append(
+            {
+                **batch,
+                "zipStage": stage,
+                "message": message,
+                "state": state,
+                "position": zip_job.get("position"),
+                "retriesLeft": zip_job.get("retriesLeft"),
+                "jobId": zip_job.get("jobId"),
+                "createdAt": int(row.created_at.timestamp() * 1000),
+                "updatedAt": int(row.updated_at.timestamp() * 1000),
+                "startedAt": zip_job.get("startedAt"),
+            }
+        )
+
+    state_priority = {"started": 0, "queued": 1, "scheduled": 2}
+    items.sort(
+        key=lambda item: (
+            state_priority.get(str(item["state"]), 9),
+            int(item["position"] or 999999),
+            -int(item["updatedAt"]),
+        )
+    )
+    return items[: max(1, int(limit))]
 
 
 def _batch_expected_total(batch_name: str, created_total: int, declared_total: object = None) -> int:
@@ -691,46 +784,33 @@ def _gpu_task_display_payload(task: Task) -> dict:
 
 
 def _queued_gpu_jobs(db: Session, limit: int = 10) -> list[dict]:
-    try:
-        queue = task_queue()
-        queued_job_specs = [(job_id, "queued") for job_id in queue.get_job_ids()]
-        scheduled_registry = getattr(queue, "scheduled_job_registry", None)
-        if scheduled_registry is not None:
-            queued_job_specs.extend((job_id, "scheduled") for job_id in scheduled_registry.get_job_ids())
-        queued_task_specs = []
-        seen_task_ids: set[str] = set()
-        for job_id, queue_state in queued_job_specs:
-            if len(queued_task_specs) >= limit:
-                break
-            job = queue.fetch_job(job_id)
-            if job is None or not job.args:
-                continue
-            task_id = str(job.args[0] or "").strip()
-            if task_id and task_id not in seen_task_ids:
-                seen_task_ids.add(task_id)
-                queued_task_specs.append((task_id, queue_state))
-    except Exception:
-        return []
-    if not queued_task_specs:
-        return []
-    queued_task_ids = [task_id for task_id, _queue_state in queued_task_specs]
-    tasks = db.execute(
+    tasks = list(db.execute(
         select(Task)
-        .where(Task.id.in_(queued_task_ids))
+        .where(Task.status == "queued")
         .options(selectinload(Task.input_asset))
-    ).scalars()
-    task_by_id = {task.id: task for task in tasks}
+        .order_by(Task.created_at.asc())
+        .limit(max(limit * 8, 50))
+    ).scalars())
+    if not tasks:
+        return []
+
+    def priority_key(task: Task) -> tuple[int, int, float]:
+        params = task.params if isinstance(task.params, dict) else {}
+        return (
+            -int(params.get("_manualPriorityBoostCount") or 0),
+            -int(params.get("_manualPriorityBoostAt") or 0),
+            task.created_at.timestamp(),
+        )
+
+    tasks.sort(key=priority_key)
     queued_jobs = []
-    for position, (task_id, queue_state) in enumerate(queued_task_specs, start=1):
-        task = task_by_id.get(task_id)
-        if task is None:
-            continue
+    for position, task in enumerate(tasks[:limit], start=1):
         payload = _gpu_task_display_payload(task)
         payload.update(
             {
                 "id": task.provider_job_id,
                 "position": position,
-                "queueState": queue_state,
+                "queueState": "waiting",
                 "progressPercent": task.progress_percent,
                 "progressStage": task.progress_stage,
                 "createdAt": int(task.created_at.timestamp() * 1000),

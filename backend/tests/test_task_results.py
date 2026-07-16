@@ -1124,6 +1124,102 @@ def test_missing_result_retry_fronts_queue_without_double_charge(monkeypatch) ->
     assert wallet_after_callback.frozen_credits == 0
 
 
+def test_missing_result_upload_retry_replaces_input_without_double_charge(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services, "storage", FakeRemoteStorage(existing_keys={"replacement-ok.mp4"}))
+    enqueued: list[tuple[str, bool]] = []
+
+    def fake_enqueue(task_id: str, at_front: bool = False) -> None:
+        enqueued.append((task_id, at_front))
+
+    monkeypatch.setattr(services, "enqueue_provider_job", fake_enqueue)
+
+    with Session(engine) as db:
+        user = User(id="user-missing-result-upload", email="missing-result-upload@example.com", name="Missing Result Upload", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=90, frozen_credits=0)
+        old_input = Asset(
+            id="missing-result-upload-old-input",
+            user_id=user.id,
+            kind="video",
+            original_name="old-episode-1.mp4",
+            mime_type="video/mp4",
+            storage_key="old-input-expired.mp4",
+            url="https://tos.example.test/old-input-expired.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() - timedelta(days=1),
+        )
+        replacement_asset = Asset(
+            id="missing-result-upload-replacement",
+            user_id=user.id,
+            kind="video",
+            original_name="replacement-episode-1.mp4",
+            mime_type="video/mp4",
+            storage_key="replacement-ok.mp4",
+            url="https://tos.example.test/replacement-ok.mp4",
+            size_bytes=10,
+            duration_seconds=12,
+            expires_at=now() + timedelta(days=1),
+        )
+        output_asset = Asset(
+            id="missing-result-upload-output",
+            user_id=user.id,
+            kind="result",
+            original_name="episode-1-result.mp4",
+            mime_type="video/mp4",
+            storage_key="missing-output-expired.mp4",
+            url="https://tos.example.test/missing-output-expired.mp4",
+            size_bytes=10,
+            duration_seconds=0,
+            expires_at=now() - timedelta(days=1),
+        )
+        task = Task(
+            id="missing-result-upload-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=old_input.id,
+            output_asset_id=output_asset.id,
+            status="succeeded",
+            params={"internalBatchId": "batch-missing-result-upload", "internalBatchName": "missing result upload", "internalBatchTotal": 1},
+            estimated_credits=10,
+            frozen_credits=0,
+            charged_credits=10,
+            provider="mock",
+            provider_job_id="old-missing-result-upload",
+            output_url="https://tos.example.test/missing-output-expired.mp4",
+            progress_percent=100,
+            progress_stage="处理完成，结果已入库",
+            completed_at=now(),
+        )
+        db.add_all([user, wallet, old_input, replacement_asset, output_asset, task])
+        db.commit()
+
+        result = retry_internal_batch_task_with_replacement_asset(
+            db,
+            user.id,
+            "batch-missing-result-upload",
+            task.id,
+            replacement_asset.id,
+            duration_seconds=12,
+            at_front=True,
+        )
+        retried = db.get(Task, task.id)
+        wallet_after_retry = db.get(Wallet, user.id)
+
+    assert result["task"]["id"] == "missing-result-upload-task"
+    assert retried.input_asset_id == "missing-result-upload-replacement"
+    assert retried.status == "queued"
+    assert retried.output_asset_id is None
+    assert retried.params["_noChargeRetry"] is True
+    assert retried.params["_missingResultReason"] == "结果对象存储文件不存在，可能已过期清理"
+    assert retried.charged_credits == 10
+    assert retried.frozen_credits == 0
+    assert wallet_after_retry.credits == 90
+    assert wallet_after_retry.frozen_credits == 0
+    assert enqueued == [("missing-result-upload-task", True)]
+
+
 def test_prioritize_internal_batch_queued_task_enqueues_front_without_refreeze(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

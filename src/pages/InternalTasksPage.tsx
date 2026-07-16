@@ -263,14 +263,14 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
                     </td>
                     <td>{formatDate(row.task.completedAt)}</td>
                     <td>
-                      {row.task.status === "failed" || row.task.status === "cancelled" ? (
+                      {row.task.status === "failed" || row.task.status === "cancelled" || (row.task.status === "succeeded" && row.task.resultMissing) ? (
                         <>
                           <input
                             id={`task-upload-retry-${row.task.id}`}
                             className="visually-hidden"
                             type="file"
                             accept="video/*"
-                            disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending || prioritizeMutation.isPending}
+                            disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending || missingResultRetryMutation.isPending || prioritizeMutation.isPending}
                             onChange={(event) => {
                               uploadRetryTask(row.task.id, event.target.files?.[0]);
                               event.target.value = "";
@@ -279,22 +279,23 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
                           <button
                             className="ghost compact"
                             type="button"
-                            disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending || prioritizeMutation.isPending}
+                            disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending || missingResultRetryMutation.isPending || prioritizeMutation.isPending}
                             onClick={() => document.getElementById(`task-upload-retry-${row.task.id}`)?.click()}
                           >
                             {uploadingTaskId === row.task.id ? "补传中" : "补传重跑"}
                           </button>
+                          {row.task.status === "succeeded" && row.task.resultMissing ? (
+                            <button
+                              className="primary compact"
+                              type="button"
+                              disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending || missingResultRetryMutation.isPending || prioritizeMutation.isPending}
+                              title="原始输入视频仍可读取时，将该集插队到队列最前重跑，不重复扣费；如果原始视频也过期，请用补传重跑"
+                              onClick={() => retryMissingResultTask(row.task.id)}
+                            >
+                              {retryingMissingResultTaskId === row.task.id ? "入队中" : "插队重跑"}
+                            </button>
+                          ) : null}
                         </>
-                      ) : row.task.status === "succeeded" && row.task.resultMissing ? (
-                        <button
-                          className="primary compact"
-                          type="button"
-                          disabled={missingUploadMutation.isPending || taskUploadRetryMutation.isPending || missingResultRetryMutation.isPending || prioritizeMutation.isPending}
-                          title="原始输入视频仍可读取时，将该集插队到队列最前重跑，不重复扣费"
-                          onClick={() => retryMissingResultTask(row.task.id)}
-                        >
-                          {retryingMissingResultTaskId === row.task.id ? "入队中" : "插队重跑"}
-                        </button>
                       ) : row.task.status === "queued" ? (
                         <button
                           className="primary compact"

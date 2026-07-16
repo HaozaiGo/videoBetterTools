@@ -882,8 +882,10 @@ def retry_internal_batch_task_with_replacement_asset(
     params = dict(task.params or {})
     if task.tool_slug != "subtitle-translate-workflow" or str(params.get("internalBatchId") or "") != batch_id:
         raise HTTPException(status_code=400, detail="task does not belong to this internal batch")
-    if task.status not in {"failed", "cancelled"}:
-        raise HTTPException(status_code=409, detail="only failed or cancelled tasks can be replaced and retried")
+    missing_reason = task_result_missing_reason(task) if task.status == "succeeded" else ""
+    is_missing_result_retry = task.status == "succeeded" and bool(missing_reason)
+    if task.status not in {"failed", "cancelled"} and not is_missing_result_retry:
+        raise HTTPException(status_code=409, detail="only failed, cancelled, or missing-result tasks can be replaced and retried")
 
     replacement_asset = db.get(Asset, input_asset_id)
     if replacement_asset is None or replacement_asset.user_id != user_id:
@@ -897,26 +899,32 @@ def retry_internal_batch_task_with_replacement_asset(
         params["duration"] = duration_seconds
     elif replacement_asset.duration_seconds:
         params["duration"] = replacement_asset.duration_seconds
+    if is_missing_result_retry:
+        params["_noChargeRetry"] = True
+        params["_missingResultRetryAt"] = int(now().timestamp() * 1000)
+        params["_missingResultReason"] = missing_reason
     estimate = estimate_credits(tool, {**params, "duration": params.get("duration") or replacement_asset.duration_seconds or 30})
     wallet = get_wallet(db, user_id, lock=True)
-    if wallet.credits - wallet.frozen_credits < estimate:
+    if not is_missing_result_retry and wallet.credits - wallet.frozen_credits < estimate:
         raise HTTPException(status_code=402, detail="insufficient credits")
 
+    previous_charged = task.charged_credits
     task.input_asset_id = replacement_asset.id
     task.params = params
     task.status = "queued"
     task.provider_job_id = f"mock_{uuid4()}"
     task.estimated_credits = estimate
-    task.frozen_credits = estimate
-    task.charged_credits = 0
+    task.frozen_credits = 0 if is_missing_result_retry else estimate
+    task.charged_credits = previous_charged if is_missing_result_retry else 0
     task.error_code = None
     task.progress_percent = 0
-    task.progress_stage = "补传视频后插队重跑，等待 worker 领取任务"
+    task.progress_stage = "结果文件缺失，补传视频后插队重跑，等待 worker 领取任务" if is_missing_result_retry else "补传视频后插队重跑，等待 worker 领取任务"
     task.output_asset_id = None
     task.output_url = ""
     task.completed_at = None
-    wallet.frozen_credits += estimate
-    add_ledger(db, user_id, "freeze", 0, f"{tool['name']} 补传重跑，冻结 {estimate} 积分", task.id)
+    if not is_missing_result_retry:
+        wallet.frozen_credits += estimate
+        add_ledger(db, user_id, "freeze", 0, f"{tool['name']} 补传重跑，冻结 {estimate} 积分", task.id)
     cancel_marker = settings.upload_path / f"{task.id}.cancel"
     cancel_marker.unlink(missing_ok=True)
 

@@ -156,6 +156,86 @@ def test_admin_internal_batch_zips_lists_ready_local_zip(tmp_path, monkeypatch) 
     assert empty_search_payload["page"]["total"] == 0
 
 
+def test_admin_summary_includes_active_zip_queue(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(
+        admin,
+        "_zip_job_states",
+        lambda include_failed=True: {
+            ("zip-queue-user", "zip-queue-batch"): {
+                "state": "queued",
+                "position": 3,
+                "jobId": "zip-job-1",
+                "retriesLeft": None,
+                "createdAt": 123,
+                "startedAt": None,
+                "endedAt": None,
+            }
+        },
+    )
+
+    with Session(engine) as db:
+        user = User(id="zip-queue-user", email="zip-queue@example.com", name="Zip Queue", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+        for index in range(1, 3):
+            asset = Asset(
+                id=f"zip-queue-input-{index}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"episode-{index}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"episode-{index}.mp4",
+                url=f"/uploads/episode-{index}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            output_asset = Asset(
+                id=f"zip-queue-output-{index}",
+                user_id=user.id,
+                kind="result",
+                original_name=f"episode-{index}-result.mp4",
+                mime_type="video/mp4",
+                storage_key=f"episode-{index}-result.mp4",
+                url=f"/uploads/episode-{index}-result.mp4",
+                size_bytes=10,
+                duration_seconds=0,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=f"zip-queue-task-{index}",
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=asset.id,
+                output_asset_id=output_asset.id,
+                status="succeeded",
+                params={"internalBatchId": "zip-queue-batch", "internalBatchName": "ZIP 队列批次（2集）", "internalBatchTotal": 2},
+                estimated_credits=1,
+                frozen_credits=0,
+                charged_credits=1,
+                provider="mock",
+                provider_job_id=f"zip-queue-provider-{index}",
+                output_url=output_asset.url,
+                progress_percent=100,
+                progress_stage="done",
+                completed_at=now(),
+            )
+            db.add_all([asset, output_asset, task])
+        db.commit()
+
+        payload = admin.admin_summary(db)
+
+    assert len(payload["zipJobs"]) == 1
+    assert payload["zipJobs"][0]["batchName"] == "ZIP 队列批次（2集）"
+    assert payload["zipJobs"][0]["batchId"] == "zip-queue-batch"
+    assert payload["zipJobs"][0]["state"] == "queued"
+    assert payload["zipJobs"][0]["position"] == 3
+    assert payload["zipJobs"][0]["succeeded"] == 2
+    assert payload["zipJobs"][0]["total"] == 2
+
+
 def test_admin_regenerate_internal_batch_zip_deletes_old_zip_and_prioritizes_queue(tmp_path, monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

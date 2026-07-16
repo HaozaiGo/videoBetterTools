@@ -44,6 +44,13 @@ function taskMonitorName(task: Task) {
   return { primary, secondary: secondaryParts.join(" · ") || task.providerJobId };
 }
 
+function zipQueueStateLabel(state: string, position: number | null, retriesLeft: number | null) {
+  if (state === "started") return "打包中";
+  if (state === "queued") return position ? `第 ${position} 位` : "排队中";
+  if (state === "scheduled") return retriesLeft === null || retriesLeft === undefined ? "等待重试" : `等待重试 ${retriesLeft}`;
+  return state || "进行中";
+}
+
 export function AdminPage() {
   const queryClient = useQueryClient();
   const [taskPageNumber, setTaskPageNumber] = useState(1);
@@ -130,6 +137,7 @@ export function AdminPage() {
   const gpus = gpuMetrics?.gpus || [];
   const runningJobs = gpuMetrics?.runningJobs || [];
   const queuedJobs = gpuMetrics?.queuedJobs || [];
+  const zipJobs = summary.zipJobs || [];
   const busyGpuCount = gpus.filter((gpu) => gpu.utilizationGpuPercent > 5 || gpu.workerSlotsUsed > 0).length;
   const freeGpuCount = gpus.filter((gpu) => gpu.utilizationGpuPercent <= 5 && gpu.memoryUsedMiB < 1024 && gpu.workerSlotsUsed === 0).length;
 
@@ -229,7 +237,7 @@ export function AdminPage() {
                   <strong>{job.displayName || job.inputAssetName || job.toolSlug || "video"}</strong>
                   <span>{job.displaySubtitle || job.taskId || job.id}</span>
                 </div>
-                <span>{job.queueState === "scheduled" ? `延迟重试 ${job.position}` : `第 ${job.position} 位`}</span>
+                <span>{job.queueState === "waiting" ? `等待调度 ${job.position}` : job.queueState === "scheduled" ? `延迟重试 ${job.position}` : `第 ${job.position} 位`}</span>
                 <span>{job.taskStatus ? statusLabel(job.taskStatus) : "排队中"}</span>
                 <span>{job.progressPercent}%</span>
                 <em>{job.progressStage || "等待 worker 领取任务"}</em>
@@ -237,6 +245,37 @@ export function AdminPage() {
             ))
           ) : (
             <div className="empty">当前没有等待 worker 领取的任务。</div>
+          )}
+        </div>
+      </div>
+      <div className="panel gpu-monitor">
+        <div className="section-head">
+          <div>
+            <h2>ZIP 进行中的队列</h2>
+            <p>查看自动 ZIP worker 正在打包、排队和等待重试的批次。</p>
+          </div>
+          <button className="ghost compact" onClick={() => queryClient.invalidateQueries({ queryKey: ["admin-summary"] })}>
+            刷新
+          </button>
+        </div>
+        <div className="gpu-job-list">
+          {zipJobs.length ? (
+            zipJobs.map((job) => (
+              <div className="gpu-job-row" key={`${job.state}-${job.batchId}-${job.jobId}`}>
+                <div>
+                  <strong>{job.batchName}</strong>
+                  <span>
+                    {job.succeeded}/{job.total} · {job.batchId}
+                  </span>
+                </div>
+                <span>{zipQueueStateLabel(job.state, job.position, job.retriesLeft)}</span>
+                <span>{job.zipStage === "gpu" ? "GPU ZIP" : job.zipStage === "retry" ? "重试中" : job.zipStage === "queued" ? "排队中" : job.zipStage}</span>
+                <span>{formatDate(job.updatedAt)}</span>
+                <em>{job.message || "等待 ZIP worker 处理"}</em>
+              </div>
+            ))
+          ) : (
+            <div className="empty">当前没有进行中的 ZIP 打包任务。</div>
           )}
         </div>
       </div>

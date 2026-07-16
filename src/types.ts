@@ -53,6 +53,30 @@ export type AdminSummary = {
   queuedTasks: number;
   processingTasks: number;
   failedTasks: number;
+  zipJobs: AdminZipQueueJob[];
+};
+
+export type AdminZipQueueJob = {
+  userId: string;
+  batchId: string;
+  batchName: string;
+  total: number;
+  created: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  missing: number;
+  activeProcessing: number;
+  processing: number;
+  zipStage: "tasks" | "waiting" | "queued" | "gpu" | "retry" | "failed";
+  message: string;
+  state: "queued" | "started" | "scheduled";
+  position: number | null;
+  retriesLeft: number | null;
+  jobId: string;
+  createdAt: number;
+  updatedAt: number;
+  startedAt: number | null;
 };
 
 export type AdminUser = {
@@ -101,7 +125,7 @@ export type GpuRunningJob = {
 export type GpuQueuedJob = {
   id: string;
   position: number;
-  queueState?: "queued" | "scheduled";
+  queueState?: "queued" | "scheduled" | "waiting";
   displayName?: string;
   displaySubtitle?: string;
   inputAssetName?: string;
