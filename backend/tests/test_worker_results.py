@@ -236,6 +236,15 @@ def test_finalize_remote_gpu_result_waits_for_uploaded_object_visibility(monkeyp
         )
 
 
+def test_remote_gpu_failure_error_code_preserves_runner_failures() -> None:
+    assert worker._remote_gpu_failure_error_code(worker.RemoteGpuError("remote GPU job failed: CUDA_OUT_OF_MEMORY")) == "CUDA_OUT_OF_MEMORY"
+    assert worker._remote_gpu_failure_error_code(
+        worker.RemoteGpuError("remote GPU job failed: ASR_NO_SEGMENTS: speech recognition returned no subtitle segments")
+    ) == "ASR_NO_SEGMENTS"
+    assert worker._remote_gpu_failure_error_code(worker.RemoteGpuError("remote GPU job failed: VIDEO_DECODE_FAILED")) == "VIDEO_DECODE_FAILED"
+    assert worker._remote_gpu_failure_error_code(RuntimeError("tos upload failed")) == "RESULT_UPLOAD_FAILED"
+
+
 def test_remember_remote_gpu_job_stores_latest_and_history() -> None:
     task = Task(
         id="task-remote-memory",

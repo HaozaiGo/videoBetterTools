@@ -67,6 +67,11 @@ GPU_STALL_TIMEOUT_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_STALL_TIMEOUT_SECON
 GPU_WATCHDOG_INTERVAL_SECONDS = max(5, _env_int("MODEL_PLAZA_GPU_WATCHDOG_INTERVAL_SECONDS", 30))
 GPU_CANCEL_GRACE_SECONDS = max(1, _env_int("MODEL_PLAZA_GPU_CANCEL_GRACE_SECONDS", 8))
 GPU_RECOVER_STALE_PROCESSING_TIMEOUT_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_RECOVER_STALE_PROCESSING_TIMEOUT_SECONDS", GPU_STALL_TIMEOUT_SECONDS))
+GPU_AUTO_EXCLUSIVE_ENABLED = os.environ.get("MODEL_PLAZA_GPU_AUTO_EXCLUSIVE_ENABLED", "1").lower() not in {"0", "false", "no"}
+GPU_AUTO_EXCLUSIVE_MIN_DURATION_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_AUTO_EXCLUSIVE_MIN_DURATION_SECONDS", 80))
+GPU_AUTO_EXCLUSIVE_MIN_FRAMES = max(0, _env_int("MODEL_PLAZA_GPU_AUTO_EXCLUSIVE_MIN_FRAMES", 1800))
+GPU_AUTO_EXCLUSIVE_MIN_PIXELS = max(0, _env_int("MODEL_PLAZA_GPU_AUTO_EXCLUSIVE_MIN_PIXELS", 1280 * 720))
+GPU_AUTO_EXCLUSIVE_MIN_FREE_MEMORY_MIB = max(0, _env_int("MODEL_PLAZA_GPU_AUTO_EXCLUSIVE_MIN_FREE_MEMORY_MIB", 24_000))
 
 
 def _csv_values(value: str) -> list[str]:
@@ -409,16 +414,35 @@ def _truthy(value: object) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _candidate_gpu_devices(preferred_gpu: str = "") -> list[str]:
+def _gpu_free_memory_by_device() -> dict[str, float]:
+    running_by_gpu = {gpu_device: 0 for gpu_device in GPU_DEVICE_IDS}
+    gpus, _ = _query_configured_gpu_metrics(running_by_gpu, GPU_DEVICE_IDS)
+    free_by_device: dict[str, float] = {}
+    for gpu in gpus:
+        gpu_device = str(gpu.get("index") or "")
+        total = float(gpu.get("memoryTotalMiB") or 0)
+        used = float(gpu.get("memoryUsedMiB") or 0)
+        if gpu_device:
+            free_by_device[gpu_device] = max(0.0, total - used)
+    return free_by_device
+
+
+def _candidate_gpu_devices(preferred_gpu: str = "", min_free_memory_mib: int = 0) -> list[str]:
     if preferred_gpu and preferred_gpu in GPU_DEVICE_IDS:
         return [preferred_gpu]
-    return list(GPU_DEVICE_IDS)
+    candidates = list(GPU_DEVICE_IDS)
+    if min_free_memory_mib <= 0:
+        return candidates
+    free_by_device = _gpu_free_memory_by_device()
+    ranked = sorted(candidates, key=lambda gpu_device: free_by_device.get(gpu_device, 0), reverse=True)
+    eligible = [gpu_device for gpu_device in ranked if free_by_device.get(gpu_device, 0) >= min_free_memory_mib]
+    return eligible or ranked
 
 
-def _acquire_gpu_slot(job_id: str, preferred_gpu: str = "", exclusive: bool = False) -> str:
-    candidates = _candidate_gpu_devices(preferred_gpu)
+def _acquire_gpu_slot(job_id: str, preferred_gpu: str = "", exclusive: bool = False, min_free_memory_mib: int = 0) -> str:
     with gpu_slot_condition:
         while True:
+            candidates = _candidate_gpu_devices(preferred_gpu, min_free_memory_mib)
             for gpu_device in candidates:
                 slot_capacity = GPU_SLOT_CAPACITY_BY_DEVICE.get(gpu_device, 0)
                 if slot_capacity <= 0:
@@ -437,6 +461,57 @@ def _acquire_gpu_slot(job_id: str, preferred_gpu: str = "", exclusive: bool = Fa
                     _write_status(job_id, assigned_gpu=gpu_device, exclusive_gpu=False)
                     return gpu_device
             gpu_slot_condition.wait(timeout=5)
+
+
+def _probe_video_metadata(path: Path) -> dict[str, float]:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,r_frame_rate,nb_frames:format=duration",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        payload = json.loads(_run_command(command, timeout=15))
+    except Exception:
+        return {}
+    stream = (payload.get("streams") or [{}])[0] or {}
+    duration = float((payload.get("format") or {}).get("duration") or 0)
+    width = float(stream.get("width") or 0)
+    height = float(stream.get("height") or 0)
+    frame_count = float(stream.get("nb_frames") or 0)
+    if frame_count <= 0 and duration > 0:
+        numerator, separator, denominator = str(stream.get("r_frame_rate") or "").partition("/")
+        try:
+            fps = float(numerator) / float(denominator) if separator and float(denominator) else float(numerator or 0)
+        except ValueError:
+            fps = 0
+        frame_count = duration * fps if fps > 0 else 0
+    return {"duration": duration, "width": width, "height": height, "frames": frame_count, "pixels": width * height}
+
+
+def _auto_exclusive_reason(job_type: str, params: dict, input_path: Path) -> str:
+    if not GPU_AUTO_EXCLUSIVE_ENABLED or _truthy(params.get("disableAutoExclusiveGpu")):
+        return ""
+    if job_type not in {"propainter", "subtitle_translate"}:
+        return ""
+    metadata = _probe_video_metadata(input_path)
+    duration = float(params.get("durationSeconds") or params.get("duration") or metadata.get("duration") or 0)
+    frames = float(params.get("frameCount") or metadata.get("frames") or 0)
+    pixels = float(metadata.get("pixels") or 0)
+    reasons: list[str] = []
+    if GPU_AUTO_EXCLUSIVE_MIN_DURATION_SECONDS and duration >= GPU_AUTO_EXCLUSIVE_MIN_DURATION_SECONDS:
+        reasons.append(f"duration={duration:.1f}s")
+    if GPU_AUTO_EXCLUSIVE_MIN_FRAMES and frames >= GPU_AUTO_EXCLUSIVE_MIN_FRAMES:
+        reasons.append(f"frames={frames:.0f}")
+    if GPU_AUTO_EXCLUSIVE_MIN_PIXELS and pixels >= GPU_AUTO_EXCLUSIVE_MIN_PIXELS:
+        reasons.append(f"pixels={pixels:.0f}")
+    return ", ".join(reasons)
 
 
 def _release_gpu_slot(job_id: str, gpu_device: str | None) -> None:
@@ -809,6 +884,8 @@ def _summarize_job_error(exc: Exception, log_path: Path) -> str:
     lowered = detail.lower()
     if "cuda out of memory" in lowered or "torch.outofmemoryerror" in lowered:
         return "CUDA_OUT_OF_MEMORY: GPU 显存不足，建议使用单卡独占重跑或降低并发后重试"
+    if "speech recognition returned no subtitle segments" in lowered or "asr_no_segments" in lowered:
+        return "ASR_NO_SEGMENTS: 未识别到可翻译语音/字幕，可保留去字幕结果或检查音轨"
     if "result upload exceeded total timeout" in lowered:
         timeout = os.environ.get("MODEL_PLAZA_GPU_RESULT_UPLOAD_TOTAL_TIMEOUT", "900")
         return f"RESULT_UPLOAD_TIMEOUT: 结果上传超过 {timeout}s，视频已生成但上传对象存储超时"
@@ -857,6 +934,7 @@ def _run_tracked_process(job_id: str, command: list[str], log_file, assigned_gpu
         "CUDA_VISIBLE_DEVICES": assigned_gpu,
         "MODEL_PLAZA_ASSIGNED_GPU": assigned_gpu,
     }
+    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     if use_progress_file:
         env["MODEL_PLAZA_PROGRESS_FILE"] = str(_progress_path(job_id))
     process = subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT, text=True, env=env, start_new_session=True)
@@ -933,7 +1011,22 @@ def _run_model_job(job_id: str) -> None:
             _write_status(job_id, progress_percent=5, progress_stage="远端输入视频下载完成")
 
         _require_gpu_preflight()
-        assigned_gpu = _acquire_gpu_slot(job_id, preferred_gpu=preferred_gpu, exclusive=exclusive_gpu)
+        auto_exclusive_reason = "" if exclusive_gpu else _auto_exclusive_reason(job_type, params_payload, input_path)
+        if auto_exclusive_reason:
+            exclusive_gpu = True
+            _write_status(
+                job_id,
+                auto_exclusive_gpu=True,
+                auto_exclusive_reason=auto_exclusive_reason,
+                progress_stage=f"检测到高风险视频，等待独占 GPU：{auto_exclusive_reason}",
+            )
+        min_free_memory_mib = GPU_AUTO_EXCLUSIVE_MIN_FREE_MEMORY_MIB if exclusive_gpu and not preferred_gpu else 0
+        assigned_gpu = _acquire_gpu_slot(
+            job_id,
+            preferred_gpu=preferred_gpu,
+            exclusive=exclusive_gpu,
+            min_free_memory_mib=min_free_memory_mib,
+        )
         if _read_status(job_id).get("status") == "cancelled":
             return
 
@@ -945,6 +1038,9 @@ def _run_model_job(job_id: str) -> None:
             assigned_gpu=assigned_gpu,
             progress_percent=8,
             progress_stage=f"远端 GPU {assigned_gpu} {'独占' if exclusive_gpu else ''}已领取任务",
+            auto_exclusive_gpu=bool(auto_exclusive_reason),
+            auto_exclusive_reason=auto_exclusive_reason,
+            min_free_memory_mib=min_free_memory_mib,
         )
         LOGS_ROOT.mkdir(parents=True, exist_ok=True)
         with log_path.open("w", encoding="utf-8") as log_file:

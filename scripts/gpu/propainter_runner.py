@@ -33,6 +33,35 @@ def _run(command: list[str], cwd: Path | None = None) -> None:
     subprocess.run(command, cwd=cwd, check=True)
 
 
+class PropainterOutOfMemoryError(RuntimeError):
+    """Raised when the ProPainter subprocess fails with a CUDA OOM."""
+
+
+def _looks_like_cuda_oom(text: str) -> bool:
+    lowered = text.lower()
+    return (
+        "cuda out of memory" in lowered
+        or "torch.outofmemoryerror" in lowered
+        or "cublas_status_alloc_failed" in lowered
+        or "cudnn_status_alloc_failed" in lowered
+    )
+
+
+def _run_propainter_command(command: list[str], cwd: Path | None = None) -> None:
+    print("+ " + " ".join(command), flush=True)
+    result = subprocess.run(command, cwd=cwd, text=True, capture_output=True)
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n", flush=True)
+    if result.stderr:
+        print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", flush=True)
+    if result.returncode == 0:
+        return
+    combined_output = "\n".join(part for part in [result.stdout, result.stderr] if part)
+    if _looks_like_cuda_oom(combined_output):
+        raise PropainterOutOfMemoryError(combined_output[-2000:])
+    raise subprocess.CalledProcessError(result.returncode, command, output=result.stdout, stderr=result.stderr)
+
+
 def _link_or_copy(source: Path, target: Path) -> None:
     target.unlink(missing_ok=True)
     try:
@@ -361,7 +390,51 @@ def _concat_videos(parts: list[Path], output_path: Path, workdir: Path) -> None:
     _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(output_path)])
 
 
-def _run_propainter(
+def _propainter_retry_profiles(params: dict) -> list[dict]:
+    base_chunk_frames = int(params.get("propainterChunkFrames") or params.get("propainterLongVideoFrames") or 900)
+    base_subvideo_length = int(params.get("subvideoLength") or 40)
+    base_short_side = int(params.get("propainterLongVideoShortSide") or 360)
+    raw_profiles = [
+        (base_chunk_frames, base_subvideo_length, base_short_side, "原参数"),
+        (min(base_chunk_frames, 450), min(base_subvideo_length, 20), min(base_short_side, 360), "降档 450/20"),
+        (min(base_chunk_frames, 240), min(base_subvideo_length, 10), min(base_short_side, 320), "降档 240/10"),
+    ]
+    profiles: list[dict] = []
+    seen: set[tuple[int, int, int]] = set()
+    for chunk_frames, subvideo_length, short_side, label in raw_profiles:
+        key = (max(1, chunk_frames), max(1, subvideo_length), max(160, short_side))
+        if key in seen:
+            continue
+        seen.add(key)
+        profiles.append(
+            {
+                "propainterChunkFrames": key[0],
+                "propainterLongVideoFrames": key[0],
+                "subvideoLength": key[1],
+                "propainterLongVideoShortSide": key[2],
+                "_retryLabel": label,
+            }
+        )
+    return profiles
+
+
+def _params_with_propainter_profile(params: dict, profile: dict) -> dict:
+    updated = {**params}
+    updated.update({key: value for key, value in profile.items() if not key.startswith("_")})
+    updated.setdefault("propainterNeighborLength", 6)
+    updated.setdefault("propainterRefStride", 20)
+    return updated
+
+
+def _clean_propainter_attempt(workdir: Path, results_dir: Path) -> None:
+    for path in [results_dir, workdir / "chunks", workdir / "chunk-results", workdir / "propainter-merged.mp4"]:
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
+
+
+def _run_propainter_once(
     python: str,
     propainter_root: Path,
     frames_dir: Path,
@@ -378,7 +451,7 @@ def _run_propainter(
     chunk_frames = int(params.get("propainterChunkFrames") or params.get("propainterLongVideoFrames") or 900)
     if frame_count <= chunk_frames:
         command = _build_propainter_command(python, frames_dir, masks_dir, results_dir, fps, frame_count, width, height, params, strategy)
-        _run(command, cwd=propainter_root)
+        _run_propainter_command(command, cwd=propainter_root)
         return results_dir / frames_dir.name / "inpaint_out.mp4"
 
     frames = sorted(frames_dir.glob("*.png"))
@@ -410,7 +483,7 @@ def _run_propainter(
             strategy,
             sizing_frame_count=frame_count,
         )
-        _run(command, cwd=propainter_root)
+        _run_propainter_command(command, cwd=propainter_root)
         chunk_output = chunk_results_dir / chunk_frames_dir.name / "inpaint_out.mp4"
         if not chunk_output.exists():
             raise RuntimeError(f"ProPainter chunk output not found: {chunk_output}")
@@ -419,6 +492,57 @@ def _run_propainter(
     merged_path = workdir / "propainter-merged.mp4"
     _concat_videos(chunk_outputs, merged_path, workdir)
     return merged_path
+
+
+def _run_propainter(
+    python: str,
+    propainter_root: Path,
+    frames_dir: Path,
+    masks_dir: Path,
+    results_dir: Path,
+    fps: float,
+    width: int,
+    height: int,
+    frame_count: int,
+    params: dict,
+    strategy: str,
+    workdir: Path,
+) -> Path:
+    profiles = _propainter_retry_profiles(params)
+    last_oom: PropainterOutOfMemoryError | None = None
+    for attempt_index, profile in enumerate(profiles, start=1):
+        attempt_params = _params_with_propainter_profile(params, profile)
+        if attempt_index > 1:
+            _clean_propainter_attempt(workdir, results_dir)
+        print(
+            "ProPainter attempt "
+            f"{attempt_index}/{len(profiles)} ({profile['_retryLabel']}): "
+            f"chunk_frames={attempt_params['propainterChunkFrames']}, "
+            f"subvideo_length={attempt_params['subvideoLength']}, "
+            f"short_side={attempt_params['propainterLongVideoShortSide']}",
+            flush=True,
+        )
+        try:
+            return _run_propainter_once(
+                python,
+                propainter_root,
+                frames_dir,
+                masks_dir,
+                results_dir,
+                fps,
+                width,
+                height,
+                frame_count,
+                attempt_params,
+                strategy,
+                workdir,
+            )
+        except PropainterOutOfMemoryError as exc:
+            last_oom = exc
+            if attempt_index >= len(profiles):
+                break
+            print("ProPainter CUDA OOM detected; retrying with smaller chunks.", flush=True)
+    raise PropainterOutOfMemoryError(str(last_oom or "ProPainter CUDA out of memory"))
 
 
 def main() -> None:

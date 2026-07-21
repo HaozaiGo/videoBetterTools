@@ -109,6 +109,34 @@ def test_video_enhance_adapter_retries_transient_status_failures(monkeypatch) ->
     assert cancelled == []
 
 
+def test_gpu_api_auto_exclusive_detects_high_risk_video(monkeypatch, tmp_path) -> None:
+    module = _load_script_module("propainter_api_auto_exclusive_test", "scripts/gpu/propainter_api_server.py")
+    monkeypatch.setattr(module, "GPU_AUTO_EXCLUSIVE_ENABLED", True)
+    monkeypatch.setattr(module, "GPU_AUTO_EXCLUSIVE_MIN_DURATION_SECONDS", 80)
+    monkeypatch.setattr(module, "GPU_AUTO_EXCLUSIVE_MIN_FRAMES", 1800)
+    monkeypatch.setattr(module, "GPU_AUTO_EXCLUSIVE_MIN_PIXELS", 1280 * 720)
+    monkeypatch.setattr(
+        module,
+        "_probe_video_metadata",
+        lambda path: {"duration": 95.0, "frames": 2400.0, "pixels": 1280.0 * 720.0},
+    )
+
+    reason = module._auto_exclusive_reason("subtitle_translate", {}, tmp_path / "input.mp4")
+
+    assert "duration=95.0s" in reason
+    assert "frames=2400" in reason
+    assert "pixels=921600" in reason
+
+
+def test_gpu_api_candidate_devices_prefers_free_memory(monkeypatch) -> None:
+    module = _load_script_module("propainter_api_candidate_gpu_test", "scripts/gpu/propainter_api_server.py")
+    monkeypatch.setattr(module, "GPU_DEVICE_IDS", ["2", "3", "5"])
+    monkeypatch.setattr(module, "_gpu_free_memory_by_device", lambda: {"2": 12000, "3": 64000, "5": 32000})
+
+    assert module._candidate_gpu_devices(min_free_memory_mib=24000) == ["3", "5"]
+    assert module._candidate_gpu_devices(preferred_gpu="2", min_free_memory_mib=24000) == ["2"]
+
+
 @pytest.mark.skipif(not Path("/proc").exists(), reason="process tree cleanup uses Linux /proc")
 def test_gpu_api_server_terminates_orphan_job_processes() -> None:
     module = _load_script_module("propainter_api_server_test", "scripts/gpu/propainter_api_server.py")
@@ -253,6 +281,7 @@ def test_gpu_api_server_subtitle_translate_runs_locally_and_uploads_once(tmp_pat
     monkeypatch.setattr(module, "PYTHON_PATH", sys.executable)
     monkeypatch.setattr(module, "UPLOAD_RESULTS", True)
     monkeypatch.setattr(module, "_require_gpu_preflight", lambda: None)
+    monkeypatch.setattr(module, "_auto_exclusive_reason", lambda *args, **kwargs: "")
     monkeypatch.setattr(module, "_acquire_gpu_slot", lambda *args, **kwargs: "0")
     monkeypatch.setattr(module, "_release_gpu_slot", lambda *args, **kwargs: None)
     monkeypatch.setattr(module.subprocess, "Popen", lambda command, **kwargs: FakeProcess(command, **kwargs))

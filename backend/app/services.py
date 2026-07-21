@@ -258,6 +258,8 @@ def failure_reason_for_task(task: Task) -> str:
         return "输入文件不存在或已过期，请重新上传后再试。"
     if "cuda_out_of_memory" in haystack or "cuda out of memory" in haystack or "outofmemoryerror" in haystack:
         return "GPU 显存不足导致模型退出。建议点击“单卡重跑”，或降低并发后重试。"
+    if "asr_no_segments" in haystack or "speech recognition returned no subtitle segments" in haystack:
+        return "未识别到可翻译语音/字幕。系统会优先保留已完成的去字幕结果；如需翻译，请检查原视频音轨或字幕区域。"
     if "result_upload_timeout" in haystack or "result upload exceeded total timeout" in haystack:
         return "结果文件已生成，但上传对象存储超时。可以直接重跑；若频繁出现，需要放宽上传超时或检查 TOS 上传链路。"
     if "result_upload_failed" in haystack or "tos upload failed" in haystack or "presigned upload failed" in haystack:

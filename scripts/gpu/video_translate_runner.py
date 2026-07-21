@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import urllib.error
 import urllib.request
@@ -518,6 +519,28 @@ def _encode_with_subtitles(input_path: Path, ass_path: Path, output_path: Path, 
     _run(command)
 
 
+def _copy_input_as_success(input_path: Path, output_path: Path, workdir: Path, duration: float) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if input_path.resolve() != output_path.resolve():
+        shutil.copy2(input_path, output_path)
+    segments_path = workdir / "segments.json"
+    segments_path.parent.mkdir(parents=True, exist_ok=True)
+    segments_path.write_text("[]", encoding="utf-8")
+    (workdir / "empty-segments.json").write_text(
+        json.dumps(
+            {
+                "reason": "speech recognition returned no subtitle segments",
+                "duration": duration,
+                "output": str(output_path),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    _write_progress(100, "视频处理完成：未识别到可翻译语音/字幕，已保留去字幕结果")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", default=os.environ.get("MODEL_PLAZA_INPUT"))
@@ -544,6 +567,9 @@ def main() -> None:
     if not segments:
         if os.environ.get("MODEL_PLAZA_TRANSLATE_ALLOW_PLACEHOLDER", "").lower() in {"1", "true", "yes"}:
             segments = _fallback_segments(duration)
+        elif os.environ.get("MODEL_PLAZA_TRANSLATE_EMPTY_SEGMENTS_MODE", "copy").lower() in {"copy", "passthrough", "success"}:
+            _copy_input_as_success(input_path, output_path, workdir, duration)
+            return
         else:
             raise RuntimeError("speech recognition returned no subtitle segments.")
     segments_path = workdir / "segments.json"

@@ -108,6 +108,23 @@ def _finalize_result_payload(result: dict) -> dict:
     }
 
 
+def _remote_gpu_failure_error_code(exc: Exception) -> str:
+    if not isinstance(exc, RemoteGpuError):
+        return "RESULT_UPLOAD_FAILED"
+    haystack = str(exc).lower()
+    if "cuda_out_of_memory" in haystack or "cuda out of memory" in haystack or "torch.outofmemoryerror" in haystack:
+        return "CUDA_OUT_OF_MEMORY"
+    if "asr_no_segments" in haystack or "speech recognition returned no subtitle segments" in haystack:
+        return "ASR_NO_SEGMENTS"
+    if "video_decode_failed" in haystack or "invalid data found" in haystack or "moov atom not found" in haystack:
+        return "VIDEO_DECODE_FAILED"
+    if "gpu_stalled" in haystack or "stalled progress" in haystack or "stalled_progress" in haystack:
+        return "GPU_STALLED"
+    if "gpu_runner_failed" in haystack or "remote gpu job failed" in haystack:
+        return "REMOTE_GPU_FAILED"
+    return "RESULT_UPLOAD_FAILED"
+
+
 def finalize_provider_job_result(task_id: str, provider_job_id: str, result: dict) -> None:
     try:
         if result.get("workflow") == "subtitle-translate":
@@ -124,7 +141,7 @@ def finalize_provider_job_result(task_id: str, provider_job_id: str, result: dic
         raise
     except Exception as exc:
         logger.exception("Failed to finalize result for task %s", task_id)
-        _fail_provider_job(provider_job_id, "RESULT_UPLOAD_FAILED", str(exc))
+        _fail_provider_job(provider_job_id, _remote_gpu_failure_error_code(exc), str(exc))
         raise
 
     with SessionLocal() as db:
