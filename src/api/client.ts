@@ -558,6 +558,12 @@ export function getAdminSummary() {
   return request<AdminSummary>("/api/admin/summary");
 }
 
+export function clearAdminFailedTasks() {
+  return request<{ cleared: number; remainingFailedTasks: number; clearedFailedTasks: number }>("/api/admin/failed-tasks/clear", {
+    method: "POST",
+  });
+}
+
 export function getAdminUsers() {
   return request<AdminUser[]>("/api/admin/users");
 }

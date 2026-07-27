@@ -18,9 +18,19 @@ from app.services import add_ledger, create_task, failure_reason_for_task, get_t
 from app.storage import storage
 
 
+def _failure_uncleared_filter():
+    return Task.params["failureClearedAt"].as_string().is_(None)
+
+
 def admin_summary(db: Session) -> dict:
     charged = db.execute(
         select(func.coalesce(func.sum(WalletLedger.amount), 0)).where(WalletLedger.type == "charge")
+    ).scalar_one()
+    failed_tasks = db.execute(
+        select(func.count()).select_from(Task).where(Task.status == "failed", _failure_uncleared_filter())
+    ).scalar_one()
+    cleared_failed_tasks = db.execute(
+        select(func.count()).select_from(Task).where(Task.status == "failed", Task.params["failureClearedAt"].as_string().is_not(None))
     ).scalar_one()
     return {
         "users": db.execute(select(func.count()).select_from(User)).scalar_one(),
@@ -29,9 +39,27 @@ def admin_summary(db: Session) -> dict:
         "creditsCharged": abs(int(charged or 0)),
         "queuedTasks": db.execute(select(func.count()).select_from(Task).where(Task.status == "queued")).scalar_one(),
         "processingTasks": db.execute(select(func.count()).select_from(Task).where(Task.status == "processing")).scalar_one(),
-        "failedTasks": db.execute(select(func.count()).select_from(Task).where(Task.status == "failed")).scalar_one(),
+        "failedTasks": failed_tasks,
+        "clearedFailedTasks": cleared_failed_tasks,
         "zipJobs": _zip_queue_jobs(db),
     }
+
+
+def admin_clear_failed_task_count(db: Session) -> dict:
+    tasks = list(db.execute(select(Task).where(Task.status == "failed", _failure_uncleared_filter())).scalars())
+    cleared_at = serialize_datetime(now())
+    for task in tasks:
+        params = dict(task.params or {})
+        params["failureClearedAt"] = cleared_at
+        task.params = params
+    db.commit()
+    remaining = db.execute(
+        select(func.count()).select_from(Task).where(Task.status == "failed", _failure_uncleared_filter())
+    ).scalar_one()
+    total_cleared = db.execute(
+        select(func.count()).select_from(Task).where(Task.status == "failed", Task.params["failureClearedAt"].as_string().is_not(None))
+    ).scalar_one()
+    return {"cleared": len(tasks), "remainingFailedTasks": remaining, "clearedFailedTasks": total_cleared}
 
 
 def admin_users(db: Session) -> list[dict]:

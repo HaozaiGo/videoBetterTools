@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 import app.admin as admin
 import app.services as services
 from app.models import Asset, Base, Task, User, Wallet
-from app.services import create_internal_batch_zip, now
+from app.services import create_internal_batch_zip, now, serialize_datetime
 
 
 class FakeLocalStorage:
@@ -235,6 +235,76 @@ def test_admin_summary_includes_active_zip_queue(monkeypatch) -> None:
     assert payload["zipJobs"][0]["position"] == 3
     assert payload["zipJobs"][0]["succeeded"] == 2
     assert payload["zipJobs"][0]["total"] == 2
+
+
+def test_admin_clear_failed_task_count_hides_failures_without_changing_status() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        user = User(id="clear-failed-user", email="clear-failed@example.com", name="Clear Failed", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        asset = Asset(
+            id="clear-failed-input",
+            user_id=user.id,
+            kind="video",
+            original_name="failed.mp4",
+            mime_type="video/mp4",
+            storage_key="failed.mp4",
+            url="/uploads/failed.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        failed_task = Task(
+            id="clear-failed-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=asset.id,
+            status="failed",
+            params={},
+            estimated_credits=1,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="clear-failed-provider",
+            progress_percent=5,
+            progress_stage="GPU 任务失败",
+            completed_at=now(),
+        )
+        already_cleared_task = Task(
+            id="already-clear-failed-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=asset.id,
+            status="failed",
+            params={"failureClearedAt": serialize_datetime(now())},
+            estimated_credits=1,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="already-clear-failed-provider",
+            progress_percent=5,
+            progress_stage="GPU 任务失败",
+            completed_at=now(),
+        )
+        db.add_all([user, wallet, asset, failed_task, already_cleared_task])
+        db.commit()
+
+        before = admin.admin_summary(db)
+        payload = admin.admin_clear_failed_task_count(db)
+        after = admin.admin_summary(db)
+        db.refresh(failed_task)
+        db.refresh(already_cleared_task)
+
+    assert before["failedTasks"] == 1
+    assert before["clearedFailedTasks"] == 1
+    assert payload == {"cleared": 1, "remainingFailedTasks": 0, "clearedFailedTasks": 2}
+    assert after["failedTasks"] == 0
+    assert after["clearedFailedTasks"] == 2
+    assert failed_task.status == "failed"
+    assert already_cleared_task.status == "failed"
+    assert failed_task.params["failureClearedAt"]
 
 
 def test_admin_delete_internal_batch_hides_batch_and_cancels_active_tasks(tmp_path, monkeypatch) -> None:

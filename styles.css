@@ -1998,6 +1998,27 @@ th {
   line-height: 1.15;
 }
 
+.admin-dashboard-layout .admin-stats .admin-failed-stat {
+  position: relative;
+  min-height: 92px;
+}
+
+.admin-dashboard-layout .admin-failed-stat em {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.admin-dashboard-layout .admin-failed-stat button {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding-inline: 10px;
+}
+
 .admin-columns {
   display: grid;
   grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);

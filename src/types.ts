@@ -53,6 +53,7 @@ export type AdminSummary = {
   queuedTasks: number;
   processingTasks: number;
   failedTasks: number;
+  clearedFailedTasks: number;
   zipJobs: AdminZipQueueJob[];
 };
 

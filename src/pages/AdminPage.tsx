@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import { useForm } from "@tanstack/react-form";
-import { createAdminUser, getAdminGpuMetrics, getAdminSummary, getAdminTasks, getAdminUsers, rechargeAdminUser } from "../api/client";
+import { clearAdminFailedTasks, createAdminUser, getAdminGpuMetrics, getAdminSummary, getAdminTasks, getAdminUsers, rechargeAdminUser } from "../api/client";
 import { formatCredits, formatDate, statusLabel } from "../lib/format";
 import type { AdminUser, Task } from "../types";
 
@@ -75,6 +75,10 @@ export function AdminPage() {
     mutationFn: createAdminUser,
     onSuccess: refreshAdmin,
   });
+  const clearFailedMutation = useMutation({
+    mutationFn: clearAdminFailedTasks,
+    onSuccess: refreshAdmin,
+  });
   const rechargeMutation = useMutation({
     mutationFn: ({ userId, credits }: { userId: string; credits: number }) => rechargeAdminUser(userId, credits),
     onSuccess: refreshAdmin,
@@ -138,8 +142,14 @@ export function AdminPage() {
   const runningJobs = gpuMetrics?.runningJobs || [];
   const queuedJobs = gpuMetrics?.queuedJobs || [];
   const zipJobs = summary.zipJobs || [];
+  const clearedFailedTasks = summary.clearedFailedTasks || 0;
   const busyGpuCount = gpus.filter((gpu) => gpu.utilizationGpuPercent > 5 || gpu.workerSlotsUsed > 0).length;
   const freeGpuCount = gpus.filter((gpu) => gpu.utilizationGpuPercent <= 5 && gpu.memoryUsedMiB < 1024 && gpu.workerSlotsUsed === 0).length;
+  const clearFailedTasks = () => {
+    if (!summary.failedTasks) return;
+    if (!window.confirm(`确认把当前 ${summary.failedTasks} 个失败任务从后台失败统计中清除？任务历史仍会保留。`)) return;
+    clearFailedMutation.mutate();
+  };
 
   return (
     <section className="admin-layout admin-dashboard-layout">
@@ -157,7 +167,16 @@ export function AdminPage() {
         <div><span>已扣积分</span><strong>{formatCredits(summary.creditsCharged)}</strong></div>
         <div><span>队列中</span><strong>{summary.queuedTasks}</strong></div>
         <div><span>处理中</span><strong>{summary.processingTasks}</strong></div>
-        <div><span>失败</span><strong>{summary.failedTasks}</strong></div>
+        <div className="admin-failed-stat">
+          <span>失败</span>
+          <strong>{summary.failedTasks}</strong>
+          {clearedFailedTasks ? <em>已清理 {clearedFailedTasks}</em> : null}
+          {summary.failedTasks ? (
+            <button className="ghost compact" type="button" onClick={clearFailedTasks} disabled={clearFailedMutation.isPending}>
+              {clearFailedMutation.isPending ? "清理中" : "清零"}
+            </button>
+          ) : null}
+        </div>
       </div>
       <div className="panel gpu-monitor">
         <div className="section-head">
