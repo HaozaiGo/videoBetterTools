@@ -96,6 +96,11 @@ function WorkspaceShell({ children, pathname }: { children: React.ReactNode; pat
           </div>
         </header>
         {children}
+        <footer className="site-footer">
+          <a href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">
+            琼ICP备19002302号-6
+          </a>
+        </footer>
       </main>
     </>
   );

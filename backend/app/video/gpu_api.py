@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import shutil
 import time
 import urllib.error
 import urllib.request
@@ -170,9 +171,12 @@ def download_remote_video_result(job_id: str, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     last_error: Exception | None = None
     for attempt in range(1, 4):
+        temp_path = output_path.with_suffix(output_path.suffix + f".{uuid.uuid4().hex}.tmp")
         try:
             with urllib.request.urlopen(request, timeout=600) as response:
-                output_path.write_bytes(response.read())
+                with temp_path.open("wb") as output_file:
+                    shutil.copyfileobj(response, output_file, length=1024 * 1024)
+                temp_path.replace(output_path)
                 return
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
@@ -186,4 +190,6 @@ def download_remote_video_result(job_id: str, output_path: Path) -> None:
             last_error = RemoteGpuUnavailableError(f"GPU API result download failed on attempt {attempt}/3: {exc}")
             if attempt >= 3:
                 raise last_error from exc
+        finally:
+            temp_path.unlink(missing_ok=True)
         time.sleep(5)

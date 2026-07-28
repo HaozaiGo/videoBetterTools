@@ -188,6 +188,9 @@ a {
 }
 
 .workspace {
+  display: flex;
+  min-height: 100vh;
+  flex-direction: column;
   min-width: 0;
   padding: 0 28px 48px;
 }
@@ -232,6 +235,22 @@ a {
   border-radius: 7px;
   background: var(--panel-soft);
   padding: 9px 12px;
+}
+
+.site-footer {
+  margin-top: auto;
+  padding: 28px 0 0;
+  text-align: center;
+}
+
+.site-footer a {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.site-footer a:hover {
+  color: var(--accent);
 }
 
 .account-pill button,

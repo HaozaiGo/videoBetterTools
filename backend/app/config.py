@@ -45,7 +45,8 @@ class Settings(BaseSettings):
     volcengine_tos_presign_expires_seconds: int = 6 * 60 * 60
     remote_storage_ready_timeout_seconds: int = 120
     remote_storage_ready_poll_seconds: int = 3
-    asset_retention_hours: int = 72
+    asset_retention_hours: int = 14 * 24
+    asset_input_cleanup_grace_hours: int = 14 * 24
     cleanup_retention_hours: int = 48
     internal_batch_zip_retention_hours: int = 12
     internal_batch_zip_part_max_bytes: int = 10 * 1024 * 1024 * 1024

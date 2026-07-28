@@ -107,7 +107,7 @@ def cleanup_synced_local_files(cutoff: datetime, dry_run: bool = False) -> int:
     return removed
 
 
-def _asset_is_used_by_active_task(db: Session, asset_id: str) -> bool:
+def _asset_is_protected_by_task(db: Session, asset_id: str, current_time: datetime) -> bool:
     query = (
         select(Task.id)
         .where(
@@ -116,7 +116,22 @@ def _asset_is_used_by_active_task(db: Session, asset_id: str) -> bool:
         )
         .limit(1)
     )
-    return db.execute(query).first() is not None
+    if db.execute(query).first() is not None:
+        return True
+
+    input_grace_hours = max(0, int(settings.asset_input_cleanup_grace_hours))
+    if input_grace_hours <= 0:
+        return False
+    grace_cutoff = current_time - timedelta(hours=input_grace_hours)
+    recent_input_query = (
+        select(Task.id)
+        .where(
+            Task.input_asset_id == asset_id,
+            Task.created_at >= grace_cutoff,
+        )
+        .limit(1)
+    )
+    return db.execute(recent_input_query).first() is not None
 
 
 def _active_storage_keys(db: Session) -> set[str]:
@@ -174,7 +189,7 @@ def cleanup_expired_assets(db: Session, current_time: datetime, dry_run: bool = 
 
     cleaned = 0
     for asset in expired_assets:
-        if _asset_is_used_by_active_task(db, asset.id):
+        if _asset_is_protected_by_task(db, asset.id, current_time):
             continue
 
         changed = False

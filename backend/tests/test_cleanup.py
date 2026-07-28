@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import timedelta
+from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -13,11 +14,26 @@ from app.models import Asset, Base, Task, User
 class FakeRemoteStorage:
     is_remote = True
 
-    def __init__(self, remote_keys: set[str]) -> None:
+    def __init__(self, remote_keys: set[str], base_path: Path | None = None) -> None:
         self.remote_keys = remote_keys
+        self.base_path = base_path or Path("/missing")
+        self.deleted_remote: list[str] = []
 
     def remote_exists(self, storage_key: str) -> bool:
         return storage_key in self.remote_keys
+
+    def delete_remote(self, storage_key: str) -> bool:
+        self.deleted_remote.append(storage_key)
+        self.remote_keys.discard(storage_key)
+        return True
+
+    def local_path(self, storage_key: str) -> Path:
+        return self.base_path / storage_key
+
+    def delete_local_copy(self, storage_key: str) -> bool:
+        path = self.local_path(storage_key)
+        path.unlink(missing_ok=True)
+        return True
 
 
 def _age_path(path, seconds: int) -> None:
@@ -154,3 +170,61 @@ def test_disk_pressure_cleanup_removes_old_synced_files_but_keeps_active_assets(
     assert not old_file.exists()
     assert active_file.exists()
     assert fresh_file.exists()
+
+
+def test_expired_asset_cleanup_keeps_recent_task_inputs(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(cleanup.settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(cleanup.settings, "asset_input_cleanup_grace_hours", 14 * 24)
+    fake_storage = FakeRemoteStorage({"protected.mp4", "stale.mp4"}, tmp_path)
+    monkeypatch.setattr(cleanup, "storage", fake_storage)
+    current_time = cleanup.utc_now()
+
+    with Session(engine) as db:
+        user = User(id="cleanup-input-user", email="cleanup-input@example.com", name="Cleanup Input", role="user", status="active")
+        protected_asset = Asset(
+            id="protected-asset",
+            user_id=user.id,
+            kind="video",
+            original_name="protected.mp4",
+            mime_type="video/mp4",
+            storage_key="protected.mp4",
+            url="https://example.com/protected.mp4",
+            size_bytes=6,
+            duration_seconds=1,
+            expires_at=current_time - timedelta(hours=1),
+        )
+        stale_asset = Asset(
+            id="stale-asset",
+            user_id=user.id,
+            kind="video",
+            original_name="stale.mp4",
+            mime_type="video/mp4",
+            storage_key="stale.mp4",
+            url="https://example.com/stale.mp4",
+            size_bytes=5,
+            duration_seconds=1,
+            expires_at=current_time - timedelta(hours=1),
+        )
+        recent_task = Task(
+            id="recent-failed-task",
+            user_id=user.id,
+            tool_slug="remove-subtitle",
+            input_asset_id=protected_asset.id,
+            status="failed",
+            params={},
+            estimated_credits=1,
+            frozen_credits=0,
+            provider="mock",
+            provider_job_id="provider-recent-failed",
+            created_at=current_time - timedelta(hours=2),
+        )
+        db.add_all([user, protected_asset, stale_asset, recent_task])
+        db.commit()
+
+        assert cleanup.cleanup_expired_assets(db, current_time) == 1
+
+    assert "protected.mp4" in fake_storage.remote_keys
+    assert "stale.mp4" not in fake_storage.remote_keys
+    assert fake_storage.deleted_remote == ["stale.mp4"]

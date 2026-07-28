@@ -236,12 +236,70 @@ def test_finalize_remote_gpu_result_waits_for_uploaded_object_visibility(monkeyp
         )
 
 
+def test_finalize_remote_gpu_result_recovers_upload_timeout_from_gpu_cache(monkeypatch, tmp_path) -> None:
+    fake_storage = FakeStorage()
+    callbacks: list[dict] = []
+
+    class DummySession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    def fake_provider_callback(db, provider_job_id: str, status: str, **kwargs):
+        callbacks.append({"provider_job_id": provider_job_id, "status": status, **kwargs})
+
+    def fake_download(job_id: str, output_path: Path) -> None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"recovered-video")
+
+    monkeypatch.setattr(worker.settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(worker, "storage", fake_storage)
+    monkeypatch.setattr(worker, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(worker, "provider_callback", fake_provider_callback)
+    monkeypatch.setattr(worker, "_sync_remote_gpu_progress", lambda *args, **kwargs: True)
+    monkeypatch.setattr(worker, "download_remote_video_result", fake_download)
+    monkeypatch.setattr(
+        worker,
+        "get_remote_video_job",
+        lambda job_id: {
+            "status": "failed",
+            "error": "RESULT_UPLOAD_TIMEOUT: 结果上传超过 1800s，视频已生成但上传对象存储超时",
+        },
+    )
+
+    finalized = worker._finalize_remote_gpu_result(
+        "task-1",
+        "provider-1",
+        {
+            "remote_job_id": "remote-1",
+            "storage_key": "model-plaza/output/videos/result.mp4",
+            "url": "https://cdn.example.test/model-plaza/output/videos/result.mp4",
+        },
+    )
+
+    assert finalized["storage_key"] == "model-plaza/output/videos/result.mp4"
+    assert finalized["size_bytes"] == len(b"recovered-video")
+    assert fake_storage.saved == [(finalized["storage_key"], tmp_path / finalized["storage_key"])]
+    assert callbacks == [
+        {
+            "provider_job_id": "provider-1",
+            "status": "processing",
+            "callback_id": "provider-1:remote-1:recover-result-upload-timeout",
+            "progress_percent": 98,
+            "progress_stage": "远端结果已生成，上传超时，正在改由平台拉回",
+        }
+    ]
+
+
 def test_remote_gpu_failure_error_code_preserves_runner_failures() -> None:
     assert worker._remote_gpu_failure_error_code(worker.RemoteGpuError("remote GPU job failed: CUDA_OUT_OF_MEMORY")) == "CUDA_OUT_OF_MEMORY"
     assert worker._remote_gpu_failure_error_code(
         worker.RemoteGpuError("remote GPU job failed: ASR_NO_SEGMENTS: speech recognition returned no subtitle segments")
     ) == "ASR_NO_SEGMENTS"
     assert worker._remote_gpu_failure_error_code(worker.RemoteGpuError("remote GPU job failed: VIDEO_DECODE_FAILED")) == "VIDEO_DECODE_FAILED"
+    assert worker._remote_gpu_failure_error_code(worker.RemoteGpuError("remote GPU job failed: RESULT_UPLOAD_TIMEOUT")) == "RESULT_UPLOAD_TIMEOUT"
     assert worker._remote_gpu_failure_error_code(RuntimeError("tos upload failed")) == "RESULT_UPLOAD_FAILED"
 
 

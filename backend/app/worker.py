@@ -112,6 +112,8 @@ def _remote_gpu_failure_error_code(exc: Exception) -> str:
     if not isinstance(exc, RemoteGpuError):
         return "RESULT_UPLOAD_FAILED"
     haystack = str(exc).lower()
+    if "result_upload_timeout" in haystack or "result upload exceeded total timeout" in haystack:
+        return "RESULT_UPLOAD_TIMEOUT"
     if "cuda_out_of_memory" in haystack or "cuda out of memory" in haystack or "torch.outofmemoryerror" in haystack:
         return "CUDA_OUT_OF_MEMORY"
     if "asr_no_segments" in haystack or "speech recognition returned no subtitle segments" in haystack:
@@ -123,6 +125,14 @@ def _remote_gpu_failure_error_code(exc: Exception) -> str:
     if "gpu_runner_failed" in haystack or "remote gpu job failed" in haystack:
         return "REMOTE_GPU_FAILED"
     return "RESULT_UPLOAD_FAILED"
+
+
+def _remote_gpu_result_upload_timed_out(status: dict) -> bool:
+    haystack = "\n".join(
+        str(status.get(key) or "")
+        for key in ("error", "progress_stage", "progressStage", "detail")
+    ).lower()
+    return "result_upload_timeout" in haystack or "result upload exceeded total timeout" in haystack
 
 
 def finalize_provider_job_result(task_id: str, provider_job_id: str, result: dict) -> None:
@@ -434,6 +444,25 @@ def _finalize_remote_gpu_result(task_id: str, provider_job_id: str, result: dict
                     }
                 )
             if state == "failed":
+                if _remote_gpu_result_upload_timed_out(status):
+                    with SessionLocal() as recovery_db:
+                        provider_callback(
+                            recovery_db,
+                            provider_job_id,
+                            "processing",
+                            callback_id=f"{provider_job_id}:{remote_job_id}:recover-result-upload-timeout",
+                            progress_percent=98,
+                            progress_stage="远端结果已生成，上传超时，正在改由平台拉回",
+                        )
+                    local_path = settings.upload_path / output_key
+                    download_remote_video_result(remote_job_id, local_path)
+                    return _finalize_result_payload(
+                        {
+                            "storage_key": output_key,
+                            "local_path": str(local_path),
+                            "mime_type": str(result.get("mime_type") or "video/mp4"),
+                        }
+                    )
                 raise RemoteGpuError(f"remote GPU job failed: {status.get('error') or 'unknown error'}")
             if state == "cancelled":
                 raise RemoteGpuError("remote GPU job was cancelled")
