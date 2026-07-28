@@ -222,6 +222,7 @@ def test_gpu_api_server_metrics_can_monitor_non_worker_gpus(monkeypatch) -> None
         )
 
     monkeypatch.setattr(module, "_run_command", fake_run_command)
+    module.gpu_slot_usage = {"3": 0, "6": 0, "7": 2}
     module.running_gpu_devices = {"job-7": "7"}
 
     payload = module._gpu_metrics()
@@ -231,7 +232,9 @@ def test_gpu_api_server_metrics_can_monitor_non_worker_gpus(monkeypatch) -> None
     assert payload["workerSlotCapacityByGpu"] == {"3": 1, "6": 2, "7": 2}
     assert [gpu["index"] for gpu in payload["gpus"]] == ["0", "1", "3", "6", "7"]
     assert [gpu["workerSlotsTotal"] for gpu in payload["gpus"]] == [0, 0, 1, 2, 2]
-    assert payload["runningByGpu"] == {"0": 0, "1": 0, "3": 0, "6": 0, "7": 1}
+    assert [gpu["workerSlotsUsed"] for gpu in payload["gpus"]] == [0, 0, 0, 0, 2]
+    assert payload["runningByGpu"] == {"0": 0, "1": 0, "3": 0, "6": 0, "7": 2}
+    assert payload["activeRunnerByGpu"] == {"0": 0, "1": 0, "3": 0, "6": 0, "7": 1}
 
 
 def test_gpu_api_server_rejects_unsafe_result_cache_paths() -> None:
@@ -259,6 +262,7 @@ def test_gpu_api_server_subtitle_translate_runs_locally_and_uploads_once(tmp_pat
 
     commands: list[list[str]] = []
     uploaded: list[Path] = []
+    events: list[tuple[str, str | Path | None]] = []
 
     class FakeProcess:
         def __init__(self, command, **kwargs) -> None:
@@ -283,9 +287,9 @@ def test_gpu_api_server_subtitle_translate_runs_locally_and_uploads_once(tmp_pat
     monkeypatch.setattr(module, "_require_gpu_preflight", lambda: None)
     monkeypatch.setattr(module, "_auto_exclusive_reason", lambda *args, **kwargs: "")
     monkeypatch.setattr(module, "_acquire_gpu_slot", lambda *args, **kwargs: "0")
-    monkeypatch.setattr(module, "_release_gpu_slot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "_release_gpu_slot", lambda job_id, gpu_device: events.append(("release", gpu_device)))
     monkeypatch.setattr(module.subprocess, "Popen", lambda command, **kwargs: FakeProcess(command, **kwargs))
-    monkeypatch.setattr(module, "_upload_result_with_deadline", lambda job_id, output_path: uploaded.append(output_path) or {
+    monkeypatch.setattr(module, "_upload_result_with_deadline", lambda job_id, output_path: events.append(("upload", output_path)) or uploaded.append(output_path) or {
         "result_storage_key": "model-plaza/output/videos/final.mp4",
         "result_url": "https://cdn.example.test/final.mp4",
         "result_size_bytes": output_path.stat().st_size,
@@ -304,6 +308,7 @@ def test_gpu_api_server_subtitle_translate_runs_locally_and_uploads_once(tmp_pat
     assert commands[1][commands[1].index("--input") + 1] == intermediate_output
     assert len(uploaded) == 1
     assert uploaded[0] == job_dir / "output.mp4"
+    assert events[:2] == [("release", "0"), ("upload", job_dir / "output.mp4")]
     status = module._read_status(job_id)
     assert status["status"] == "succeeded"
     assert status["result_storage_key"] == "model-plaza/output/videos/final.mp4"

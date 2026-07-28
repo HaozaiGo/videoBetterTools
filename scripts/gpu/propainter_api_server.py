@@ -387,11 +387,22 @@ def _active_job_count() -> int:
     return len(_running_jobs_snapshot())
 
 
-def _gpu_metrics() -> dict:
-    running_by_gpu = {gpu_device: 0 for gpu_device in GPU_MONITOR_DEVICE_IDS}
+def _slot_usage_snapshot(gpu_device_ids: list[str]) -> dict[str, int]:
+    with gpu_slot_condition:
+        return {gpu_device: int(gpu_slot_usage.get(gpu_device, 0)) for gpu_device in gpu_device_ids}
+
+
+def _active_runner_snapshot(gpu_device_ids: list[str]) -> dict[str, int]:
+    running_by_gpu = {gpu_device: 0 for gpu_device in gpu_device_ids}
     with running_processes_lock:
         for gpu_device in running_gpu_devices.values():
             running_by_gpu[gpu_device] = running_by_gpu.get(gpu_device, 0) + 1
+    return running_by_gpu
+
+
+def _gpu_metrics() -> dict:
+    running_by_gpu = _slot_usage_snapshot(GPU_MONITOR_DEVICE_IDS)
+    active_runner_by_gpu = _active_runner_snapshot(GPU_MONITOR_DEVICE_IDS)
     gpus, gpu_metrics_error = _query_configured_gpu_metrics(running_by_gpu, GPU_MONITOR_DEVICE_IDS)
     return {
         "ok": not bool(gpu_metrics_error),
@@ -402,6 +413,7 @@ def _gpu_metrics() -> dict:
         "workerSlotCapacityByGpu": GPU_SLOT_CAPACITY_BY_DEVICE,
         "slotCapacity": GPU_SLOT_CAPACITY,
         "runningByGpu": running_by_gpu,
+        "activeRunnerByGpu": active_runner_by_gpu,
         "gpus": gpus,
         "runningJobs": _running_jobs_snapshot(),
         **({"gpuMetricsError": gpu_metrics_error} if gpu_metrics_error else {}),
@@ -1062,6 +1074,9 @@ def _run_model_job(job_id: str) -> None:
                 )
         if not output_path.exists():
             raise RuntimeError("runner completed but output.mp4 was not created")
+        _release_gpu_slot(job_id, assigned_gpu)
+        assigned_gpu = None
+        _write_status(job_id, gpu_slot_released_at=time.time())
         if not _should_upload_result(job_id):
             _write_status(
                 job_id,
@@ -1548,10 +1563,8 @@ def recover_incomplete_jobs_on_startup() -> None:
 
 @app.get("/health")
 def health() -> dict:
-    running_by_gpu = {gpu_device: 0 for gpu_device in GPU_DEVICE_IDS}
-    with running_processes_lock:
-        for gpu_device in running_gpu_devices.values():
-            running_by_gpu[gpu_device] = running_by_gpu.get(gpu_device, 0) + 1
+    running_by_gpu = _slot_usage_snapshot(GPU_DEVICE_IDS)
+    active_runner_by_gpu = _active_runner_snapshot(GPU_DEVICE_IDS)
     gpu_preflight_error = _gpu_preflight_error()
     return {
         "ok": not bool(gpu_preflight_error),
@@ -1571,6 +1584,7 @@ def health() -> dict:
         "gpu_watchdog_interval_seconds": GPU_WATCHDOG_INTERVAL_SECONDS,
         "gpu_recover_stale_processing_timeout_seconds": GPU_RECOVER_STALE_PROCESSING_TIMEOUT_SECONDS,
         "running_by_gpu": running_by_gpu,
+        "active_runner_by_gpu": active_runner_by_gpu,
     }
 
 
