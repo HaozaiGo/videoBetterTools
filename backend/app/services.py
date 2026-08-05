@@ -1252,6 +1252,7 @@ async def save_upload(db: Session, user_id: str, file: UploadFile, kind: str, du
     asset_id = str(uuid4())
     original_name = safe_storage_name(file.filename or "upload.bin")
     storage_key = object_key_for_upload(asset_id, kind, original_name) if storage.is_remote else f"{asset_id}-{original_name}"
+    db.rollback()
     content = await file.read()
     storage.save_bytes(storage_key, content)
 
