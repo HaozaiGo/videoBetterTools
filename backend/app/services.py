@@ -1448,6 +1448,8 @@ def complete_multipart_upload(db: Session, user_id: str, upload_id: str) -> Asse
         raise HTTPException(status_code=400, detail={"message": "missing chunks", "missingChunks": missing[:200]})
     if db.get(Asset, manifest["assetId"]) is not None:
         raise HTTPException(status_code=409, detail="asset already exists")
+    # Avoid holding an idle DB transaction open while the slow TOS upload runs.
+    db.rollback()
 
     upload_dir = _multipart_dir(upload_id)
     assembled_path = upload_dir / "assembled.bin"

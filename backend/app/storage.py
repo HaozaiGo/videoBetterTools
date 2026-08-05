@@ -134,8 +134,31 @@ class TosStorage(LocalStorage):
 
     def save_file(self, storage_key: str, local_path: Path) -> StoredObject:
         normalized_key = storage_key.strip("/")
-        self.client.put_object_from_file(self.bucket, normalized_key, str(local_path))
-        return StoredObject(storage_key=normalized_key, public_url=self.public_url(normalized_key), size=local_path.stat().st_size)
+        size = local_path.stat().st_size
+        try:
+            self.client.put_object_from_file(self.bucket, normalized_key, str(local_path))
+        except Exception as exc:
+            if _is_tos_object_lock_error(exc):
+                remote_size = self.remote_size(normalized_key)
+                if remote_size == size:
+                    return StoredObject(storage_key=normalized_key, public_url=self.public_url(normalized_key), size=size)
+            raise
+        return StoredObject(storage_key=normalized_key, public_url=self.public_url(normalized_key), size=size)
+
+    def remote_size(self, storage_key: str) -> int | None:
+        try:
+            result = self.client.head_object(self.bucket, storage_key.strip("/"))
+        except Exception:
+            return None
+        for attr in ("content_length", "contentLength", "ContentLength"):
+            value = getattr(result, attr, None)
+            if value is not None:
+                return int(value)
+        headers = getattr(result, "headers", None) or getattr(result, "header", None) or {}
+        value = None
+        if isinstance(headers, dict):
+            value = headers.get("Content-Length") or headers.get("content-length")
+        return int(value) if value is not None else None
 
     def remote_exists(self, storage_key: str) -> bool:
         try:
@@ -236,3 +259,8 @@ def build_storage() -> LocalStorage:
 
 
 storage = build_storage()
+
+
+def _is_tos_object_lock_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "object protected by object lock" in message or ("accessdenied" in message and "object lock" in message)
