@@ -54,6 +54,8 @@ function createBatchId() {
   return typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `batch-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+const internalBatchUploadConcurrency = 2;
+
 function buildRegion(start: { x: number; y: number }, end: { x: number; y: number }): WatermarkRegion {
   const x = clamp(Math.min(start.x, end.x));
   const y = clamp(Math.min(start.y, end.y));
@@ -345,7 +347,7 @@ export function InternalBatchWorkflowPage() {
       let createdCount = 0;
       let failedCount = 0;
 
-      for (const [index, file] of files.entries()) {
+      const submitFile = async (index: number, file: File) => {
         const id = fileBatchId(file, index);
         const duration = durations[id] || 30;
         try {
@@ -393,7 +395,17 @@ export function InternalBatchWorkflowPage() {
             error: error instanceof Error ? error.message : "任务创建失败",
           });
         }
-      }
+      };
+
+      const pendingFiles = files.map((file, index) => ({ file, index }));
+      const workers = Array.from({ length: Math.min(internalBatchUploadConcurrency, pendingFiles.length) }, async () => {
+        while (pendingFiles.length) {
+          const next = pendingFiles.shift();
+          if (!next) return;
+          await submitFile(next.index, next.file);
+        }
+      });
+      await Promise.all(workers);
 
       if (!createdCount) throw new Error("批量工作流任务创建失败，请查看文件列表。");
       return { state: latestState, createdCount, failedCount, batchId: internalBatchId, batchName: trimmedBatchName };

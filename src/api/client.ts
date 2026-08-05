@@ -448,10 +448,6 @@ async function uploadAssetWithMultipart(input: UploadAssetInput) {
 }
 
 async function uploadAssetWithStorage(input: UploadAssetInput) {
-  if (input.file.size >= multipartThresholdBytes) {
-    return uploadAssetWithMultipart(input);
-  }
-
   const presign = await presignAsset(input.kind, input.durationSeconds || 0, input.file.name);
   if (presign.mode === "tos-put") {
     if (!presign.assetId || !presign.storageKey) {
@@ -466,7 +462,7 @@ async function uploadAssetWithStorage(input: UploadAssetInput) {
         onProgress: input.onProgress,
       });
     } catch {
-      return uploadAssetViaBackend(input);
+      return input.file.size >= multipartThresholdBytes ? uploadAssetWithMultipart(input) : uploadAssetViaBackend(input);
     }
     emitUploadProgress(input, { stage: "登记素材", percent: 100, uploadedBytes: input.file.size });
     return request<{ asset: Asset }>("/api/assets/complete", {
@@ -484,7 +480,7 @@ async function uploadAssetWithStorage(input: UploadAssetInput) {
     });
   }
 
-  return uploadAssetViaBackend(input);
+  return input.file.size >= multipartThresholdBytes ? uploadAssetWithMultipart(input) : uploadAssetViaBackend(input);
 }
 
 export function presignAsset(kind: "video" | "image", durationSeconds = 0, originalName = "upload.bin") {
