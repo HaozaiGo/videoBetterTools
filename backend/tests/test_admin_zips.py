@@ -142,6 +142,7 @@ def test_admin_internal_batch_zips_lists_ready_local_zip(tmp_path, monkeypatch) 
         db.commit()
 
         create_internal_batch_zip(db, user.id, "zip-batch")
+        monkeypatch.setattr(admin, "plan_internal_batch_zip", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("zip listing should not re-plan ready batches")))
         payload = admin.admin_internal_batch_zips(db)
         search_payload = admin.admin_internal_batch_zips(db, name="后台 ZIP")
         empty_search_payload = admin.admin_internal_batch_zips(db, name="不存在的批次")

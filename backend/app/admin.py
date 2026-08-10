@@ -1,4 +1,5 @@
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -15,7 +16,7 @@ from app.config import settings
 from app.models import Asset, Task, User, Wallet, WalletLedger
 from app.queue import enqueue_internal_batch_zip, internal_batch_zip_queue
 from app.services import add_ledger, create_task, failure_reason_for_task, get_tool, get_wallet, internal_batch_expected_total_from_name, internal_batch_expected_total_from_tasks, internal_batch_status, normalize_pagination, now, page_info, ledger_to_dict, plan_internal_batch_zip, serialize_datetime, task_to_dict
-from app.storage import storage
+from app.storage import safe_storage_name, storage
 
 
 def _failure_uncleared_filter():
@@ -186,6 +187,88 @@ def _zip_part_source(part: dict) -> str:
     if path.exists() and path.is_file() and path.stat().st_size > 0:
         return "local"
     return ""
+
+
+def _zip_base_stem_for_batch(batch: dict) -> str:
+    safe_batch_name = safe_storage_name(str(batch.get("batchName") or batch.get("batchId") or "内部批量任务")).removesuffix(".zip")
+    return f"{safe_batch_name}-{str(batch['batchId'])[:8]}-{int(batch['succeeded'])}-of-{int(batch['total'])}"
+
+
+def _read_zip_remote_marker(zip_path: Path) -> dict | None:
+    marker_path = zip_path.with_suffix(zip_path.suffix + ".remote.json")
+    if not marker_path.exists():
+        return None
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not marker.get("url") or int(marker.get("sizeBytes") or 0) <= 0:
+        return None
+    return marker
+
+
+def _zip_storage_names() -> list[str]:
+    zip_dir = settings.upload_path / "internal-batch-zips"
+    if not zip_dir.exists():
+        return []
+    return [path.name for path in zip_dir.iterdir()]
+
+
+def _available_zip_paths_for_batch(batch: dict, zip_names: list[str] | None = None) -> list[Path]:
+    zip_dir = settings.upload_path / "internal-batch-zips"
+    names = zip_names if zip_names is not None else _zip_storage_names()
+    base_stem = _zip_base_stem_for_batch(batch)
+    paths: dict[str, Path] = {}
+    single_name = f"{base_stem}.zip"
+    for name in names:
+        if name == single_name or (name.startswith(f"{base_stem}-part") and name.endswith(".zip")):
+            paths[name] = zip_dir / name
+        elif name == f"{single_name}.remote.json":
+            paths[single_name] = zip_dir / single_name
+        elif name.startswith(f"{base_stem}-part") and name.endswith(".zip.remote.json"):
+            paths[name.removesuffix(".remote.json")] = zip_dir / name.removesuffix(".remote.json")
+    return sorted(paths.values(), key=lambda path: path.name)
+
+
+def _zip_part_numbers(path: Path) -> tuple[int, int]:
+    match = re.search(r"-part(\d+)-of(\d+)\.zip$", path.name)
+    if not match:
+        return 1, 1
+    return int(match.group(1)), int(match.group(2))
+
+
+def _ready_zip_parts_for_batch(batch: dict, zip_paths: list[Path] | None = None) -> list[dict]:
+    parts: list[dict] = []
+    safe_batch_name = safe_storage_name(str(batch.get("batchName") or batch.get("batchId") or "内部批量任务")).removesuffix(".zip")
+    available_paths = zip_paths if zip_paths is not None else _available_zip_paths_for_batch(batch)
+    for zip_path in available_paths:
+        part_index, part_count = _zip_part_numbers(zip_path)
+        marker = _read_zip_remote_marker(zip_path)
+        if marker:
+            source = "tos"
+            size_bytes = int(marker.get("sizeBytes") or 0)
+            storage_key = str(marker.get("storageKey") or "")
+        elif zip_path.exists() and zip_path.is_file() and zip_path.stat().st_size > 0:
+            source = "local"
+            size_bytes = int(zip_path.stat().st_size)
+            storage_key = ""
+        else:
+            continue
+        if size_bytes <= 0:
+            continue
+        filename = f"{safe_batch_name}.zip" if part_count == 1 else f"{safe_batch_name}-part{part_index:02d}-of{part_count:02d}.zip"
+        parts.append(
+            {
+                "index": part_index,
+                "partCount": part_count,
+                "filename": filename,
+                "sizeBytes": size_bytes,
+                "estimatedSizeBytes": size_bytes,
+                "source": source,
+                "storageKey": storage_key,
+            }
+        )
+    return parts
 
 
 ADMIN_ZIP_STATUS_FILTERS = {"ready", "processing", "failed"}
@@ -594,29 +677,18 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
     items: list[dict] = []
     tab_counts = {"ready": 0, "processing": 0, "failed": 0}
     zip_jobs = _zip_job_states()
+    zip_names = _zip_storage_names()
     for batch in batches:
-        archive = None
         ready_items: list[dict] = []
-        ready_part_count = 0
         user_id = str(batch["userId"])
         batch_id = str(batch["batchId"])
         can_have_ready_zip = int(batch["succeeded"]) > 0 and int(batch.get("missing") or 0) <= 0 and int(batch.get("activeProcessing") or 0) <= 0
+        available_zip_paths = _available_zip_paths_for_batch(batch, zip_names) if can_have_ready_zip else []
         if can_have_ready_zip:
-            try:
-                archive = plan_internal_batch_zip(db, user_id, batch_id)
-            except Exception:
-                archive = None
-        if archive is not None:
-            for part in archive["parts"]:
-                source = _zip_part_source(part)
-                size_bytes = int(part.get("sizeBytes") or 0)
-                if not source or size_bytes <= 0:
-                    continue
+            for part in _ready_zip_parts_for_batch(batch, available_zip_paths):
                 part_index = int(part["index"])
-                ready_part_count += 1
                 if _is_zip_row_deleted(user_id, batch_id, part_index):
                     continue
-                skipped_tasks = _skipped_tasks_for_batch(db, user_id, batch_id)
                 ready_items.append(
                     {
                         **batch,
@@ -624,15 +696,15 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
                         "zipStage": "ready",
                         "zipJob": None,
                         "partIndex": part_index,
-                        "partCount": int(archive["partCount"]),
+                        "partCount": int(part.get("partCount") or 1),
                         "filename": part["filename"],
-                        "sizeBytes": size_bytes,
+                        "sizeBytes": int(part.get("sizeBytes") or 0),
                         "estimatedSizeBytes": int(part.get("estimatedSizeBytes") or 0),
-                        "source": source,
+                        "source": str(part.get("source") or ""),
                         "storageKey": str(part.get("storageKey") or ""),
                         "downloadUrl": f"/api/admin/internal-batch-zips/{quote(batch_id, safe='')}/download?userId={quote(user_id, safe='')}&part={part_index}",
                         "message": "",
-                        "skippedTasks": skipped_tasks,
+                        "skippedTasks": [],
                     }
                 )
         if ready_items:
@@ -640,7 +712,7 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
             if status == "ready":
                 items.extend(ready_items)
             continue
-        if ready_part_count > 0:
+        if available_zip_paths:
             continue
         zip_job = zip_jobs.get((user_id, batch_id))
         pending_status = "processing"
@@ -650,18 +722,20 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
             pending_status = "failed"
         elif int(batch["failed"]) + int(batch["cancelled"]) > 0 and int(batch["processing"]) <= 0:
             pending_status = "failed"
-        pending_part_index = int(archive["parts"][0].get("index") or 0) if archive and archive.get("parts") else 0
+        pending_part_index = 1 if can_have_ready_zip else 0
         if _is_zip_row_deleted(user_id, batch_id, pending_part_index):
             continue
         tab_counts[pending_status] += 1
         if status == pending_status:
-            skipped_tasks = _skipped_tasks_for_batch(db, user_id, batch_id)
-            items.append(_empty_zip_batch_item(batch, pending_status, archive, zip_job, skipped_tasks))
+            items.append(_empty_zip_batch_item(batch, pending_status, None, zip_job, []))
 
     items.sort(key=lambda item: (int(item["updatedAt"]), str(item["batchId"]), int(item["partIndex"])), reverse=True)
     total = len(items)
     start = (page - 1) * per_page
-    return {"items": items[start : start + per_page], "page": page_info(total, page, per_page), "tabs": tab_counts}
+    paged_items = items[start : start + per_page]
+    for item in paged_items:
+        item["skippedTasks"] = _skipped_tasks_for_batch(db, str(item["userId"]), str(item["batchId"]))
+    return {"items": paged_items, "page": page_info(total, page, per_page), "tabs": tab_counts}
 
 
 def _delete_zip_part_file(part: dict) -> tuple[bool, str]:
