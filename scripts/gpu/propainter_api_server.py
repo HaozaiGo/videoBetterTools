@@ -59,6 +59,9 @@ CLEANUP_RUNNER_WORK_TTL_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_CLEANUP_RUNNE
 CLEANUP_DISK_HIGH_WATERMARK_PERCENT = max(1, min(100, _env_int("MODEL_PLAZA_GPU_CLEANUP_DISK_HIGH_WATERMARK_PERCENT", 80)))
 CLEANUP_DISK_LOW_WATERMARK_PERCENT = max(1, min(CLEANUP_DISK_HIGH_WATERMARK_PERCENT, _env_int("MODEL_PLAZA_GPU_CLEANUP_DISK_LOW_WATERMARK_PERCENT", 70)))
 CLEANUP_DISK_MIN_AGE_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_CLEANUP_DISK_MIN_AGE_SECONDS", 60 * 60))
+GPU_DISK_PREFLIGHT_ENABLED = os.environ.get("MODEL_PLAZA_GPU_DISK_PREFLIGHT_ENABLED", "1").lower() not in {"0", "false", "no"}
+GPU_MIN_FREE_BYTES = max(0, _env_int("MODEL_PLAZA_GPU_MIN_FREE_BYTES", 500 * 1024 * 1024 * 1024))
+GPU_MIN_FREE_PERCENT = max(0, min(100, _env_int("MODEL_PLAZA_GPU_MIN_FREE_PERCENT", 8)))
 RESULT_CACHE_HIGH_WATERMARK_BYTES = max(0, _env_int("MODEL_PLAZA_GPU_RESULT_CACHE_HIGH_WATERMARK_BYTES", 1_000_000_000_000))
 RESULT_CACHE_LOW_WATERMARK_BYTES = max(0, min(RESULT_CACHE_HIGH_WATERMARK_BYTES, _env_int("MODEL_PLAZA_GPU_RESULT_CACHE_LOW_WATERMARK_BYTES", 900_000_000_000)))
 RESULT_CACHE_MIN_AGE_SECONDS = max(0, _env_int("MODEL_PLAZA_GPU_RESULT_CACHE_MIN_AGE_SECONDS", 60 * 60))
@@ -1143,6 +1146,15 @@ def _job_directory_size(path: Path) -> int:
     return total
 
 
+def _remove_tree(path: Path) -> bool:
+    try:
+        shutil.rmtree(path)
+        return True
+    except OSError as exc:
+        print(f"GPU cleanup failed to remove {path}: {exc}", flush=True)
+        return False
+
+
 def _terminal_jobs() -> list[tuple[float, str, Path, dict]]:
     jobs: list[tuple[float, str, Path, dict]] = []
     if not JOBS_ROOT.exists():
@@ -1167,7 +1179,8 @@ def _cleanup_runner_work(job_dir: Path, age_seconds: float) -> tuple[int, int]:
     if not runner_work.exists():
         return 0, 0
     bytes_removed = _job_directory_size(runner_work)
-    shutil.rmtree(runner_work, ignore_errors=True)
+    if not _remove_tree(runner_work):
+        return 0, 0
     return 1, bytes_removed
 
 
@@ -1179,9 +1192,10 @@ def _cleanup_expired_terminal_jobs(now: float) -> tuple[int, int, int, int]:
     for age_seconds, state, job_dir, _status in _terminal_jobs():
         ttl_seconds = _terminal_ttl_seconds(state)
         if ttl_seconds > 0 and age_seconds >= ttl_seconds:
-            bytes_removed += _job_directory_size(job_dir)
-            shutil.rmtree(job_dir, ignore_errors=True)
-            jobs_removed += 1
+            job_bytes = _job_directory_size(job_dir)
+            if _remove_tree(job_dir):
+                bytes_removed += job_bytes
+                jobs_removed += 1
             continue
         removed_count, removed_bytes = _cleanup_runner_work(job_dir, age_seconds)
         runner_work_removed += removed_count
@@ -1196,16 +1210,47 @@ def _disk_usage_percent() -> float:
     return (usage.used / usage.total) * 100
 
 
+def _disk_status() -> dict:
+    usage = shutil.disk_usage(JOBS_ROOT if JOBS_ROOT.exists() else ROOT)
+    used_percent = (usage.used / usage.total) * 100 if usage.total > 0 else 0
+    required_free_bytes = max(GPU_MIN_FREE_BYTES, int(usage.total * GPU_MIN_FREE_PERCENT / 100))
+    return {
+        "total_bytes": usage.total,
+        "used_bytes": usage.used,
+        "free_bytes": usage.free,
+        "used_percent": round(used_percent, 2),
+        "min_free_bytes": required_free_bytes,
+        "min_free_percent": GPU_MIN_FREE_PERCENT,
+        "disk_preflight_enabled": GPU_DISK_PREFLIGHT_ENABLED,
+    }
+
+
+def _format_gib(value: int) -> str:
+    return f"{value / 1024 / 1024 / 1024:.1f} GiB"
+
+
 def _cleanup_for_disk_pressure() -> tuple[int, int]:
     if _disk_usage_percent() < CLEANUP_DISK_HIGH_WATERMARK_PERCENT:
         return 0, 0
     jobs_removed = 0
     bytes_removed = 0
+    for _age_seconds, _state, job_dir, _status in sorted(_terminal_jobs(), key=lambda item: item[0], reverse=True):
+        runner_work = job_dir / "runner-work"
+        if not runner_work.exists():
+            continue
+        runner_work_bytes = _job_directory_size(runner_work)
+        if not _remove_tree(runner_work):
+            continue
+        bytes_removed += runner_work_bytes
+        if _disk_usage_percent() <= CLEANUP_DISK_LOW_WATERMARK_PERCENT:
+            return jobs_removed, bytes_removed
     for age_seconds, _state, job_dir, _status in sorted(_terminal_jobs(), key=lambda item: item[0], reverse=True):
         if age_seconds < CLEANUP_DISK_MIN_AGE_SECONDS:
             continue
-        bytes_removed += _job_directory_size(job_dir)
-        shutil.rmtree(job_dir, ignore_errors=True)
+        job_bytes = _job_directory_size(job_dir)
+        if not _remove_tree(job_dir):
+            continue
+        bytes_removed += job_bytes
         jobs_removed += 1
         if _disk_usage_percent() <= CLEANUP_DISK_LOW_WATERMARK_PERCENT:
             break
@@ -1278,6 +1323,22 @@ def _cleanup_once() -> dict:
             "disk_used_percent": round(_disk_usage_percent(), 2),
             "duration_seconds": round(time.time() - started_at, 3),
         }
+
+
+def _disk_preflight_error(run_cleanup: bool = False) -> str:
+    if not GPU_DISK_PREFLIGHT_ENABLED:
+        return ""
+    if run_cleanup and CLEANUP_ENABLED and _disk_usage_percent() >= CLEANUP_DISK_HIGH_WATERMARK_PERCENT:
+        _cleanup_once()
+    status = _disk_status()
+    if status["free_bytes"] >= status["min_free_bytes"]:
+        return ""
+    return (
+        "GPU disk pressure: "
+        f"{_format_gib(status['free_bytes'])} free, "
+        f"requires at least {_format_gib(status['min_free_bytes'])}; "
+        f"used {status['used_percent']}%"
+    )
 
 
 def _cleanup_loop() -> None:
@@ -1566,9 +1627,12 @@ def health() -> dict:
     running_by_gpu = _slot_usage_snapshot(GPU_DEVICE_IDS)
     active_runner_by_gpu = _active_runner_snapshot(GPU_DEVICE_IDS)
     gpu_preflight_error = _gpu_preflight_error()
+    disk_preflight_error = _disk_preflight_error()
     return {
-        "ok": not bool(gpu_preflight_error),
+        "ok": not bool(gpu_preflight_error or disk_preflight_error),
         "gpu_preflight_error": gpu_preflight_error,
+        "disk_preflight_error": disk_preflight_error,
+        "disk": _disk_status(),
         "max_workers": MAX_WORKERS,
         "gpu_devices": GPU_DEVICE_IDS,
         "workers_per_gpu": GPU_WORKERS_PER_DEVICE,
@@ -1650,6 +1714,9 @@ async def create_job(
     with job_admission_lock:
         if _active_job_count() >= MAX_WORKERS:
             raise HTTPException(status_code=503, detail="GPU API queue is full")
+        disk_preflight_error = _disk_preflight_error(run_cleanup=True)
+        if disk_preflight_error:
+            raise HTTPException(status_code=503, detail=disk_preflight_error)
 
         job_id = uuid.uuid4().hex
         job_dir = _job_dir(job_id)
