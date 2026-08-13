@@ -1,3 +1,7 @@
+import io
+import urllib.error
+import urllib.request
+
 import pytest
 
 from app.video import workflow
@@ -74,6 +78,40 @@ def test_submit_remote_video_job_fails_after_storage_visibility_timeout(monkeypa
 
     assert storage.checks == 1
     assert sleep_calls == []
+
+
+def test_gpu_api_job_not_found_is_treated_as_unavailable(monkeypatch) -> None:
+    def raise_job_not_found(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            url="https://gpu.example.test/jobs/missing",
+            code=404,
+            msg="Not Found",
+            hdrs={},
+            fp=io.BytesIO(b'{"detail":"job not found"}'),
+        )
+
+    monkeypatch.setattr(gpu_api.urllib.request, "urlopen", raise_job_not_found)
+    request = urllib.request.Request("https://gpu.example.test/jobs/missing")
+
+    with pytest.raises(gpu_api.RemoteGpuUnavailableError, match="job not found"):
+        gpu_api._request_json(request)
+
+
+def test_gpu_api_regular_404_remains_remote_error(monkeypatch) -> None:
+    def raise_regular_404(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            url="https://gpu.example.test/other",
+            code=404,
+            msg="Not Found",
+            hdrs={},
+            fp=io.BytesIO(b'{"detail":"zip not found"}'),
+        )
+
+    monkeypatch.setattr(gpu_api.urllib.request, "urlopen", raise_regular_404)
+    request = urllib.request.Request("https://gpu.example.test/other")
+
+    with pytest.raises(gpu_api.RemoteGpuError, match="zip not found"):
+        gpu_api._request_json(request)
 
 
 def test_subtitle_translate_workflow_submits_single_remote_gpu_job(monkeypatch) -> None:

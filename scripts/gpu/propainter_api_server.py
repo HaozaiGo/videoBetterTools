@@ -560,6 +560,17 @@ def _progress_path(job_id: str) -> Path:
     return _job_dir(job_id) / "progress.json"
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temp_path.write_text(content, encoding="utf-8")
+    os.replace(temp_path, path)
+
+
+def _read_json_file(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _input_url_path(job_id: str) -> Path:
     return _job_dir(job_id) / "input-url.json"
 
@@ -568,11 +579,13 @@ def _write_status(job_id: str, **updates) -> dict:
     status_path = _status_path(job_id)
     current = {}
     if status_path.exists():
-        current = json.loads(status_path.read_text(encoding="utf-8"))
+        try:
+            current = _read_json_file(status_path)
+        except json.JSONDecodeError:
+            current = {}
     current.update(updates)
     current["updated_at"] = time.time()
-    status_path.parent.mkdir(parents=True, exist_ok=True)
-    status_path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_text(status_path, json.dumps(current, ensure_ascii=False, indent=2))
     return current
 
 
@@ -580,11 +593,30 @@ def _read_status(job_id: str) -> dict:
     status_path = _status_path(job_id)
     if not status_path.exists():
         raise HTTPException(status_code=404, detail="job not found")
-    status = json.loads(status_path.read_text(encoding="utf-8"))
+    try:
+        status = _read_json_file(status_path)
+    except json.JSONDecodeError:
+        if _job_process_pids(job_id):
+            status = {
+                "job_id": job_id,
+                "status": "processing",
+                "error": "",
+                "progress_percent": 0,
+                "progress_stage": "远端任务状态文件暂时不可读，继续等待处理",
+            }
+        else:
+            status = {
+                "job_id": job_id,
+                "status": "failed",
+                "error": "GPU_STATUS_CORRUPTED: job status file is unreadable",
+                "progress_percent": 0,
+                "progress_stage": "远端任务状态文件损坏，请重试",
+                "completed_at": time.time(),
+            }
     progress_path = _progress_path(job_id)
     if progress_path.exists() and status.get("status") not in {"succeeded", "failed", "cancelled"}:
         try:
-            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            progress = _read_json_file(progress_path)
         except json.JSONDecodeError:
             progress = {}
         if "progress_percent" in progress:

@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 
@@ -28,7 +29,8 @@ def _write_progress(percent: int, stage: str) -> None:
         return
     path = Path(progress_file).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temp_path.write_text(
         json.dumps(
             {
                 "progress_percent": max(0, min(100, percent)),
@@ -38,6 +40,7 @@ def _write_progress(percent: int, stage: str) -> None:
         ),
         encoding="utf-8",
     )
+    temp_path.replace(path)
 
 
 def _even_dimension(value: float) -> int:
