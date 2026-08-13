@@ -384,6 +384,69 @@ def test_gpu_unavailable_retries_exhaust_to_failed(monkeypatch) -> None:
     assert enqueued == []
 
 
+def test_gpu_disk_pressure_requeues_as_backpressure(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        user = User(id="user-gpu-disk", email="gpu-disk@example.com", name="GPU Disk", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=10)
+        asset = Asset(
+            id="asset-gpu-disk",
+            user_id=user.id,
+            kind="input",
+            original_name="input.mp4",
+            mime_type="video/mp4",
+            storage_key="input.mp4",
+            url="https://cdn.example.test/input.mp4",
+            size_bytes=1024,
+            duration_seconds=70,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="task-gpu-disk",
+            user_id=user.id,
+            tool_slug="translate",
+            input_asset_id=asset.id,
+            status="queued",
+            params={"_gpuUnavailableRetries": 2},
+            estimated_credits=10,
+            frozen_credits=10,
+            provider="mock",
+            provider_job_id="provider-gpu-disk",
+            progress_percent=5,
+            progress_stage="远端 GPU 暂不可用，等待自动重试",
+        )
+        db.add_all([user, wallet, asset, task])
+        db.commit()
+
+    session_factory = lambda: Session(engine)
+    enqueued: list[str] = []
+    monkeypatch.setattr(worker, "SessionLocal", session_factory)
+    monkeypatch.setattr(worker.settings, "gpu_unavailable_retry_max", 1)
+    monkeypatch.setattr(worker.settings, "gpu_queue_full_retry_max", 0)
+    monkeypatch.setattr(worker, "enqueue_provider_job", lambda task_id, delay_seconds=0: enqueued.append(f"{task_id}:{delay_seconds}"))
+
+    worker._requeue_provider_job_for_gpu_unavailable(
+        "task-gpu-disk",
+        "provider-gpu-disk",
+        'GPU API HTTP 503: {"detail":"GPU disk pressure: 363.7 GiB free, requires at least 500.0 GiB; used 84.47%"}',
+    )
+
+    with Session(engine) as db:
+        task = db.get(Task, "task-gpu-disk")
+        wallet = db.get(Wallet, "user-gpu-disk")
+        assert task is not None
+        assert wallet is not None
+        assert task.status == "queued"
+        assert task.error_code is None
+        assert task.params["_gpuUnavailableRetries"] == 2
+        assert task.params["_gpuQueueFullRetries"] == 1
+        assert "磁盘空间不足" in task.progress_stage
+        assert wallet.frozen_credits == 10
+    assert enqueued == []
+
+
 def test_gpu_unavailable_requeues_with_delay(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

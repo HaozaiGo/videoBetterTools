@@ -544,7 +544,13 @@ def _is_remote_gpu_queue_full(progress_stage: str) -> bool:
     return "queue is full" in progress_stage.lower()
 
 
-def _requeue_provider_job_for_gpu_queue_full(task_id: str, provider_job_id: str, progress_stage: str = "") -> None:
+def _is_remote_gpu_disk_pressure(progress_stage: str) -> bool:
+    lowered = progress_stage.lower()
+    return "gpu disk pressure" in lowered or "requires at least" in lowered and "free" in lowered
+
+
+def _requeue_provider_job_for_gpu_backpressure(task_id: str, provider_job_id: str, progress_stage: str = "") -> None:
+    is_disk_pressure = _is_remote_gpu_disk_pressure(progress_stage)
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
@@ -568,16 +574,17 @@ def _requeue_provider_job_for_gpu_queue_full(task_id: str, provider_job_id: str,
         task.status = "queued"
         task.error_code = None
         task.progress_percent = max(5, task.progress_percent)
+        reason = "磁盘空间不足，等待前面任务完成释放空间" if is_disk_pressure else "队列已满"
         if max_retries:
-            task.progress_stage = f"远端 GPU 队列已满，保持队列顺序等待调度（{retries}/{max_retries}）"
+            task.progress_stage = f"远端 GPU {reason}，保持队列顺序等待调度（{retries}/{max_retries}）"
         else:
-            task.progress_stage = f"远端 GPU 队列已满，保持队列顺序等待调度（第 {retries} 次）"
+            task.progress_stage = f"远端 GPU {reason}，保持队列顺序等待调度（第 {retries} 次）"
         db.commit()
 
 
 def _requeue_provider_job_for_gpu_unavailable(task_id: str, provider_job_id: str, progress_stage: str = "") -> None:
-    if _is_remote_gpu_queue_full(progress_stage):
-        _requeue_provider_job_for_gpu_queue_full(task_id, provider_job_id, progress_stage)
+    if _is_remote_gpu_queue_full(progress_stage) or _is_remote_gpu_disk_pressure(progress_stage):
+        _requeue_provider_job_for_gpu_backpressure(task_id, provider_job_id, progress_stage)
         return
 
     should_requeue = False
