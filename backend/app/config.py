@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     internal_batch_zip_retry_interval_seconds: int = 60
     result_finalize_retry_max: int = 6
     result_finalize_retry_interval_seconds: int = 60
+    result_finalize_poll_timeout_seconds: int = 30
+    result_finalize_defer_seconds: int = 60
+    remote_gpu_job_not_found_retry_max: int = 3
     cleanup_disk_high_watermark_percent: int = 80
     cleanup_disk_low_watermark_percent: int = 75
     cleanup_disk_min_age_hours: int = 6
@@ -69,6 +72,7 @@ class Settings(BaseSettings):
     gpu_queue_dispatch_interval_seconds: int = 30
     gpu_queue_dispatch_batch_size: int = 8
     gpu_queue_dispatch_cooldown_seconds: int = 180
+    gpu_remote_inflight_limit: int = 16
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

@@ -18,6 +18,7 @@ from app.services import (
 from app.storage import storage
 from app.video.gpu_api import (
     RemoteGpuError,
+    RemoteGpuJobNotFoundError,
     RemoteGpuUnavailableError,
     cancel_remote_video_job,
     download_remote_video_result,
@@ -30,6 +31,13 @@ from app.video.watermark import GpuUnavailableError, VideoProcessingError, proce
 from app.video.workflow import process_subtitle_translate_workflow
 
 logger = logging.getLogger("model_plaza.worker")
+
+
+class RemoteGpuResultNotReady(RemoteGpuUnavailableError):
+    def __init__(self, message: str, result: dict, delay_seconds: int | None = None) -> None:
+        super().__init__(message)
+        self.result = result
+        self.delay_seconds = max(1, int(delay_seconds or settings.result_finalize_defer_seconds))
 
 
 def _input_asset_remote_readable(input_asset: Asset) -> bool:
@@ -135,12 +143,35 @@ def _remote_gpu_result_upload_timed_out(status: dict) -> bool:
     return "result_upload_timeout" in haystack or "result upload exceeded total timeout" in haystack
 
 
+def _cleanup_finalize_intermediate_objects(result: dict) -> None:
+    if not storage.is_remote:
+        return
+    keys = result.get("delete_storage_keys_after_finalize")
+    if not isinstance(keys, list):
+        return
+    for storage_key in [str(item).strip() for item in keys if str(item or "").strip()]:
+        try:
+            storage.delete_remote(storage_key)
+        except Exception:
+            logger.warning("Failed to delete intermediate result object %s", storage_key, exc_info=True)
+
+
 def finalize_provider_job_result(task_id: str, provider_job_id: str, result: dict) -> None:
     try:
         if result.get("workflow") == "subtitle-translate":
             finalized = _finalize_subtitle_translate_workflow_result(task_id, provider_job_id, result)
         else:
             finalized = _finalize_remote_gpu_result(task_id, provider_job_id, result) if result.get("remote_job_id") else _finalize_result_payload(result)
+    except RemoteGpuJobNotFoundError as exc:
+        logger.warning("Remote GPU job lost for task %s, requeueing provider job: %s", task_id, exc)
+        _requeue_provider_job_for_lost_remote_gpu_job(task_id, provider_job_id, getattr(exc, "result", result), str(exc))
+        return
+    except RemoteGpuResultNotReady as exc:
+        delay_seconds = max(1, int(exc.delay_seconds))
+        logger.info("Remote GPU result not ready for task %s, deferring finalize by %ss: %s", task_id, delay_seconds, exc)
+        _mark_result_finalize_deferred(task_id, provider_job_id, str(exc))
+        enqueue_result_finalize_job(task_id, provider_job_id, exc.result, delay_seconds=delay_seconds)
+        return
     except RemoteGpuUnavailableError as exc:
         logger.warning("Result finalize temporarily unavailable for task %s, will retry if possible: %s", task_id, exc)
         if _result_finalize_retries_left() > 0:
@@ -168,6 +199,7 @@ def finalize_provider_job_result(task_id: str, provider_job_id: str, result: dic
             output_mime_type=finalized["mime_type"],
             output_size_bytes=finalized["size_bytes"],
         )
+    _cleanup_finalize_intermediate_objects(result)
 
 
 def process_provider_job(task_id: str) -> None:
@@ -400,13 +432,17 @@ def _finalize_remote_gpu_result(task_id: str, provider_job_id: str, result: dict
     remote_job_id = str(result["remote_job_id"])
     output_key = str(result["storage_key"])
     interval = max(1, int(os.environ.get("MODEL_PLAZA_GPU_POLL_INTERVAL", "5")))
-    timeout = max(interval, int(os.environ.get("MODEL_PLAZA_GPU_POLL_TIMEOUT", str(settings.task_job_timeout_seconds))))
+    timeout = max(interval, int(os.environ.get("MODEL_PLAZA_GPU_POLL_TIMEOUT", str(settings.result_finalize_poll_timeout_seconds))))
     deadline = time.time() + timeout
     last_status: dict = {}
     try:
         while time.time() < deadline:
             try:
                 status = get_remote_video_job(remote_job_id)
+            except RemoteGpuJobNotFoundError as exc:
+                setattr(exc, "result", result)
+                setattr(exc, "remote_job_id", remote_job_id)
+                raise
             except RemoteGpuUnavailableError as exc:
                 last_status = {"status": "unavailable", "error": str(exc)}
                 logger.warning("Remote GPU status temporarily unavailable for job %s: %s", remote_job_id, exc)
@@ -427,7 +463,7 @@ def _finalize_remote_gpu_result(task_id: str, provider_job_id: str, result: dict
                 size_bytes = int(status.get("result_size_bytes") or result.get("size_bytes") or 0)
                 if status.get("result_storage_key") and status.get("result_url"):
                     if storage.is_remote and not storage.remote_exists(storage_key):
-                        raise RemoteGpuUnavailableError(f"remote GPU result is not visible in storage yet: {storage_key}")
+                        raise RemoteGpuResultNotReady(f"remote GPU result is not visible in storage yet: {storage_key}", result)
                     return {
                         "storage_key": storage_key,
                         "url": result_url,
@@ -475,7 +511,7 @@ def _finalize_remote_gpu_result(task_id: str, provider_job_id: str, result: dict
         except Exception:
             logger.warning("Failed to cancel remote GPU job %s after result finalize error", remote_job_id, exc_info=True)
         raise
-    raise RemoteGpuError(f"remote GPU job timed out after {timeout}s: {remote_job_id}; last_status={last_status}")
+    raise RemoteGpuResultNotReady(f"remote GPU job is still pending after {timeout}s: {remote_job_id}; last_status={last_status}", result)
 
 
 def _finalize_subtitle_translate_workflow_result(task_id: str, provider_job_id: str, result: dict) -> dict:
@@ -498,6 +534,7 @@ def _finalize_subtitle_translate_workflow_result(task_id: str, provider_job_id: 
         )
 
     translate_result = process_video_translate(str(intermediate["storage_key"]), task_id, translate_params)
+    translate_result["delete_storage_keys_after_finalize"] = [str(intermediate["storage_key"])]
     if translate_result.get("remote_job_id"):
         _remember_remote_gpu_job_for_task(task_id, provider_job_id, translate_result)
         finalized = _finalize_remote_gpu_result(task_id, provider_job_id, translate_result)
@@ -533,6 +570,15 @@ def _mark_result_finalize_retrying(task_id: str, provider_job_id: str, progress_
             return
         task.progress_percent = max(95, min(task.progress_percent, 99))
         task.progress_stage = f"结果回收暂时不可用，等待自动重试：{progress_stage}"[:160]
+        db.commit()
+
+
+def _mark_result_finalize_deferred(task_id: str, provider_job_id: str, progress_stage: str) -> None:
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
+            return
+        task.progress_stage = f"远端 GPU 仍在处理/等待结果回收，已释放 result worker，稍后自动检查：{progress_stage}"[:160]
         db.commit()
 
 
@@ -619,6 +665,48 @@ def _requeue_provider_job_for_gpu_unavailable(task_id: str, provider_job_id: str
         return
 
     enqueue_provider_job(task_id, delay_seconds=max(1, int(settings.gpu_unavailable_retry_delay_seconds)))
+
+
+def _requeue_provider_job_for_lost_remote_gpu_job(task_id: str, provider_job_id: str, result: dict, progress_stage: str = "") -> None:
+    remote_job_id = str(result.get("remote_job_id") or "").strip()
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
+            return
+        params = dict(task.params or {})
+        retries = int(params.get("_remoteGpuJobNotFoundRetries") or 0) + 1
+        params["_remoteGpuJobNotFoundRetries"] = retries
+        if remote_job_id:
+            lost_history = params.get("remoteGpuJobNotFoundIds")
+            if not isinstance(lost_history, list):
+                lost_history = []
+            normalized_history = [str(item).strip() for item in lost_history if str(item or "").strip()]
+            if remote_job_id not in normalized_history:
+                normalized_history.append(remote_job_id)
+            params["remoteGpuJobNotFoundIds"] = normalized_history[-10:]
+        if params.get("remoteGpuJobId") == remote_job_id:
+            params.pop("remoteGpuJobId", None)
+            params.pop("remoteGpuJobType", None)
+        task.params = params
+        max_retries = max(0, int(settings.remote_gpu_job_not_found_retry_max))
+        if max_retries and retries > max_retries:
+            provider_callback(
+                db,
+                provider_job_id,
+                "failed",
+                callback_id=f"{provider_job_id}:remote-gpu-job-not-found",
+                error_code="REMOTE_GPU_JOB_NOT_FOUND",
+                progress_stage=(progress_stage or "远端 GPU 任务已不存在，超过自动重提次数")[:160],
+            )
+            return
+        task.status = "queued"
+        task.error_code = None
+        task.progress_percent = max(5, min(task.progress_percent, 10))
+        if max_retries:
+            task.progress_stage = f"远端 GPU 任务已不存在，已回到平台队列等待重新提交（{retries}/{max_retries}）"
+        else:
+            task.progress_stage = f"远端 GPU 任务已不存在，已回到平台队列等待重新提交（第 {retries} 次）"
+        db.commit()
 
 
 def _fail_provider_job(provider_job_id: str, error_code: str, progress_stage: str = "") -> None:

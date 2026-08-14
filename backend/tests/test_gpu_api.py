@@ -93,7 +93,7 @@ def test_gpu_api_job_not_found_is_treated_as_unavailable(monkeypatch) -> None:
     monkeypatch.setattr(gpu_api.urllib.request, "urlopen", raise_job_not_found)
     request = urllib.request.Request("https://gpu.example.test/jobs/missing")
 
-    with pytest.raises(gpu_api.RemoteGpuUnavailableError, match="job not found"):
+    with pytest.raises(gpu_api.RemoteGpuJobNotFoundError, match="job not found"):
         gpu_api._request_json(request)
 
 

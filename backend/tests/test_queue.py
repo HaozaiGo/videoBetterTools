@@ -61,6 +61,20 @@ def test_result_finalize_enqueue_targets_result_queue(monkeypatch) -> None:
     assert call["kwargs"]["failure_ttl"] == 86400
 
 
+def test_result_finalize_enqueue_can_delay_with_scheduler(monkeypatch) -> None:
+    fake_queue = FakeQueue()
+    monkeypatch.setattr(queue, "result_queue", lambda: fake_queue)
+
+    result = {"remote_job_id": "remote-1", "storage_key": "task-result.mp4"}
+    queue.enqueue_result_finalize_job("task-1", "provider-1", result, delay_seconds=90)
+
+    call = fake_queue.calls[0]
+    delay = call["args"][0]
+    assert delay.total_seconds() == 90
+    assert call["args"][1:] == ("app.worker.finalize_provider_job_result", "task-1", "provider-1", result)
+    assert call["kwargs"]["failure_ttl"] == 86400
+
+
 def test_provider_enqueue_can_delay_with_scheduler(monkeypatch) -> None:
     fake_queue = FakeQueue()
     monkeypatch.setattr(queue, "task_queue", lambda: fake_queue)

@@ -25,6 +25,10 @@ class RemoteGpuUnavailableError(RemoteGpuError):
     pass
 
 
+class RemoteGpuJobNotFoundError(RemoteGpuUnavailableError):
+    pass
+
+
 def _api_url(path: str) -> str:
     return f"{settings.model_plaza_gpu_api_url.rstrip('/')}{path}"
 
@@ -40,7 +44,7 @@ def _request_json(request: urllib.request.Request, timeout: int = 30) -> dict:
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         if exc.code == 404 and "job not found" in body.lower():
-            raise RemoteGpuUnavailableError(f"GPU API HTTP {exc.code}: {body}") from exc
+            raise RemoteGpuJobNotFoundError(f"GPU API HTTP {exc.code}: {body}") from exc
         if exc.code in {408, 425, 429, 500, 502, 503, 504}:
             raise RemoteGpuUnavailableError(f"GPU API HTTP {exc.code}: {body}") from exc
         raise RemoteGpuError(f"GPU API HTTP {exc.code}: {body}") from exc
@@ -183,7 +187,7 @@ def download_remote_video_result(job_id: str, output_path: Path) -> None:
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             if exc.code == 404 and "job not found" in body.lower():
-                last_error = RemoteGpuUnavailableError(f"GPU API result HTTP {exc.code} on attempt {attempt}/3: {body}")
+                last_error = RemoteGpuJobNotFoundError(f"GPU API result HTTP {exc.code} on attempt {attempt}/3: {body}")
             elif exc.code >= 500 or exc.code in {408, 425, 429}:
                 last_error = RemoteGpuUnavailableError(f"GPU API result HTTP {exc.code} on attempt {attempt}/3: {body}")
             else:

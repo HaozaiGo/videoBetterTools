@@ -43,6 +43,19 @@ def _queued_rq_task_ids() -> set[str]:
     return task_ids
 
 
+def _remote_gpu_inflight_count(db) -> int:
+    tasks = db.execute(
+        select(Task)
+        .where(Task.status == "processing", Task.tool_slug.in_(DISPATCHABLE_TOOL_SLUGS))
+    ).scalars()
+    count = 0
+    for task in tasks:
+        params = task.params if isinstance(task.params, dict) else {}
+        if str(params.get("remoteGpuJobId") or "").strip():
+            count += 1
+    return count
+
+
 def dispatch_provider_queue_once(limit: int | None = None) -> dict:
     limit = max(1, int(limit or settings.gpu_queue_dispatch_batch_size))
     now_seconds = int(time.time())
@@ -50,6 +63,9 @@ def dispatch_provider_queue_once(limit: int | None = None) -> dict:
     dispatched: list[str] = []
 
     with SessionLocal() as db:
+        remote_inflight_limit = max(0, int(settings.gpu_remote_inflight_limit))
+        if remote_inflight_limit and _remote_gpu_inflight_count(db) >= remote_inflight_limit:
+            return {"dispatched": 0, "taskIds": []}
         tasks = list(
             db.execute(
                 select(Task)

@@ -324,6 +324,89 @@ def test_remember_remote_gpu_job_stores_latest_and_history() -> None:
     assert task.params["remoteGpuJobIds"] == ["remote-old", "remote-new"]
 
 
+def test_finalize_result_not_ready_defers_without_failing(monkeypatch) -> None:
+    result = {"remote_job_id": "remote-pending", "storage_key": "model-plaza/output/videos/result.mp4"}
+    deferred: list[tuple[str, str, str]] = []
+    enqueued: list[tuple[str, str, dict, int]] = []
+
+    def fake_finalize(task_id: str, provider_job_id: str, payload: dict) -> dict:
+        raise worker.RemoteGpuResultNotReady("remote GPU job is still queued", payload, delay_seconds=45)
+
+    monkeypatch.setattr(worker, "_finalize_remote_gpu_result", fake_finalize)
+    monkeypatch.setattr(worker, "_mark_result_finalize_deferred", lambda task_id, provider_job_id, stage: deferred.append((task_id, provider_job_id, stage)))
+    monkeypatch.setattr(
+        worker,
+        "enqueue_result_finalize_job",
+        lambda task_id, provider_job_id, payload, delay_seconds=0: enqueued.append((task_id, provider_job_id, payload, delay_seconds)),
+    )
+    monkeypatch.setattr(worker, "_fail_provider_job", lambda *args, **kwargs: pytest.fail("not-ready result should not fail task"))
+
+    worker.finalize_provider_job_result("task-pending", "provider-pending", result)
+
+    assert deferred == [("task-pending", "provider-pending", "remote GPU job is still queued")]
+    assert enqueued == [("task-pending", "provider-pending", result, 45)]
+
+
+def test_lost_remote_gpu_job_requeues_platform_task(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        user = User(id="user-lost-gpu", email="lost-gpu@example.com", name="Lost GPU", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=10)
+        asset = Asset(
+            id="asset-lost-gpu",
+            user_id=user.id,
+            kind="input",
+            original_name="input.mp4",
+            mime_type="video/mp4",
+            storage_key="input.mp4",
+            url="https://cdn.example.test/input.mp4",
+            size_bytes=1024,
+            duration_seconds=70,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="task-lost-gpu",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=asset.id,
+            status="processing",
+            params={"remoteGpuJobId": "remote-lost", "remoteGpuJobType": "subtitle_translate"},
+            estimated_credits=10,
+            frozen_credits=10,
+            provider="mock",
+            provider_job_id="provider-lost-gpu",
+            progress_percent=10,
+            progress_stage="远端 GPU 已提交，等待处理",
+        )
+        db.add_all([user, wallet, asset, task])
+        db.commit()
+
+    monkeypatch.setattr(worker, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(worker.settings, "remote_gpu_job_not_found_retry_max", 3)
+
+    worker._requeue_provider_job_for_lost_remote_gpu_job(
+        "task-lost-gpu",
+        "provider-lost-gpu",
+        {"remote_job_id": "remote-lost"},
+        'GPU API HTTP 404: {"detail":"job not found"}',
+    )
+
+    with Session(engine) as db:
+        task = db.get(Task, "task-lost-gpu")
+        wallet = db.get(Wallet, "user-lost-gpu")
+        assert task is not None
+        assert wallet is not None
+        assert task.status == "queued"
+        assert task.error_code is None
+        assert task.params["_remoteGpuJobNotFoundRetries"] == 1
+        assert task.params["remoteGpuJobNotFoundIds"] == ["remote-lost"]
+        assert "remoteGpuJobId" not in task.params
+        assert "等待重新提交" in task.progress_stage
+        assert wallet.frozen_credits == 10
+
+
 def test_gpu_unavailable_retries_exhaust_to_failed(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
