@@ -332,6 +332,7 @@ def test_finalize_result_not_ready_defers_without_failing(monkeypatch) -> None:
     def fake_finalize(task_id: str, provider_job_id: str, payload: dict) -> dict:
         raise worker.RemoteGpuResultNotReady("remote GPU job is still queued", payload, delay_seconds=45)
 
+    monkeypatch.setattr(worker, "_should_skip_result_finalize", lambda task_id, provider_job_id: False)
     monkeypatch.setattr(worker, "_finalize_remote_gpu_result", fake_finalize)
     monkeypatch.setattr(worker, "_mark_result_finalize_deferred", lambda task_id, provider_job_id, stage: deferred.append((task_id, provider_job_id, stage)))
     monkeypatch.setattr(
@@ -354,6 +355,7 @@ def test_permanent_remote_gpu_failure_marks_failed_without_retry(monkeypatch) ->
     def fake_finalize(task_id: str, provider_job_id: str, payload: dict) -> dict:
         raise worker.RemoteGpuError("remote GPU job failed: CUDA_OUT_OF_MEMORY")
 
+    monkeypatch.setattr(worker, "_should_skip_result_finalize", lambda task_id, provider_job_id: False)
     monkeypatch.setattr(worker, "_finalize_remote_gpu_result", fake_finalize)
     monkeypatch.setattr(
         worker,
@@ -364,6 +366,18 @@ def test_permanent_remote_gpu_failure_marks_failed_without_retry(monkeypatch) ->
     worker.finalize_provider_job_result("task-failed", "provider-failed", result)
 
     assert failures == [("provider-failed", "CUDA_OUT_OF_MEMORY", "remote GPU job failed: CUDA_OUT_OF_MEMORY")]
+
+
+def test_finalize_skips_terminal_or_stale_tasks(monkeypatch) -> None:
+    monkeypatch.setattr(worker, "_should_skip_result_finalize", lambda task_id, provider_job_id: True)
+    monkeypatch.setattr(worker, "_finalize_remote_gpu_result", lambda *args, **kwargs: pytest.fail("terminal task should skip finalize"))
+    monkeypatch.setattr(worker, "_finalize_result_payload", lambda *args, **kwargs: pytest.fail("terminal task should skip finalize"))
+
+    worker.finalize_provider_job_result(
+        "task-terminal",
+        "provider-terminal",
+        {"remote_job_id": "remote-terminal", "storage_key": "model-plaza/output/videos/result.mp4"},
+    )
 
 
 def test_lost_remote_gpu_job_requeues_platform_task(monkeypatch) -> None:

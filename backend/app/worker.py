@@ -159,7 +159,15 @@ def _cleanup_finalize_intermediate_objects(result: dict) -> None:
             logger.warning("Failed to delete intermediate result object %s", storage_key, exc_info=True)
 
 
+def _should_skip_result_finalize(task_id: str, provider_job_id: str) -> bool:
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        return task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}
+
+
 def finalize_provider_job_result(task_id: str, provider_job_id: str, result: dict) -> None:
+    if _should_skip_result_finalize(task_id, provider_job_id):
+        return
     try:
         if result.get("workflow") == "subtitle-translate":
             finalized = _finalize_subtitle_translate_workflow_result(task_id, provider_job_id, result)
