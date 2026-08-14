@@ -58,9 +58,14 @@ class Settings(BaseSettings):
     internal_batch_zip_retry_interval_seconds: int = 60
     result_finalize_retry_max: int = 6
     result_finalize_retry_interval_seconds: int = 60
+    result_finalize_job_timeout_seconds: int = 900
     result_finalize_poll_timeout_seconds: int = 30
     result_finalize_defer_seconds: int = 60
     remote_gpu_job_not_found_retry_max: int = 3
+    remote_gpu_result_download_timeout_seconds: int = 300
+    volcengine_tos_upload_timeout_seconds: int = 600
+    volcengine_tos_upload_retry_max: int = 2
+    volcengine_tos_upload_retry_interval_seconds: int = 10
     cleanup_disk_high_watermark_percent: int = 80
     cleanup_disk_low_watermark_percent: int = 75
     cleanup_disk_min_age_hours: int = 6

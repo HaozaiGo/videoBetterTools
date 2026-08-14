@@ -1,11 +1,19 @@
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
+import signal
 import shutil
+import threading
+import time
 import urllib.request
 
 from app.config import settings
+
+
+class StorageUploadUnavailableError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -135,14 +143,32 @@ class TosStorage(LocalStorage):
     def save_file(self, storage_key: str, local_path: Path) -> StoredObject:
         normalized_key = storage_key.strip("/")
         size = local_path.stat().st_size
-        try:
-            self.client.put_object_from_file(self.bucket, normalized_key, str(local_path))
-        except Exception as exc:
-            if _is_tos_object_lock_error(exc):
-                remote_size = self.remote_size(normalized_key)
-                if remote_size == size:
-                    return StoredObject(storage_key=normalized_key, public_url=self.public_url(normalized_key), size=size)
-            raise
+        upload_retries = max(1, int(settings.volcengine_tos_upload_retry_max))
+        upload_timeout = max(1, int(settings.volcengine_tos_upload_timeout_seconds))
+        retry_interval = max(1, int(settings.volcengine_tos_upload_retry_interval_seconds))
+        last_timeout: TimeoutError | None = None
+        for attempt in range(1, upload_retries + 1):
+            try:
+                with _operation_timeout(upload_timeout):
+                    self.client.put_object_from_file(self.bucket, normalized_key, str(local_path))
+                break
+            except TimeoutError as exc:
+                last_timeout = exc
+                if attempt >= upload_retries:
+                    raise StorageUploadUnavailableError(
+                        f"TOS upload timed out after {upload_timeout}s on attempt {attempt}/{upload_retries}: {normalized_key}"
+                    ) from exc
+                time.sleep(retry_interval)
+            except Exception as exc:
+                if _is_tos_object_lock_error(exc):
+                    remote_size = self.remote_size(normalized_key)
+                    if remote_size == size:
+                        return StoredObject(storage_key=normalized_key, public_url=self.public_url(normalized_key), size=size)
+                raise
+        if last_timeout is not None:
+            remote_size = self.remote_size(normalized_key)
+            if remote_size == size:
+                return StoredObject(storage_key=normalized_key, public_url=self.public_url(normalized_key), size=size)
         return StoredObject(storage_key=normalized_key, public_url=self.public_url(normalized_key), size=size)
 
     def remote_size(self, storage_key: str) -> int | None:
@@ -264,3 +290,28 @@ storage = build_storage()
 def _is_tos_object_lock_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return "object protected by object lock" in message or ("accessdenied" in message and "object lock" in message)
+
+
+@contextmanager
+def _operation_timeout(seconds: int):
+    if (
+        seconds <= 0
+        or threading.current_thread() is not threading.main_thread()
+        or not hasattr(signal, "SIGALRM")
+        or not hasattr(signal, "setitimer")
+    ):
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def _raise_timeout(signum, frame):
+        raise TimeoutError(f"operation exceeded {seconds}s")
+
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)

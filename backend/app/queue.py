@@ -67,7 +67,7 @@ def enqueue_internal_batch_zip(user_id: str, batch_id: str, at_front: bool = Fal
 def enqueue_result_finalize_job(task_id: str, provider_job_id: str, result: dict, delay_seconds: int = 0) -> None:
     queue = result_queue()
     kwargs = {
-        "job_timeout": settings.task_job_timeout_seconds,
+        "job_timeout": settings.result_finalize_job_timeout_seconds,
         "result_ttl": 3600,
         "failure_ttl": 86400,
         "retry": _result_finalize_retry(),

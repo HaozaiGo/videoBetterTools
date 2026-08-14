@@ -15,7 +15,7 @@ from app.services import (
     create_internal_batch_zip,
     provider_callback,
 )
-from app.storage import storage
+from app.storage import StorageUploadUnavailableError, storage
 from app.video.gpu_api import (
     RemoteGpuError,
     RemoteGpuJobNotFoundError,
@@ -99,7 +99,10 @@ def _finalize_result_payload(result: dict) -> dict:
     if result.get("local_path"):
         local_path = Path(str(result["local_path"]))
         storage_key = str(result["storage_key"])
-        stored = storage.save_file(storage_key, local_path)
+        try:
+            stored = storage.save_file(storage_key, local_path)
+        except StorageUploadUnavailableError as exc:
+            raise RemoteGpuUnavailableError(str(exc)) from exc
         if storage.is_remote:
             storage.delete_local_copy(stored.storage_key)
         return {

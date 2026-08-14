@@ -43,7 +43,7 @@ def _request_json(request: urllib.request.Request, timeout: int = 30) -> dict:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        if exc.code == 404 and "job not found" in body.lower():
+        if exc.code == 404:
             raise RemoteGpuJobNotFoundError(f"GPU API HTTP {exc.code}: {body}") from exc
         if exc.code in {408, 425, 429, 500, 502, 503, 504}:
             raise RemoteGpuUnavailableError(f"GPU API HTTP {exc.code}: {body}") from exc
@@ -179,14 +179,14 @@ def download_remote_video_result(job_id: str, output_path: Path) -> None:
     for attempt in range(1, 4):
         temp_path = output_path.with_suffix(output_path.suffix + f".{uuid.uuid4().hex}.tmp")
         try:
-            with urllib.request.urlopen(request, timeout=600) as response:
+            with urllib.request.urlopen(request, timeout=settings.remote_gpu_result_download_timeout_seconds) as response:
                 with temp_path.open("wb") as output_file:
                     shutil.copyfileobj(response, output_file, length=1024 * 1024)
                 temp_path.replace(output_path)
                 return
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            if exc.code == 404 and "job not found" in body.lower():
+            if exc.code == 404:
                 last_error = RemoteGpuJobNotFoundError(f"GPU API result HTTP {exc.code} on attempt {attempt}/3: {body}")
             elif exc.code >= 500 or exc.code in {408, 425, 429}:
                 last_error = RemoteGpuUnavailableError(f"GPU API result HTTP {exc.code} on attempt {attempt}/3: {body}")

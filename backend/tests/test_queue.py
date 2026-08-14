@@ -52,12 +52,14 @@ def test_internal_batch_zip_enqueue_can_prioritize_front(monkeypatch) -> None:
 def test_result_finalize_enqueue_targets_result_queue(monkeypatch) -> None:
     fake_queue = FakeQueue()
     monkeypatch.setattr(queue, "result_queue", lambda: fake_queue)
+    monkeypatch.setattr(queue.settings, "result_finalize_job_timeout_seconds", 321)
 
     result = {"storage_key": "task-result.mp4", "local_path": "/tmp/task-result.mp4", "mime_type": "video/mp4"}
     queue.enqueue_result_finalize_job("task-1", "provider-1", result)
 
     call = fake_queue.calls[0]
     assert call["args"] == ("app.worker.finalize_provider_job_result", "task-1", "provider-1", result)
+    assert call["kwargs"]["job_timeout"] == 321
     assert call["kwargs"]["failure_ttl"] == 86400
 
 
