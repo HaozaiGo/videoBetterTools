@@ -237,6 +237,46 @@ def test_gpu_api_server_metrics_can_monitor_non_worker_gpus(monkeypatch) -> None
     assert payload["activeRunnerByGpu"] == {"0": 0, "1": 0, "3": 0, "6": 0, "7": 1}
 
 
+def test_gpu_api_server_running_jobs_include_display_metadata(tmp_path, monkeypatch) -> None:
+    module = _load_script_module("propainter_api_server_running_display_test", "scripts/gpu/propainter_api_server.py")
+    job_id = "remote-display-job"
+    job_dir = tmp_path / "jobs" / job_id
+    job_dir.mkdir(parents=True)
+    (job_dir / "status.json").write_text(
+        '{"status":"processing","job_type":"subtitle_translate","created_at":100,"started_at":110,'
+        '"assigned_gpu":"3","progress_percent":10,"progress_stage":"开始去字幕"}',
+        encoding="utf-8",
+    )
+    (job_dir / "params.json").write_text(
+        '{"providerJobId":"provider-display","internalBatchId":"batch-display",'
+        '"internalBatchName":"恰好的意外（53集）擦边剧","internalBatchIndex":46,"_inputAssetName":"48.mp4"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "JOBS_ROOT", tmp_path / "jobs")
+    monkeypatch.setattr(module.time, "time", lambda: 140)
+
+    jobs = module._running_jobs_snapshot()
+
+    assert jobs == [
+        {
+            "id": job_id,
+            "status": "processing",
+            "jobType": "subtitle_translate",
+            "providerJobId": "provider-display",
+            "inputAssetName": "48.mp4",
+            "internalBatchId": "batch-display",
+            "internalBatchName": "恰好的意外（53集）擦边剧",
+            "displayName": "恰好的意外（53集）擦边剧",
+            "displaySubtitle": "第 46 集 · 48.mp4",
+            "assignedGpu": "3",
+            "progressPercent": 10,
+            "progressStage": "开始去字幕",
+            "runningSeconds": 30,
+            "logPath": "",
+        }
+    ]
+
+
 def test_gpu_api_server_rejects_unsafe_result_cache_paths() -> None:
     module = _load_script_module("propainter_api_server_cache_path_test", "scripts/gpu/propainter_api_server.py")
 

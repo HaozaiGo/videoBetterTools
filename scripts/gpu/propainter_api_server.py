@@ -371,11 +371,36 @@ def _running_jobs_snapshot() -> list[dict]:
         if status.get("status") not in {"queued", "processing", "uploading"}:
             continue
         started_at = float(status.get("started_at") or status.get("created_at") or now)
+        params: dict = {}
+        try:
+            params_payload = (status_path.parent / "params.json").read_text(encoding="utf-8")
+            loaded_params = json.loads(params_payload)
+            if isinstance(loaded_params, dict):
+                params = loaded_params
+        except Exception:
+            params = {}
+        batch_name = str(params.get("internalBatchName") or "").strip()
+        input_asset_name = str(params.get("_inputAssetName") or "").strip()
+        try:
+            batch_index = int(params.get("internalBatchIndex") or 0)
+        except (TypeError, ValueError):
+            batch_index = 0
+        subtitle_parts = []
+        if batch_index > 0:
+            subtitle_parts.append(f"第 {batch_index} 集")
+        if input_asset_name:
+            subtitle_parts.append(input_asset_name)
         jobs.append(
             {
                 "id": job_id,
                 "status": status.get("status", ""),
                 "jobType": status.get("job_type", ""),
+                "providerJobId": str(params.get("providerJobId") or ""),
+                "inputAssetName": input_asset_name,
+                "internalBatchId": str(params.get("internalBatchId") or ""),
+                "internalBatchName": batch_name,
+                "displayName": batch_name or input_asset_name or status.get("job_type", ""),
+                "displaySubtitle": " · ".join(subtitle_parts) or job_id,
                 "assignedGpu": status.get("assigned_gpu", ""),
                 "progressPercent": int(status.get("progress_percent") or 0),
                 "progressStage": status.get("progress_stage", ""),
