@@ -183,6 +183,10 @@ def finalize_provider_job_result(task_id: str, provider_job_id: str, result: dic
         logger.exception("Result finalize retries exhausted for task %s", task_id)
         _fail_provider_job(provider_job_id, "RESULT_UPLOAD_FAILED", str(exc))
         raise
+    except RemoteGpuError as exc:
+        logger.warning("Remote GPU job failed permanently for task %s: %s", task_id, exc)
+        _fail_provider_job(provider_job_id, _remote_gpu_failure_error_code(exc), str(exc))
+        return
     except Exception as exc:
         logger.exception("Failed to finalize result for task %s", task_id)
         _fail_provider_job(provider_job_id, _remote_gpu_failure_error_code(exc), str(exc))

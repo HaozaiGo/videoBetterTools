@@ -347,6 +347,25 @@ def test_finalize_result_not_ready_defers_without_failing(monkeypatch) -> None:
     assert enqueued == [("task-pending", "provider-pending", result, 45)]
 
 
+def test_permanent_remote_gpu_failure_marks_failed_without_retry(monkeypatch) -> None:
+    result = {"remote_job_id": "remote-failed", "storage_key": "model-plaza/output/videos/result.mp4"}
+    failures: list[tuple[str, str, str]] = []
+
+    def fake_finalize(task_id: str, provider_job_id: str, payload: dict) -> dict:
+        raise worker.RemoteGpuError("remote GPU job failed: CUDA_OUT_OF_MEMORY")
+
+    monkeypatch.setattr(worker, "_finalize_remote_gpu_result", fake_finalize)
+    monkeypatch.setattr(
+        worker,
+        "_fail_provider_job",
+        lambda provider_job_id, error_code, message: failures.append((provider_job_id, error_code, message)),
+    )
+
+    worker.finalize_provider_job_result("task-failed", "provider-failed", result)
+
+    assert failures == [("provider-failed", "CUDA_OUT_OF_MEMORY", "remote GPU job failed: CUDA_OUT_OF_MEMORY")]
+
+
 def test_lost_remote_gpu_job_requeues_platform_task(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
