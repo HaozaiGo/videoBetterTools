@@ -169,6 +169,54 @@ def test_real_video_task_skips_duplicate_job_after_task_is_processing(monkeypatc
         assert task.progress_stage == "远端 GPU 已提交，等待处理"
 
 
+def test_claim_provider_job_marks_queued_task_processing(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        user = User(id="user-claim", email="claim@example.com", name="Claim", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=10)
+        asset = Asset(
+            id="asset-claim",
+            user_id=user.id,
+            kind="video",
+            original_name="claim.mp4",
+            mime_type="video/mp4",
+            storage_key="claim.mp4",
+            url="https://cdn.example.test/claim.mp4",
+            size_bytes=1024,
+            duration_seconds=70,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="task-claim",
+            user_id=user.id,
+            tool_slug="translate",
+            input_asset_id=asset.id,
+            status="queued",
+            params={},
+            estimated_credits=10,
+            frozen_credits=10,
+            provider="mock",
+            provider_job_id="provider-claim",
+            progress_percent=0,
+            progress_stage="等待 worker 领取任务",
+        )
+        db.add_all([user, wallet, asset, task])
+        db.commit()
+
+    monkeypatch.setattr(worker, "SessionLocal", lambda: Session(engine))
+
+    assert worker._claim_provider_job("task-claim") == ("provider-claim", "translate")
+    assert worker._claim_provider_job("task-claim") is None
+
+    with Session(engine) as db:
+        task = db.get(Task, "task-claim")
+        assert task is not None
+        assert task.status == "processing"
+        assert task.progress_stage == "worker 已领取，准备提交远端任务"
+
+
 def test_finalize_remote_gpu_result_uses_direct_upload_metadata(monkeypatch) -> None:
     monkeypatch.setattr(worker, "storage", FakeStorage())
     monkeypatch.setattr(worker, "_sync_remote_gpu_progress", lambda *args, **kwargs: True)
@@ -498,6 +546,59 @@ def test_gpu_unavailable_retries_exhaust_to_failed(monkeypatch) -> None:
         assert task.params["_gpuUnavailableRetries"] == 2
         assert wallet.frozen_credits == 0
     assert enqueued == []
+
+
+def test_gpu_queue_full_does_not_requeue_bound_remote_job(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        user = User(id="user-bound-remote", email="bound-remote@example.com", name="Bound Remote", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=10)
+        asset = Asset(
+            id="asset-bound-remote",
+            user_id=user.id,
+            kind="video",
+            original_name="bound.mp4",
+            mime_type="video/mp4",
+            storage_key="bound.mp4",
+            url="https://cdn.example.test/bound.mp4",
+            size_bytes=1024,
+            duration_seconds=70,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="task-bound-remote",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=asset.id,
+            status="processing",
+            params={"remoteGpuJobId": "remote-running", "_gpuQueueFullRetries": 2},
+            estimated_credits=10,
+            frozen_credits=10,
+            provider="mock",
+            provider_job_id="provider-bound-remote",
+            progress_percent=10,
+            progress_stage="远端 GPU 已提交，等待处理",
+        )
+        db.add_all([user, wallet, asset, task])
+        db.commit()
+
+    monkeypatch.setattr(worker, "SessionLocal", lambda: Session(engine))
+
+    worker._requeue_provider_job_for_gpu_unavailable(
+        "task-bound-remote",
+        "provider-bound-remote",
+        'GPU API HTTP 503: {"detail":"GPU API queue is full"}',
+    )
+
+    with Session(engine) as db:
+        task = db.get(Task, "task-bound-remote")
+        assert task is not None
+        assert task.status == "processing"
+        assert task.params["_gpuQueueFullRetries"] == 2
+        assert task.params["remoteGpuJobId"] == "remote-running"
+        assert task.progress_stage == "远端 GPU 已提交，等待处理"
 
 
 def test_gpu_disk_pressure_requeues_as_backpressure(monkeypatch) -> None:

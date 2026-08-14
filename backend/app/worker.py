@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 from rq import SimpleWorker, Worker, get_current_job
+from sqlalchemy import select
 
 from app.config import settings
 from app.database import SessionLocal
@@ -85,6 +86,17 @@ def _remember_remote_gpu_job_for_task(task_id: str, provider_job_id: str, result
             return
         _remember_remote_gpu_job(task, str(result.get("remote_job_id") or ""), str(result.get("job_type") or ""))
         db.commit()
+
+
+def _claim_provider_job(task_id: str) -> tuple[str, str] | None:
+    with SessionLocal() as db:
+        task = db.execute(select(Task).where(Task.id == task_id).with_for_update()).scalar_one_or_none()
+        if task is None or task.status != "queued":
+            return None
+        provider_job_id = task.provider_job_id
+        tool_slug = task.tool_slug
+        provider_callback(db, provider_job_id, "processing", callback_id=f"{provider_job_id}:processing")
+        return provider_job_id, tool_slug
 
 
 def prepare_internal_batch_zip(user_id: str, batch_id: str) -> None:
@@ -219,19 +231,17 @@ def finalize_provider_job_result(task_id: str, provider_job_id: str, result: dic
 
 
 def process_provider_job(task_id: str) -> None:
-    with SessionLocal() as db:
-        task = db.get(Task, task_id)
-        if task is None or task.status != "queued":
-            return
-        provider_job_id = task.provider_job_id
-        provider_callback(db, provider_job_id, "processing", callback_id=f"{provider_job_id}:processing")
+    claimed = _claim_provider_job(task_id)
+    if claimed is None:
+        return
+    provider_job_id, tool_slug = claimed
 
     # 已接入真实视频处理能力的工具单独走 GPU/本地处理管线；其他工具仍保留模拟供应商结果。
-    if task.tool_slug == "video-redraw":
+    if tool_slug == "video-redraw":
         _process_gptproto_video_redraw_task(task_id)
         return
 
-    if task.tool_slug in {"remove-watermark", "remove-subtitle", "enhance", "translate", "subtitle-translate-workflow"}:
+    if tool_slug in {"remove-watermark", "remove-subtitle", "enhance", "translate", "subtitle-translate-workflow"}:
         _process_real_video_task(task_id)
         return
 
@@ -618,6 +628,8 @@ def _requeue_provider_job_for_gpu_backpressure(task_id: str, provider_job_id: st
         if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
             return
         params = dict(task.params or {})
+        if task.status == "processing" and str(params.get("remoteGpuJobId") or "").strip():
+            return
         retries = int(params.get("_gpuQueueFullRetries") or 0) + 1
         params["_gpuQueueFullRetries"] = retries
         params["_gpuQueueFullLastAt"] = int(time.time())
