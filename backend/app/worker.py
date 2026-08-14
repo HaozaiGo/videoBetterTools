@@ -65,6 +65,7 @@ def _remember_remote_gpu_job(task: Task, remote_job_id: str, job_type: str = "")
         return
     params = dict(task.params or {})
     params["remoteGpuJobId"] = normalized_remote_job_id
+    params["remoteGpuSubmittedAt"] = int(time.time())
     if job_type:
         params["remoteGpuJobType"] = str(job_type)
     history = params.get("remoteGpuJobIds")

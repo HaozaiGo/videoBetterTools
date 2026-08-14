@@ -1,4 +1,5 @@
 import time
+from datetime import timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -43,17 +44,41 @@ def _queued_rq_task_ids() -> set[str]:
     return task_ids
 
 
-def _remote_gpu_inflight_count(db) -> int:
+def _task_created_at_seconds(task: Task) -> int:
+    created_at = task.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return int(created_at.timestamp())
+
+
+def _remote_gpu_submission_is_fresh(task: Task, now_seconds: int) -> bool:
+    stale_seconds = max(1, int(settings.gpu_remote_inflight_stale_seconds))
+    params = task.params if isinstance(task.params, dict) else {}
+    submitted_at = int(params.get("remoteGpuSubmittedAt") or 0)
+    if submitted_at > 0:
+        return now_seconds - submitted_at <= stale_seconds
+    return now_seconds - _task_created_at_seconds(task) <= stale_seconds
+
+
+def _remote_gpu_task_occupies_inflight_slot(task: Task, now_seconds: int) -> bool:
+    params = task.params if isinstance(task.params, dict) else {}
+    if not str(params.get("remoteGpuJobId") or "").strip():
+        return False
+    stage = task.progress_stage or ""
+    if "回传结果" in stage or "结果回收" in stage or "远端处理完成" in stage:
+        return False
+    if not _remote_gpu_submission_is_fresh(task, now_seconds):
+        return False
+    return True
+
+
+def _remote_gpu_inflight_count(db, now_seconds: int | None = None) -> int:
+    now_seconds = int(now_seconds or time.time())
     tasks = db.execute(
         select(Task)
         .where(Task.status == "processing", Task.tool_slug.in_(DISPATCHABLE_TOOL_SLUGS))
     ).scalars()
-    count = 0
-    for task in tasks:
-        params = task.params if isinstance(task.params, dict) else {}
-        if str(params.get("remoteGpuJobId") or "").strip():
-            count += 1
-    return count
+    return sum(1 for task in tasks if _remote_gpu_task_occupies_inflight_slot(task, now_seconds))
 
 
 def dispatch_provider_queue_once(limit: int | None = None) -> dict:
@@ -64,7 +89,7 @@ def dispatch_provider_queue_once(limit: int | None = None) -> dict:
 
     with SessionLocal() as db:
         remote_inflight_limit = max(0, int(settings.gpu_remote_inflight_limit))
-        if remote_inflight_limit and _remote_gpu_inflight_count(db) >= remote_inflight_limit:
+        if remote_inflight_limit and _remote_gpu_inflight_count(db, now_seconds) >= remote_inflight_limit:
             return {"dispatched": 0, "taskIds": []}
         tasks = list(
             db.execute(

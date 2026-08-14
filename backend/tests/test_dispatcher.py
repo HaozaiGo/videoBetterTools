@@ -165,3 +165,59 @@ def test_dispatcher_stops_when_remote_gpu_inflight_limit_is_reached(monkeypatch)
 
     assert result == {"dispatched": 0, "taskIds": []}
     assert enqueued == []
+
+
+def test_dispatcher_ignores_stale_remote_gpu_inflight(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    enqueued: list[str] = []
+    now_seconds = 1_800_000
+    monkeypatch.setattr(dispatcher, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(dispatcher, "_queued_rq_task_ids", lambda: set())
+    monkeypatch.setattr(dispatcher, "enqueue_provider_job", enqueued.append)
+    monkeypatch.setattr(dispatcher.settings, "gpu_remote_inflight_limit", 1)
+    monkeypatch.setattr(dispatcher.settings, "gpu_remote_inflight_stale_seconds", 1800)
+    monkeypatch.setattr(dispatcher.time, "time", lambda: now_seconds)
+
+    with Session(engine) as db:
+        user = User(id="user-stale-inflight", email="stale-inflight@example.com", name="Stale", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+        for task_id, status, params in [
+            ("stale-remote-processing", "processing", {"remoteGpuJobId": "remote-old", "remoteGpuSubmittedAt": now_seconds - 7200}),
+            ("queued-task", "queued", {}),
+        ]:
+            asset = Asset(
+                id=f"asset-{task_id}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"{task_id}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"{task_id}.mp4",
+                url=f"https://cdn.example.test/{task_id}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=task_id,
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=asset.id,
+                status=status,
+                params=params,
+                estimated_credits=0,
+                frozen_credits=0,
+                charged_credits=0,
+                provider="mock",
+                provider_job_id=f"provider-{task_id}",
+                progress_percent=10 if status == "processing" else 5,
+                progress_stage="远端 GPU 已提交，等待处理" if status == "processing" else "等待调度",
+            )
+            db.add_all([asset, task])
+        db.commit()
+
+    result = dispatcher.dispatch_provider_queue_once(limit=2)
+
+    assert result == {"dispatched": 1, "taskIds": ["queued-task"]}
+    assert enqueued == ["queued-task"]

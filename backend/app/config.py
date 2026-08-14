@@ -78,6 +78,7 @@ class Settings(BaseSettings):
     gpu_queue_dispatch_batch_size: int = 8
     gpu_queue_dispatch_cooldown_seconds: int = 180
     gpu_remote_inflight_limit: int = 16
+    gpu_remote_inflight_stale_seconds: int = 1800
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
