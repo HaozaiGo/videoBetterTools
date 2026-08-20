@@ -661,7 +661,7 @@ def test_gpu_disk_pressure_requeues_as_backpressure(monkeypatch) -> None:
         assert task.params["_gpuQueueFullRetries"] == 1
         assert "磁盘空间不足" in task.progress_stage
         assert wallet.frozen_credits == 10
-    assert enqueued == []
+    assert enqueued == ["task-gpu-disk:300"]
 
 
 def test_gpu_unavailable_requeues_with_delay(monkeypatch) -> None:
@@ -787,4 +787,4 @@ def test_gpu_queue_full_requeues_without_exhausting_unavailable_retries(monkeypa
         assert task.params["_gpuQueueFullRetries"] == 8
         assert task.progress_stage == "远端 GPU 队列已满，保持队列顺序等待调度（第 8 次）"
         assert wallet.frozen_credits == 10
-    assert enqueued == []
+    assert enqueued == ["task-gpu-full:300"]

@@ -55,6 +55,18 @@ function createBatchId() {
 }
 
 const internalBatchUploadConcurrency = 2;
+const internalBatchMaxEpisodeBytes = 200 * 1024 * 1024;
+const internalBatchMaxEpisodeLabel = formatBytes(internalBatchMaxEpisodeBytes);
+const internalBatchLongVideoWarningSeconds = 15 * 60;
+
+function internalBatchOversizeNotice(files: File[]) {
+  const names = files
+    .slice(0, 3)
+    .map((file) => file.name)
+    .join("、");
+  const suffix = files.length > 3 ? ` 等 ${files.length} 个视频` : names;
+  return `1688 内部批量上传单集不能超过 ${internalBatchMaxEpisodeLabel}，已拒绝 ${suffix}。`;
+}
 
 function buildRegion(start: { x: number; y: number }, end: { x: number; y: number }): WatermarkRegion {
   const x = clamp(Math.min(start.x, end.x));
@@ -126,6 +138,19 @@ export function InternalBatchWorkflowPage() {
   const selectedFileId = selectedFile ? fileBatchId(selectedFile, activeIndex) : "";
   const regions = selectedFileId ? regionsByFileId[selectedFileId] || [] : [];
   const selectedSize = useMemo(() => files.reduce((total, item) => total + item.size, 0), [files]);
+  const longVideoItems = useMemo(
+    () =>
+      files
+        .map((file, index) => ({ file, index, duration: durations[fileBatchId(file, index)] || 0 }))
+        .filter((item) => item.duration >= internalBatchLongVideoWarningSeconds),
+    [durations, files],
+  );
+  const longVideoNotice = longVideoItems.length
+    ? `检测到 ${longVideoItems.length} 个超过 15 分钟的视频，ProPainter 会按分片去字幕，单条耗时可能超过 1 小时：${longVideoItems
+        .slice(0, 3)
+        .map((item) => `第 ${item.index + 1} 个约 ${Math.round(item.duration / 60)} 分钟`)
+        .join("、")}${longVideoItems.length > 3 ? " 等" : ""}。`
+    : "";
   const totalEstimate = workflowTool
     ? files.reduce((total, file, index) => {
         const duration = durations[fileBatchId(file, index)] || 30;
@@ -145,7 +170,13 @@ export function InternalBatchWorkflowPage() {
 
   const setSelectedFiles = (nextFiles: File[], options: { append?: boolean } = {}) => {
     if (!nextFiles.length) return;
-    const mergedFiles = options.append ? [...files, ...nextFiles] : nextFiles;
+    const oversizedFiles = nextFiles.filter((file) => file.size > internalBatchMaxEpisodeBytes);
+    const acceptedFiles = nextFiles.filter((file) => file.size <= internalBatchMaxEpisodeBytes);
+    if (!acceptedFiles.length) {
+      setNotice(internalBatchOversizeNotice(oversizedFiles));
+      return;
+    }
+    const mergedFiles = options.append ? [...files, ...acceptedFiles] : acceptedFiles;
     setFiles(mergedFiles);
     setItems(
       mergedFiles.map((file, index) => ({
@@ -163,7 +194,7 @@ export function InternalBatchWorkflowPage() {
       setRegionsByFileId({});
       setDraftRegion(null);
     }
-    setNotice(options.append ? `已追加 ${nextFiles.length} 个视频。` : "");
+    setNotice(oversizedFiles.length ? internalBatchOversizeNotice(oversizedFiles) : options.append ? `已追加 ${acceptedFiles.length} 个视频。` : "");
   };
 
   const updateItem = (id: string, patch: Partial<BatchItem>) => {
@@ -334,6 +365,11 @@ export function InternalBatchWorkflowPage() {
     mutationFn: async () => {
       if (!workflowTool) throw new Error("内部工作流暂不可用");
       if (!files.length) throw new Error("请先上传视频");
+      const firstOversizedIndex = files.findIndex((file) => file.size > internalBatchMaxEpisodeBytes);
+      if (firstOversizedIndex >= 0) {
+        setActiveIndex(firstOversizedIndex);
+        throw new Error(`第 ${firstOversizedIndex + 1} 个视频超过 ${internalBatchMaxEpisodeLabel}，1688 内部批量上传暂不支持。`);
+      }
       const trimmedBatchName = batchName.trim();
       if (!trimmedBatchName) throw new Error("请先输入本次批量任务的总名称");
       const firstMissingIndex = files.findIndex((file, index) => !(regionsByFileId[fileBatchId(file, index)] || []).length);
@@ -350,6 +386,10 @@ export function InternalBatchWorkflowPage() {
       const submitFile = async (index: number, file: File) => {
         const id = fileBatchId(file, index);
         const duration = durations[id] || 30;
+        const longVideoWarning =
+          duration >= internalBatchLongVideoWarningSeconds
+            ? `视频时长约 ${Math.round(duration / 60)} 分钟，ProPainter 去字幕会按分片处理，耗时可能超过 1 小时`
+            : "";
         try {
           updateItem(id, { status: "uploading", stage: "上传视频", percent: 0, error: "" });
           const upload = await uploadAsset({
@@ -381,6 +421,12 @@ export function InternalBatchWorkflowPage() {
               subtitlePlacement,
               keepAudio,
               priority,
+              ...(longVideoWarning
+                ? {
+                    _longVideoWarning: longVideoWarning,
+                    _longVideoWarningSeconds: Math.round(duration),
+                  }
+                : {}),
             },
           });
           latestState = payload.state;
@@ -443,6 +489,7 @@ export function InternalBatchWorkflowPage() {
         ‹ 返回工具搜索首页
       </Link>
       {notice ? <div className="notice">{notice}</div> : null}
+      {longVideoNotice ? <div className="notice">{longVideoNotice}</div> : null}
       <section className="internal-workflow-head">
         <span>INTERNAL BATCH WORKFLOW</span>
         <h1>批量去字幕并翻译</h1>

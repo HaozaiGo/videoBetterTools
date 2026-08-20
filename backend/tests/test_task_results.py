@@ -144,6 +144,49 @@ def test_create_task_rejects_unreadable_remote_input(monkeypatch) -> None:
     assert wallet_after.frozen_credits == 0
 
 
+def test_create_internal_batch_task_rejects_episode_over_200mb(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services, "storage", FakeRemoteStorage({"large.mp4"}))
+    enqueued: list[str] = []
+    monkeypatch.setattr(services, "enqueue_provider_job", enqueued.append)
+
+    with Session(engine) as db:
+        user = User(id="user-large-internal", email="large-internal@example.com", name="Large Internal", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        asset = Asset(
+            id="asset-large-internal",
+            user_id=user.id,
+            kind="video",
+            original_name="large.mp4",
+            mime_type="video/mp4",
+            storage_key="large.mp4",
+            url="https://tos.example.test/large.mp4",
+            size_bytes=services.INTERNAL_BATCH_MAX_EPISODE_BYTES + 1,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        db.add_all([user, wallet, asset])
+        db.commit()
+
+        with pytest.raises(HTTPException) as exc:
+            create_task(
+                db,
+                user.id,
+                "subtitle-translate-workflow",
+                asset.id,
+                {"internalBatchId": "batch-large", "internalBatchName": "1688 内部批量", "internalBatchIndex": 1, "duration": 10},
+            )
+        wallet_after = db.get(Wallet, user.id)
+        task_count = db.query(Task).count()
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == services.INTERNAL_BATCH_MAX_EPISODE_MESSAGE
+    assert enqueued == []
+    assert task_count == 0
+    assert wallet_after.frozen_credits == 0
+
+
 def test_internal_batch_zip_includes_succeeded_tasks_when_batch_is_partial(tmp_path, monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -463,7 +506,9 @@ def test_internal_batch_zip_recreates_stale_remote_marker(tmp_path, monkeypatch)
         def remote_exists(self, storage_key: str) -> bool:
             return storage_key in self.existing_keys
 
+    output_storage_key = "model-plaza/output/videos/2026/07/02/stale-result.mp4"
     fake_storage = FakeRemoteStorage()
+    fake_storage.existing_keys.add(output_storage_key)
     requested_payloads: list[dict] = []
 
     def fake_remote_zip(payload: dict) -> dict:
@@ -499,7 +544,7 @@ def test_internal_batch_zip_recreates_stale_remote_marker(tmp_path, monkeypatch)
             kind="video",
             original_name="clip-result.mp4",
             mime_type="video/mp4",
-            storage_key="model-plaza/output/videos/2026/07/02/stale-result.mp4",
+            storage_key=output_storage_key,
             url="https://tos.example.test/model-plaza/output/videos/2026/07/02/stale-result.mp4",
             size_bytes=12,
             duration_seconds=10,
@@ -552,6 +597,77 @@ def test_internal_batch_zip_recreates_stale_remote_marker(tmp_path, monkeypatch)
     assert marker["storageKey"] == requested_payloads[0]["zip_storage_key"]
 
 
+def test_internal_batch_zip_blocks_missing_remote_result_before_gpu(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(services.settings, "internal_batch_zip_gpu_enabled", True)
+    monkeypatch.setattr(services.settings, "model_plaza_gpu_api_url", "https://gpu.example.test")
+    monkeypatch.setattr(services, "storage", FakeRemoteStorage(set()))
+    monkeypatch.setattr(
+        services,
+        "_request_remote_internal_batch_zip",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("missing result should be blocked before GPU zip")),
+    )
+
+    with Session(engine) as db:
+        user = User(id="user-missing-gpu-zip", email="missing-gpu-zip@example.com", name="Missing GPU Zip User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        input_asset = Asset(
+            id="missing-gpu-zip-input",
+            user_id=user.id,
+            kind="video",
+            original_name="第01集.mp4",
+            mime_type="video/mp4",
+            storage_key="input.mp4",
+            url="https://tos.example.test/input.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        output_asset = Asset(
+            id="missing-gpu-zip-output",
+            user_id=user.id,
+            kind="video",
+            original_name="第01集-result.mp4",
+            mime_type="video/mp4",
+            storage_key="model-plaza/output/videos/missing-result.mp4",
+            url="https://tos.example.test/model-plaza/output/videos/missing-result.mp4",
+            size_bytes=12,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="missing-gpu-zip-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=input_asset.id,
+            output_asset_id=output_asset.id,
+            status="succeeded",
+            params={"internalBatchId": "missing-gpu-zip-batch", "internalBatchName": "missing gpu zip", "internalBatchIndex": 1},
+            estimated_credits=0,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="missing-gpu-zip-provider",
+            output_url=output_asset.url,
+            progress_percent=100,
+            progress_stage="处理完成",
+        )
+        db.add_all([user, wallet, input_asset, output_asset, task])
+        db.commit()
+
+        with pytest.raises(HTTPException) as exc_info:
+            create_internal_batch_zip(db, user.id, "missing-gpu-zip-batch", part=1)
+        with pytest.raises(HTTPException) as plan_exc_info:
+            plan_internal_batch_zip(db, user.id, "missing-gpu-zip-batch")
+
+    assert exc_info.value.status_code == 409
+    assert "结果文件缺失" in str(exc_info.value.detail)
+    assert "第 1 集" in str(exc_info.value.detail)
+    assert plan_exc_info.value.status_code == 409
+
+
 def test_internal_batch_zip_restores_missing_tos_object_from_gpu_local_zip(tmp_path, monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -576,7 +692,9 @@ def test_internal_batch_zip_restores_missing_tos_object_from_gpu_local_zip(tmp_p
             self.saved_files.append((storage_key, content))
             return StoredObject(storage_key=storage_key, public_url=f"https://upload-mmm.example.test/{storage_key}", size=len(content))
 
+    output_storage_key = "model-plaza/output/videos/2026/07/02/restore-result.mp4"
     fake_storage = FakeRemoteStorage()
+    fake_storage.saved_files.append((output_storage_key, b"source-video"))
     requested_payloads: list[dict] = []
     downloaded_zip_ids: list[str] = []
 
@@ -618,7 +736,7 @@ def test_internal_batch_zip_restores_missing_tos_object_from_gpu_local_zip(tmp_p
             kind="video",
             original_name="clip-result.mp4",
             mime_type="video/mp4",
-            storage_key="model-plaza/output/videos/2026/07/02/restore-result.mp4",
+            storage_key=output_storage_key,
             url="https://upload-mmm.example.test/model-plaza/output/videos/2026/07/02/restore-result.mp4",
             size_bytes=12,
             duration_seconds=10,
@@ -648,7 +766,7 @@ def test_internal_batch_zip_restores_missing_tos_object_from_gpu_local_zip(tmp_p
 
     assert len(requested_payloads) == 1
     assert downloaded_zip_ids == [requested_payloads[0]["zip_id"]]
-    assert fake_storage.saved_files == [(requested_payloads[0]["zip_storage_key"], b"gpu-local-zip")]
+    assert (requested_payloads[0]["zip_storage_key"], b"gpu-local-zip") in fake_storage.saved_files
     assert archive["parts"][0]["sizeBytes"] == len(b"gpu-local-zip")
     assert archive["parts"][0]["remoteUrl"].startswith("https://upload-mmm.example.test/model-plaza/output/zips/")
 

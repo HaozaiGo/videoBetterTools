@@ -233,6 +233,7 @@ export type AdminInternalBatchZipSkippedTask = {
   status: TaskStatus;
   errorCode: string;
   failureReason: string;
+  resultMissingReason?: string;
   progressStage: string;
   createdAt: number;
   completedAt: number | null;
@@ -290,6 +291,7 @@ export type AdminInternalBatchZip = {
     createdAt: number | null;
     startedAt: number | null;
     endedAt: number | null;
+    excInfo?: string;
   } | null;
   partIndex: number;
   partCount: number;

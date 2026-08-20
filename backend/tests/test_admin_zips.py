@@ -612,6 +612,85 @@ def test_admin_internal_batch_zips_reports_skipped_tasks_and_deletes_zip(tmp_pat
     assert processing_after_delete["page"]["total"] == 0
 
 
+def test_admin_internal_batch_zips_marks_missing_remote_result_as_failed(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path / "uploads"))
+    monkeypatch.setattr(admin.settings, "upload_dir", str(tmp_path / "uploads"))
+
+    class FakeRemoteStorage:
+        is_remote = True
+
+        def remote_exists(self, _storage_key: str) -> bool:
+            return False
+
+    monkeypatch.setattr(services, "storage", FakeRemoteStorage())
+
+    with Session(engine) as db:
+        user = User(id="zip-missing-user", email="zip-missing@example.com", name="Zip Missing User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        input_asset = Asset(
+            id="zip-missing-input",
+            user_id=user.id,
+            kind="video",
+            original_name="第01集.mp4",
+            mime_type="video/mp4",
+            storage_key="episode-1-input.mp4",
+            url="https://tos.example.test/episode-1-input.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        output_asset = Asset(
+            id="zip-missing-output",
+            user_id=user.id,
+            kind="result",
+            original_name="第01集.mp4",
+            mime_type="video/mp4",
+            storage_key="model-plaza/output/videos/missing.mp4",
+            url="https://tos.example.test/model-plaza/output/videos/missing.mp4",
+            size_bytes=10,
+            duration_seconds=0,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="zip-missing-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=input_asset.id,
+            output_asset_id=output_asset.id,
+            status="succeeded",
+            params={"internalBatchId": "zip-missing-batch", "internalBatchName": "缺失结果 ZIP 测试", "internalBatchTotal": 1, "internalBatchIndex": 1},
+            estimated_credits=1,
+            frozen_credits=0,
+            charged_credits=1,
+            provider="mock",
+            provider_job_id="zip-missing-provider",
+            output_url=output_asset.url,
+            progress_percent=100,
+            progress_stage="处理完成",
+            completed_at=now(),
+        )
+        db.add_all([user, wallet, input_asset, output_asset, task])
+        db.commit()
+
+        failed_payload = admin.admin_internal_batch_zips(db, status="failed")
+        processing_payload = admin.admin_internal_batch_zips(db, status="processing")
+
+    assert failed_payload["tabs"]["failed"] == 1
+    assert failed_payload["tabs"]["processing"] == 0
+    item = failed_payload["items"][0]
+    assert item["zipStatus"] == "failed"
+    assert "结果文件缺失" in item["message"]
+    assert len(item["skippedTasks"]) == 1
+    skipped = item["skippedTasks"][0]
+    assert skipped["taskId"] == "zip-missing-task"
+    assert skipped["episode"] == "1"
+    assert skipped["status"] == "succeeded"
+    assert "结果对象存储文件不存在" in skipped["resultMissingReason"]
+    assert processing_payload["items"] == []
+
+
 def test_gpu_job_display_map_matches_remote_gpu_job_id() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

@@ -623,6 +623,7 @@ def _is_remote_gpu_disk_pressure(progress_stage: str) -> bool:
 
 def _requeue_provider_job_for_gpu_backpressure(task_id: str, provider_job_id: str, progress_stage: str = "") -> None:
     is_disk_pressure = _is_remote_gpu_disk_pressure(progress_stage)
+    should_requeue = False
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
@@ -654,6 +655,9 @@ def _requeue_provider_job_for_gpu_backpressure(task_id: str, provider_job_id: st
         else:
             task.progress_stage = f"远端 GPU {reason}，保持队列顺序等待调度（第 {retries} 次）"
         db.commit()
+        should_requeue = True
+    if should_requeue:
+        enqueue_provider_job(task_id, delay_seconds=max(1, int(settings.gpu_queue_full_retry_delay_seconds)))
 
 
 def _requeue_provider_job_for_gpu_unavailable(task_id: str, provider_job_id: str, progress_stage: str = "") -> None:

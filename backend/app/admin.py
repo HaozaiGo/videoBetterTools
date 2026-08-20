@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.config import settings
 from app.models import Asset, Task, User, Wallet, WalletLedger
 from app.queue import enqueue_internal_batch_zip, internal_batch_zip_queue
-from app.services import add_ledger, create_task, failure_reason_for_task, get_tool, get_wallet, internal_batch_expected_total_from_name, internal_batch_expected_total_from_tasks, internal_batch_status, normalize_pagination, now, page_info, ledger_to_dict, plan_internal_batch_zip, serialize_datetime, task_to_dict
+from app.services import add_ledger, create_task, failure_reason_for_task, get_tool, get_wallet, internal_batch_expected_total_from_name, internal_batch_expected_total_from_tasks, internal_batch_status, normalize_pagination, now, page_info, ledger_to_dict, plan_internal_batch_zip, serialize_datetime, task_result_missing_reason, task_to_dict
 from app.storage import safe_storage_name, storage
 
 
@@ -315,6 +315,7 @@ def _zip_job_states(include_failed: bool = True) -> dict[tuple[str, str], dict]:
                 "createdAt": _serialize_job_time(getattr(job, "created_at", None)),
                 "startedAt": _serialize_job_time(getattr(job, "started_at", None)),
                 "endedAt": _serialize_job_time(getattr(job, "ended_at", None)),
+                "excInfo": str(getattr(job, "exc_info", "") or "")[-800:] if state == "failed" else "",
             }
     return states
 
@@ -327,6 +328,9 @@ def _zip_process_message(batch: dict, zip_status: str, zip_job: dict | None) -> 
     total = int(batch["total"])
     failed = int(batch["failed"])
     cancelled = int(batch["cancelled"])
+    missing_results = int(batch.get("missingResultCount") or 0)
+    if missing_results > 0:
+        return "failed", f"已有成功任务的结果文件缺失：{missing_results} 个；请先在内部任务里重跑缺失集后再打包"
     if missing > 0 and active_processing <= 0:
         return "failed", f"批次任务数不完整：缺少 {missing} 个任务，当前已创建 {batch.get('created', total - missing)}/{total}；请补传或重新创建完整批次"
     if processing > 0:
@@ -344,6 +348,11 @@ def _zip_process_message(batch: dict, zip_status: str, zip_job: dict | None) -> 
             suffix = f"，剩余重试 {retries} 次" if retries is not None else ""
             return "retry", f"ZIP 任务等待自动重试{suffix}"
         if state == "failed":
+            exc_info = str(zip_job.get("excInfo") or "")
+            if "结果文件缺失" in exc_info:
+                return "failed", "ZIP 打包失败：存在成功但结果文件已缺失的单集，请查看详情并重跑"
+            if "404" in exc_info and ("TOS" in exc_info or "object" in exc_info or "urlopen" in exc_info):
+                return "failed", "ZIP 打包失败：结果文件读取 404，请查看详情并重跑缺失集"
             return "failed", "ZIP 打包/上传失败，等待重新入队"
     if zip_status == "failed":
         return "failed", f"批次有失败/取消任务：失败 {failed}，取消 {cancelled}；需重试或补包"
@@ -502,21 +511,26 @@ def _skipped_tasks_for_batch(db: Session, user_id: str, batch_id: str) -> list[d
         .options(selectinload(Task.input_asset))
         .order_by(Task.created_at.asc())
     ).scalars())
-    return [
-        {
+    skipped_tasks = []
+    for index, task in enumerate(tasks, start=1):
+        result_missing_reason = task_result_missing_reason(task) if task.status == "succeeded" else ""
+        if task.status not in SKIPPED_TASK_STATUSES and not result_missing_reason:
+            continue
+        skipped_tasks.append(
+            {
             "taskId": task.id,
             "episode": _task_episode_hint(task, index),
             "inputAssetName": task.input_asset.original_name if task.input_asset else "",
             "status": task.status,
             "errorCode": task.error_code or "",
-            "failureReason": failure_reason_for_task(task),
+            "failureReason": result_missing_reason or failure_reason_for_task(task),
+            "resultMissingReason": result_missing_reason,
             "progressStage": task.progress_stage or "",
             "createdAt": int(task.created_at.timestamp() * 1000),
             "completedAt": int(task.completed_at.timestamp() * 1000) if task.completed_at else None,
         }
-        for index, task in enumerate(tasks, start=1)
-        if task.status in SKIPPED_TASK_STATUSES
-    ]
+        )
+    return skipped_tasks
 
 
 def _task_internal_batch_index(task: Task, fallback: int) -> int:
@@ -577,7 +591,15 @@ def admin_create_internal_batch_missing_task(db: Session, user_id: str, batch_id
     params = {
         key: value
         for key, value in template_params.items()
-        if key not in {"providerJobId", "remoteGpuJobId", "remoteGpuJobIds", "remoteGpuJobType", "singleGpuRetry", "singleGpuRetryAt"}
+        if key not in {
+            "providerJobId",
+            "remoteGpuJobId",
+            "remoteGpuJobIds",
+            "remoteGpuJobType",
+            "remoteGpuSubmittedAt",
+            "singleGpuRetry",
+            "singleGpuRetryAt",
+        }
         and not str(key).startswith("_")
     }
     params["internalBatchId"] = batch_id
@@ -715,8 +737,15 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
         if available_zip_paths:
             continue
         zip_job = zip_jobs.get((user_id, batch_id))
+        missing_result_tasks: list[dict] = []
+        if can_have_ready_zip and not zip_job:
+            missing_result_tasks = [task for task in _skipped_tasks_for_batch(db, user_id, batch_id) if task.get("resultMissingReason")]
+            if missing_result_tasks:
+                batch = {**batch, "missingResultCount": len(missing_result_tasks)}
         pending_status = "processing"
-        if zip_job and zip_job.get("state") == "failed":
+        if missing_result_tasks:
+            pending_status = "failed"
+        elif zip_job and zip_job.get("state") == "failed":
             pending_status = "failed"
         elif int(batch.get("missing") or 0) > 0 and int(batch.get("activeProcessing") or 0) <= 0:
             pending_status = "failed"
@@ -727,14 +756,15 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
             continue
         tab_counts[pending_status] += 1
         if status == pending_status:
-            items.append(_empty_zip_batch_item(batch, pending_status, None, zip_job, []))
+            items.append(_empty_zip_batch_item(batch, pending_status, None, zip_job, missing_result_tasks))
 
     items.sort(key=lambda item: (int(item["updatedAt"]), str(item["batchId"]), int(item["partIndex"])), reverse=True)
     total = len(items)
     start = (page - 1) * per_page
     paged_items = items[start : start + per_page]
     for item in paged_items:
-        item["skippedTasks"] = _skipped_tasks_for_batch(db, str(item["userId"]), str(item["batchId"]))
+        if not item.get("skippedTasks"):
+            item["skippedTasks"] = _skipped_tasks_for_batch(db, str(item["userId"]), str(item["batchId"]))
     return {"items": paged_items, "page": page_info(total, page, per_page), "tabs": tab_counts}
 
 

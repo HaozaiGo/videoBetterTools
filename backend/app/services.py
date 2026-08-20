@@ -38,6 +38,9 @@ _INTERNAL_BATCH_ZIP_LOCKS_GUARD = threading.Lock()
 logger = logging.getLogger("model_plaza.services")
 INPUT_ASSET_REMOTE_MISSING_ERROR_CODE = "INPUT_ASSET_REMOTE_MISSING"
 INPUT_ASSET_REMOTE_MISSING_MESSAGE = "输入视频对象存储不可读，请重新上传后重试"
+INTERNAL_BATCH_MAX_EPISODE_BYTES = 200 * 1024 * 1024
+INTERNAL_BATCH_MAX_EPISODE_MESSAGE = "1688 内部批量上传单集不能超过 200MB，请压缩后再上传"
+INTERNAL_BATCH_LONG_VIDEO_WARNING_SECONDS = 15 * 60
 EPISODE_TOTAL_PATTERN = re.compile(r"[（(]?\s*(\d{1,4})\s*集\s*[）)]?")
 
 
@@ -68,6 +71,36 @@ def input_asset_is_remote_readable(input_asset: Asset) -> bool:
 def ensure_input_asset_remote_readable(input_asset: Asset) -> None:
     if not input_asset_is_remote_readable(input_asset):
         raise HTTPException(status_code=400, detail=INPUT_ASSET_REMOTE_MISSING_MESSAGE)
+
+
+def ensure_internal_batch_episode_size_allowed(input_asset: Asset) -> None:
+    if int(input_asset.size_bytes or 0) > INTERNAL_BATCH_MAX_EPISODE_BYTES:
+        raise HTTPException(status_code=400, detail=INTERNAL_BATCH_MAX_EPISODE_MESSAGE)
+
+
+def annotate_internal_batch_video_risk(params: dict, input_asset: Asset) -> dict:
+    updated = dict(params or {})
+    duration = _positive_int(updated.get("duration")) or int(input_asset.duration_seconds or 0)
+    if duration >= INTERNAL_BATCH_LONG_VIDEO_WARNING_SECONDS:
+        updated["_longVideoWarning"] = (
+            f"视频时长约 {max(1, round(duration / 60))} 分钟，ProPainter 去字幕会按分片处理，耗时可能超过 1 小时"
+        )
+        updated["_longVideoWarningSeconds"] = duration
+    return updated
+
+
+def clear_remote_gpu_retry_params(params: dict) -> dict:
+    updated = dict(params or {})
+    for key in (
+        "remoteGpuJobId",
+        "remoteGpuJobType",
+        "remoteGpuSubmittedAt",
+        "remote_gpu_job_id",
+        "remote_gpu_job_type",
+        "remote_gpu_submitted_at",
+    ):
+        updated.pop(key, None)
+    return updated
 
 
 def public_url(storage_key: str) -> str:
@@ -430,7 +463,20 @@ def _internal_batch_zip_entries(db: Session, user_id: str, batch_id: str) -> tup
 
     used_names: set[str] = set()
     entries: list[dict] = []
+    missing_result_tasks: list[dict] = []
     for index, task in enumerate(succeeded_tasks, start=1):
+        missing_reason = task_result_missing_reason(task)
+        if missing_reason:
+            params = task.params if isinstance(task.params, dict) else {}
+            missing_result_tasks.append(
+                {
+                    "taskId": task.id,
+                    "episode": params.get("internalBatchIndex") or index,
+                    "inputAssetName": task.input_asset.original_name if task.input_asset else "",
+                    "reason": missing_reason,
+                }
+            )
+            continue
         preview_path = task_preview_path(task)
         if preview_path.exists() and preview_path.is_file():
             source_path = preview_path
@@ -462,6 +508,8 @@ def _internal_batch_zip_entries(db: Session, user_id: str, batch_id: str) -> tup
                 "size": entry_size,
             }
         )
+    batch["missingResultTasks"] = missing_result_tasks
+    batch["missingResults"] = len(missing_result_tasks)
     task_summaries = [
         {
             "id": task.id,
@@ -469,10 +517,33 @@ def _internal_batch_zip_entries(db: Session, user_id: str, batch_id: str) -> tup
             "errorCode": task.error_code,
             "progressPercent": task.progress_percent,
             "progressStage": task.progress_stage,
+            "resultMissingReason": task_result_missing_reason(task) if task.status == "succeeded" else "",
         }
         for task in tasks
     ]
     return batch, task_summaries, entries
+
+
+def _internal_batch_zip_missing_result_detail(batch: dict) -> str:
+    missing_tasks = list(batch.get("missingResultTasks") or [])
+    if not missing_tasks:
+        return ""
+    samples = []
+    for task in missing_tasks[:5]:
+        episode = str(task.get("episode") or "").strip()
+        input_name = str(task.get("inputAssetName") or "").strip()
+        label = f"第 {episode} 集" if episode else str(task.get("taskId") or "未知任务")
+        if input_name:
+            label = f"{label}（{input_name}）"
+        samples.append(label)
+    suffix = "" if len(missing_tasks) <= len(samples) else f" 等 {len(missing_tasks)} 个"
+    return f"结果文件缺失：{', '.join(samples)}{suffix}；请先在内部任务里重跑缺失集后再打包"
+
+
+def _raise_for_internal_batch_zip_missing_results(batch: dict) -> None:
+    detail = _internal_batch_zip_missing_result_detail(batch)
+    if detail:
+        raise HTTPException(status_code=409, detail=detail)
 
 
 def _internal_batch_zip_parts(batch: dict, entries: list[dict]) -> list[dict]:
@@ -596,6 +667,7 @@ def _locked_internal_batch_zip(zip_path: Path):
 
 def plan_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
     batch, _tasks, entries = _internal_batch_zip_entries(db, user_id, batch_id)
+    _raise_for_internal_batch_zip_missing_results(batch)
     parts = _internal_batch_zip_parts(batch, entries)
     return {"parts": parts, "partCount": len(parts)}
 
@@ -646,7 +718,7 @@ def _internal_batch_zip_summary(batch: dict, task_summaries: list[dict], selecte
         "partMaxBytes": max(1, int(settings.internal_batch_zip_part_max_bytes)),
         "partMaxFiles": max(1, int(settings.internal_batch_zip_part_max_files)),
         "includedTaskIds": [entry["task_id"] for entry in selected_part["entries"]],
-        "skippedTasks": [task for task in task_summaries if task["status"] != "succeeded"],
+        "skippedTasks": [task for task in task_summaries if task["status"] != "succeeded" or task.get("resultMissingReason")],
     }
 
 
@@ -767,6 +839,7 @@ def _create_remote_internal_batch_zip(batch: dict, task_summaries: list[dict], s
 
 def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: int | None = None) -> dict:
     batch, task_summaries, entries = _internal_batch_zip_entries(db, user_id, batch_id)
+    _raise_for_internal_batch_zip_missing_results(batch)
     parts = _internal_batch_zip_parts(batch, entries)
     if part is not None and (part < 1 or part > len(parts)):
         raise HTTPException(status_code=404, detail="download part not found")
@@ -819,7 +892,7 @@ def retry_internal_batch_tasks(db: Session, user_id: str, batch_id: str, at_fron
         raise HTTPException(status_code=409, detail="batch has no failed or cancelled tasks to retry")
 
     wallet = get_wallet(db, user_id, lock=True)
-    retry_specs: list[tuple[Task, dict, int]] = []
+    retry_specs: list[tuple[Task, dict, dict, int]] = []
     total_estimate = 0
     for task in retryable_tasks:
         tool = get_tool(task.tool_slug)
@@ -829,18 +902,19 @@ def retry_internal_batch_tasks(db: Session, user_id: str, batch_id: str, at_fron
         if input_asset is None or input_asset.user_id != user_id:
             raise HTTPException(status_code=400, detail=f"missing uploaded asset for task: {task.id}")
         ensure_input_asset_remote_readable(input_asset)
-        params = dict(task.params or {})
+        params = clear_remote_gpu_retry_params(task.params or {})
         estimate = estimate_credits(tool, {**params, "duration": params.get("duration") or input_asset.duration_seconds or 30})
-        retry_specs.append((task, tool, estimate))
+        retry_specs.append((task, tool, params, estimate))
         total_estimate += estimate
 
     if wallet.credits - wallet.frozen_credits < total_estimate:
         raise HTTPException(status_code=402, detail="insufficient credits")
 
     retried_ids: list[str] = []
-    for task, tool, estimate in retry_specs:
+    for task, tool, params, estimate in retry_specs:
         task.status = "queued"
         task.provider_job_id = f"mock_{uuid4()}"
+        task.params = params
         task.estimated_credits = estimate
         task.frozen_credits = estimate
         task.charged_credits = 0
@@ -883,7 +957,7 @@ def retry_internal_batch_task_with_replacement_asset(
     ).scalar_one_or_none()
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
-    params = dict(task.params or {})
+    params = clear_remote_gpu_retry_params(task.params or {})
     if task.tool_slug != "subtitle-translate-workflow" or str(params.get("internalBatchId") or "") != batch_id:
         raise HTTPException(status_code=400, detail="task does not belong to this internal batch")
     missing_reason = task_result_missing_reason(task) if task.status == "succeeded" else ""
@@ -953,7 +1027,7 @@ def retry_internal_batch_missing_result_task(
     ).scalar_one_or_none()
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
-    params = dict(task.params or {})
+    params = clear_remote_gpu_retry_params(task.params or {})
     if task.tool_slug != "subtitle-translate-workflow" or str(params.get("internalBatchId") or "") != batch_id:
         raise HTTPException(status_code=400, detail="task does not belong to this internal batch")
     if task.status != "succeeded":
@@ -1008,7 +1082,7 @@ def prioritize_internal_batch_queued_task(
     ).scalar_one_or_none()
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
-    params = dict(task.params or {})
+    params = clear_remote_gpu_retry_params(task.params or {})
     if task.tool_slug != "subtitle-translate-workflow" or str(params.get("internalBatchId") or "") != batch_id:
         raise HTTPException(status_code=400, detail="task does not belong to this internal batch")
     if task.status != "queued":
@@ -1055,7 +1129,7 @@ def retry_failed_task_single_gpu(db: Session, user_id: str, task_id: str) -> Tas
         raise HTTPException(status_code=400, detail="uploaded asset has expired")
     ensure_input_asset_remote_readable(input_asset)
 
-    params = dict(task.params or {})
+    params = clear_remote_gpu_retry_params(task.params or {})
     params.update(
         {
             "forceSingleGpu": True,
@@ -1490,6 +1564,9 @@ def create_task(db: Session, user_id: str, tool_slug: str, input_asset_id: str, 
     if input_asset is None or input_asset.user_id != user_id:
         raise HTTPException(status_code=400, detail="missing uploaded asset")
     ensure_input_asset_remote_readable(input_asset)
+    if tool_slug == "subtitle-translate-workflow" and str((params or {}).get("internalBatchId") or "").strip():
+        ensure_internal_batch_episode_size_allowed(input_asset)
+        params = annotate_internal_batch_video_risk(params or {}, input_asset)
     if tool_slug == "video-redraw":
         if input_asset.kind != "video":
             raise HTTPException(status_code=400, detail="video redraw requires a video asset")

@@ -982,7 +982,15 @@ def _runner_for_job_type(job_type: str) -> Path:
     raise RuntimeError(f"Unsupported job type: {job_type}")
 
 
-def _runner_command(runner_path: Path, input_path: Path, output_path: Path, params_path: Path, work_dir: Path, regions_path: Path | None = None) -> list[str]:
+def _runner_command(
+    runner_path: Path,
+    input_path: Path,
+    output_path: Path,
+    params_path: Path,
+    work_dir: Path,
+    regions_path: Path | None = None,
+    status_path: Path | None = None,
+) -> list[str]:
     command = [
         PYTHON_PATH,
         str(runner_path),
@@ -997,6 +1005,8 @@ def _runner_command(runner_path: Path, input_path: Path, output_path: Path, para
     ]
     if regions_path is not None:
         command[6:6] = ["--regions", str(regions_path)]
+    if status_path is not None:
+        command += ["--status-path", str(status_path)]
     return command
 
 
@@ -1033,7 +1043,15 @@ def _run_subtitle_translate_job(job_id: str, input_path: Path, output_path: Path
     _write_status(job_id, progress_percent=10, progress_stage="开始去字幕")
     _run_tracked_process(
         job_id,
-        _runner_command(PROPAINTER_RUNNER_PATH, input_path, intermediate_path, params_path, work_dir / "propainter", regions_path),
+        _runner_command(
+            PROPAINTER_RUNNER_PATH,
+            input_path,
+            intermediate_path,
+            params_path,
+            work_dir / "propainter",
+            regions_path,
+            _status_path(job_id),
+        ),
         log_file,
         assigned_gpu,
     )
@@ -1128,6 +1146,7 @@ def _run_model_job(job_id: str) -> None:
                         params_path,
                         work_dir,
                         regions_path if job_type in {"propainter", "enhance"} else None,
+                        _status_path(job_id) if job_type == "propainter" else None,
                     ),
                     log_file,
                     assigned_gpu,

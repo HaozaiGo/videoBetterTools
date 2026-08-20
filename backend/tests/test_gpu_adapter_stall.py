@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import subprocess
 import sys
 import time
@@ -342,6 +343,7 @@ def test_gpu_api_server_subtitle_translate_runs_locally_and_uploads_once(tmp_pat
     assert len(commands) == 2
     assert commands[0][1].endswith("propainter_runner.py")
     assert commands[0][commands[0].index("--input") + 1].endswith("input.mp4")
+    assert commands[0][commands[0].index("--status-path") + 1].endswith("status.json")
     intermediate_output = commands[0][commands[0].index("--output") + 1]
     assert intermediate_output.endswith("subtitle-removed.mp4")
     assert commands[1][1].endswith("video_translate_runner.py")
@@ -352,3 +354,47 @@ def test_gpu_api_server_subtitle_translate_runs_locally_and_uploads_once(tmp_pat
     status = module._read_status(job_id)
     assert status["status"] == "succeeded"
     assert status["result_storage_key"] == "model-plaza/output/videos/final.mp4"
+
+
+def test_propainter_runner_updates_status_for_chunks(tmp_path, monkeypatch) -> None:
+    module = _load_script_module("propainter_runner_status_test", "scripts/gpu/propainter_runner.py")
+    frames_dir = tmp_path / "frames"
+    masks_dir = tmp_path / "masks"
+    frames_dir.mkdir()
+    masks_dir.mkdir()
+    for index in range(1, 6):
+        (frames_dir / f"{index:06d}.png").write_bytes(b"frame")
+        (masks_dir / f"{index:06d}.png").write_bytes(b"mask")
+    status_path = tmp_path / "status.json"
+    status_path.write_text('{"status":"processing","progress_percent":10,"progress_stage":"开始去字幕"}', encoding="utf-8")
+
+    def fake_run_propainter_command(command, cwd=None):
+        output_dir = Path(command[command.index("--output") + 1])
+        frames_name = Path(command[command.index("--video") + 1]).name
+        result = output_dir / frames_name / "inpaint_out.mp4"
+        result.parent.mkdir(parents=True, exist_ok=True)
+        result.write_bytes(b"chunk")
+
+    monkeypatch.setattr(module, "_run_propainter_command", fake_run_propainter_command)
+    monkeypatch.setattr(module, "_concat_videos", lambda parts, output_path, workdir: output_path.write_bytes(b"merged"))
+
+    merged = module._run_propainter_once(
+        sys.executable,
+        tmp_path,
+        frames_dir,
+        masks_dir,
+        tmp_path / "results",
+        25,
+        360,
+        640,
+        5,
+        {"propainterChunkFrames": 2, "propainterLongVideoFrames": 2},
+        "subtitle-text",
+        tmp_path / "work",
+        status_path,
+    )
+
+    assert merged.exists()
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["progress_percent"] == 52
+    assert status["progress_stage"] == "去字幕 3/3 完成，正在合并分片"

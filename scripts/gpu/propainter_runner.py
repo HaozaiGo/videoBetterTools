@@ -16,6 +16,8 @@ import os
 import resource
 import shutil
 import subprocess
+import time
+import uuid
 from pathlib import Path
 
 
@@ -74,6 +76,22 @@ def _load_json(path: Path, fallback):
     if not path or not path.exists():
         return fallback
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_status_progress(status_path: Path | None, percent: int, stage: str) -> None:
+    if not status_path:
+        return
+    try:
+        current = json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}
+    except Exception:
+        current = {}
+    current["progress_percent"] = max(0, min(100, int(percent)))
+    current["progress_stage"] = stage[:160]
+    current["updated_at"] = time.time()
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = status_path.with_name(f".{status_path.name}.{uuid.uuid4().hex}.tmp")
+    temp_path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temp_path, status_path)
 
 
 def _normalized_region_to_pixels(region: dict, width: int, height: int) -> tuple[int, int, int, int]:
@@ -447,11 +465,14 @@ def _run_propainter_once(
     params: dict,
     strategy: str,
     workdir: Path,
+    status_path: Path | None = None,
 ) -> Path:
     chunk_frames = int(params.get("propainterChunkFrames") or params.get("propainterLongVideoFrames") or 900)
     if frame_count <= chunk_frames:
+        _write_status_progress(status_path, 12, f"去字幕 1/1：处理 {frame_count} 帧")
         command = _build_propainter_command(python, frames_dir, masks_dir, results_dir, fps, frame_count, width, height, params, strategy)
         _run_propainter_command(command, cwd=propainter_root)
+        _write_status_progress(status_path, 50, "去字幕 1/1 完成，正在合成结果")
         return results_dir / frames_dir.name / "inpaint_out.mp4"
 
     frames = sorted(frames_dir.glob("*.png"))
@@ -459,6 +480,7 @@ def _run_propainter_once(
     if len(frames) != len(masks):
         raise RuntimeError(f"Frame/mask count mismatch: {len(frames)} frames, {len(masks)} masks")
 
+    total_chunks = (frame_count + chunk_frames - 1) // chunk_frames
     print(f"Running ProPainter in chunks: {frame_count} frames, {chunk_frames} frames per chunk", flush=True)
     chunk_outputs: list[Path] = []
     chunks_dir = workdir / "chunks"
@@ -470,6 +492,11 @@ def _run_propainter_once(
         chunk_frames_dir, chunk_masks_dir = _prepare_chunk(frames, masks, chunk_dir, start, end)
         chunk_count = end - start
         print(f"Processing ProPainter chunk {chunk_index}: frames {start + 1}-{end}", flush=True)
+        _write_status_progress(
+            status_path,
+            10 + int(((chunk_index - 1) / total_chunks) * 40),
+            f"去字幕 {chunk_index}/{total_chunks}：处理第 {start + 1}-{end} 帧",
+        )
         command = _build_propainter_command(
             python,
             chunk_frames_dir,
@@ -488,8 +515,14 @@ def _run_propainter_once(
         if not chunk_output.exists():
             raise RuntimeError(f"ProPainter chunk output not found: {chunk_output}")
         chunk_outputs.append(chunk_output)
+        _write_status_progress(
+            status_path,
+            10 + int((chunk_index / total_chunks) * 40),
+            f"去字幕 {chunk_index}/{total_chunks} 完成，已清理分片临时文件",
+        )
 
     merged_path = workdir / "propainter-merged.mp4"
+    _write_status_progress(status_path, 52, f"去字幕 {total_chunks}/{total_chunks} 完成，正在合并分片")
     _concat_videos(chunk_outputs, merged_path, workdir)
     return merged_path
 
@@ -507,6 +540,7 @@ def _run_propainter(
     params: dict,
     strategy: str,
     workdir: Path,
+    status_path: Path | None = None,
 ) -> Path:
     profiles = _propainter_retry_profiles(params)
     last_oom: PropainterOutOfMemoryError | None = None
@@ -522,6 +556,11 @@ def _run_propainter(
             f"short_side={attempt_params['propainterLongVideoShortSide']}",
             flush=True,
         )
+        _write_status_progress(
+            status_path,
+            10,
+            f"开始去字幕（{profile['_retryLabel']}，每片 {attempt_params['propainterChunkFrames']} 帧）",
+        )
         try:
             return _run_propainter_once(
                 python,
@@ -536,12 +575,14 @@ def _run_propainter(
                 attempt_params,
                 strategy,
                 workdir,
+                status_path,
             )
         except PropainterOutOfMemoryError as exc:
             last_oom = exc
             if attempt_index >= len(profiles):
                 break
             print("ProPainter CUDA OOM detected; retrying with smaller chunks.", flush=True)
+            _write_status_progress(status_path, 10, "去字幕显存不足，正在降档重试")
     raise PropainterOutOfMemoryError(str(last_oom or "ProPainter CUDA out of memory"))
 
 
@@ -556,6 +597,7 @@ def main() -> None:
     parser.add_argument("--workdir", default=os.environ.get("MODEL_PLAZA_WORKDIR", "/data1/model-plaza-video-worker/work/propainter"))
     parser.add_argument("--propainter-root", default=os.environ.get("PROPAINTER_ROOT", "/data1/model-plaza-video-worker/repos/ProPainter"))
     parser.add_argument("--python", default=os.environ.get("PROPAINTER_PYTHON", "/data1/conda/miniconda3/envs/video-inpaint/bin/python"))
+    parser.add_argument("--status-path", default=os.environ.get("MODEL_PLAZA_STATUS_FILE", ""))
     args = parser.parse_args()
 
     input_path = Path(args.input).expanduser().resolve()
@@ -564,6 +606,7 @@ def main() -> None:
     params_path = Path(args.params).expanduser().resolve() if args.params else Path()
     workdir = Path(args.workdir).expanduser().resolve()
     propainter_root = Path(args.propainter_root).expanduser().resolve()
+    status_path = Path(args.status_path).expanduser().resolve() if args.status_path else None
 
     regions = _load_json(regions_path, [])
     params = _load_json(params_path, {})
@@ -598,6 +641,10 @@ def main() -> None:
             f"Using ProPainter internal size {propainter_width}x{propainter_height} for {frame_count} frames; final output remains {target_width}x{target_height}",
             flush=True,
         )
+    if frame_count > int(params.get("propainterLongVideoFrames") or 900):
+        chunk_frames = int(params.get("propainterChunkFrames") or params.get("propainterLongVideoFrames") or 900)
+        total_chunks = (frame_count + chunk_frames - 1) // chunk_frames
+        _write_status_progress(status_path, 10, f"开始去字幕：共 {frame_count} 帧，预计 {total_chunks} 个分片")
 
     inpaint_path = _run_propainter(
         args.python,
@@ -612,6 +659,7 @@ def main() -> None:
         params,
         strategy,
         workdir,
+        status_path,
     )
     if not inpaint_path.exists():
         raise RuntimeError(f"ProPainter output not found: {inpaint_path}")
