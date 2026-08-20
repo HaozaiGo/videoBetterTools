@@ -140,7 +140,7 @@ RELEASE_PRODUCTION_ENV  release/2026-06 可选生产环境变量，参考 deploy
 
 服务器已有 Caddy 占用 `80/443` 时，项目默认暴露在 `WEB_PORT=8003`，再由现有网关或安全组决定是否对外开放。
 
-平台 worker 默认 `WORKER_REPLICAS=8`，结果入库/远端轮询 worker 默认 `RESULT_WORKER_REPLICAS=8`，ZIP 预打包 worker 默认 `ZIP_WORKER_REPLICAS=8`。GPU 服务当前按 `MODEL_PLAZA_GPU_DEVICE_IDS=2,3,5,6,7` 分配，`MODEL_PLAZA_GPU_DEVICE_SLOT_CAPACITY=2:1,3:1,5:1,6:2,7:2`，也就是 GPU2/GPU3/GPU5 各最多 1 个模型任务，GPU6/GPU7 各最多 2 个模型任务，总计 7 个 worker slot。平台入口 worker 只提交远端 GPU job，然后把轮询、GPU 结果确认、结果入库交给 `model-plaza-results`；GPU 服务收到平台生成的 TOS 预签名上传地址后直接上传结果，避免“平台拉取远端结果”和“TOS 上传”占住入口 worker。ProPainter 并发仍需持续观察显存。
+平台 worker 默认 `WORKER_REPLICAS=8`，结果入库/远端轮询 worker 默认 `RESULT_WORKER_REPLICAS=8`，ZIP 预打包 worker 默认 `ZIP_WORKER_REPLICAS=8`。GPU 服务当前按 `MODEL_PLAZA_GPU_DEVICE_IDS=2,3,5,6,7` 分配，`MODEL_PLAZA_GPU_DEVICE_SLOT_CAPACITY=2:1,3:2,5:1,6:1,7:2`，也就是 GPU2/GPU5/GPU6 各最多 1 个模型任务，GPU3/GPU7 各最多 2 个模型任务，总计 7 个 worker slot。GPU4 仅监控，不接 ProPainter。平台入口 worker 只提交远端 GPU job，然后把轮询、GPU 结果确认、结果入库交给 `model-plaza-results`；GPU 服务收到平台生成的 TOS 预签名上传地址后直接上传结果，避免“平台拉取远端结果”和“TOS 上传”占住入口 worker。ProPainter 并发仍需持续观察显存。
 
 GPU 结果清理默认开启：成功任务保留 24 小时，失败/取消任务保留 48 小时；`runner-work` 中间目录默认 1 小时后清理，`api-jobs` 所在磁盘超过 80% 时会从最老的终态任务开始清到 70%。可通过 `MODEL_PLAZA_GPU_CLEANUP_*` 环境变量调整，也可调用 `POST /maintenance/cleanup` 手动触发一次。
 
