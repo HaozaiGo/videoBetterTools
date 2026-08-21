@@ -214,10 +214,26 @@ def _zip_storage_names() -> list[str]:
     return [path.name for path in zip_dir.iterdir()]
 
 
-def _available_zip_paths_for_batch(batch: dict, zip_names: list[str] | None = None) -> list[Path]:
-    zip_dir = settings.upload_path / "internal-batch-zips"
+def _zip_storage_name_index(zip_names: list[str] | None = None) -> dict[str, list[str]]:
     names = zip_names if zip_names is not None else _zip_storage_names()
+    index: dict[str, list[str]] = {}
+    for name in names:
+        zip_name = name.removesuffix(".remote.json")
+        if not zip_name.endswith(".zip"):
+            continue
+        stem = zip_name.removesuffix(".zip")
+        stem = re.sub(r"-part\d+-of\d+$", "", stem)
+        index.setdefault(stem, []).append(name)
+    return index
+
+
+def _available_zip_paths_for_batch(batch: dict, zip_names: list[str] | dict[str, list[str]] | None = None) -> list[Path]:
+    zip_dir = settings.upload_path / "internal-batch-zips"
     base_stem = _zip_base_stem_for_batch(batch)
+    if isinstance(zip_names, dict):
+        names = zip_names.get(base_stem, [])
+    else:
+        names = zip_names if zip_names is not None else _zip_storage_names()
     paths: dict[str, Path] = {}
     single_name = f"{base_stem}.zip"
     for name in names:
@@ -638,10 +654,127 @@ def _empty_zip_batch_item(batch: dict, zip_status: str, archive: dict | None = N
     }
 
 
+def _batch_from_zip_row(row) -> dict:
+    created_total = int(row.total or 0)
+    batch_name = row.batch_name or row.batch_id or "内部批量任务"
+    expected_total = _batch_expected_total(str(batch_name), created_total, row.declared_total)
+    missing = max(0, expected_total - created_total)
+    active_processing = int(row.processing or 0)
+    return {
+        "userId": row.user_id,
+        "batchId": row.batch_id,
+        "batchName": batch_name,
+        "total": expected_total,
+        "created": created_total,
+        "succeeded": int(row.succeeded or 0),
+        "failed": int(row.failed or 0),
+        "cancelled": int(row.cancelled or 0),
+        "missing": missing,
+        "activeProcessing": active_processing,
+        "processing": active_processing + missing,
+        "createdAt": int(row.created_at.timestamp() * 1000),
+        "updatedAt": int(row.updated_at.timestamp() * 1000),
+    }
+
+
+def _zip_batch_id_prefixes(zip_names: dict[str, list[str]]) -> set[str]:
+    prefixes: set[str] = set()
+    for stem in zip_names:
+        match = re.search(r"-([0-9a-fA-F]{8})-\d+-of-\d+$", stem)
+        if match:
+            prefixes.add(match.group(1).lower())
+    return prefixes
+
+
+def _admin_internal_batch_ready_zips(db: Session, page: int, per_page: int, name: str) -> dict | None:
+    zip_names = _zip_storage_name_index()
+    prefixes = _zip_batch_id_prefixes(zip_names)
+    if not prefixes:
+        if zip_names:
+            return None
+        return {"items": [], "page": page_info(0, page, per_page), "tabs": {"ready": 0, "processing": 0, "failed": 0}}
+
+    batch_id_expr = Task.params["internalBatchId"].as_string()
+    batch_name_expr = Task.params["internalBatchName"].as_string()
+    batch_total_expr = Task.params["internalBatchTotal"].as_string()
+    updated_expr = func.coalesce(Task.completed_at, Task.created_at)
+    filters = [
+        Task.tool_slug == "subtitle-translate-workflow",
+        batch_id_expr.is_not(None),
+        batch_id_expr != "",
+        func.substr(func.lower(batch_id_expr), 1, 8).in_(prefixes),
+        Task.params["internalBatchDeletedAt"].as_string().is_(None),
+    ]
+    if name:
+        filters.append(batch_name_expr.ilike(f"%{name}%"))
+
+    rows = db.execute(
+        select(
+            Task.user_id.label("user_id"),
+            batch_id_expr.label("batch_id"),
+            func.max(batch_name_expr).label("batch_name"),
+            func.max(batch_total_expr).label("declared_total"),
+            func.count().label("total"),
+            func.sum(case((Task.status == "succeeded", 1), else_=0)).label("succeeded"),
+            func.sum(case((Task.status == "failed", 1), else_=0)).label("failed"),
+            func.sum(case((Task.status == "cancelled", 1), else_=0)).label("cancelled"),
+            func.sum(case((Task.status.in_(("queued", "processing")), 1), else_=0)).label("processing"),
+            func.min(Task.created_at).label("created_at"),
+            func.max(updated_expr).label("updated_at"),
+        )
+        .where(*filters)
+        .group_by(Task.user_id, batch_id_expr)
+        .order_by(func.max(updated_expr).desc())
+    ).all()
+
+    items: list[dict] = []
+    for row in rows:
+        batch = _batch_from_zip_row(row)
+        user_id = str(batch["userId"])
+        batch_id = str(batch["batchId"])
+        available_zip_paths = _available_zip_paths_for_batch(batch, zip_names)
+        for part in _ready_zip_parts_for_batch(batch, available_zip_paths):
+            part_index = int(part["index"])
+            if _is_zip_row_deleted(user_id, batch_id, part_index):
+                continue
+            items.append(
+                {
+                    **batch,
+                    "zipStatus": "ready",
+                    "zipStage": "ready",
+                    "zipJob": None,
+                    "partIndex": part_index,
+                    "partCount": int(part.get("partCount") or 1),
+                    "filename": part["filename"],
+                    "sizeBytes": int(part.get("sizeBytes") or 0),
+                    "estimatedSizeBytes": int(part.get("estimatedSizeBytes") or 0),
+                    "source": str(part.get("source") or ""),
+                    "storageKey": str(part.get("storageKey") or ""),
+                    "downloadUrl": f"/api/admin/internal-batch-zips/{quote(batch_id, safe='')}/download?userId={quote(user_id, safe='')}&part={part_index}",
+                    "message": "",
+                    "skippedTasks": [],
+                }
+            )
+
+    items.sort(key=lambda item: (int(item["updatedAt"]), str(item["batchId"]), int(item["partIndex"])), reverse=True)
+    total = len(items)
+    start = (page - 1) * per_page
+    paged_items = items[start : start + per_page]
+    for item in paged_items:
+        unfinished = int(item["failed"]) + int(item["cancelled"]) + int(item["processing"])
+        if unfinished > 0:
+            item["skippedTasks"] = _skipped_tasks_for_batch(db, str(item["userId"]), str(item["batchId"]))
+    return {"items": paged_items, "page": page_info(total, page, per_page), "tabs": {"ready": total, "processing": 0, "failed": 0}}
+
+
 def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, status: str = "ready", name: str = "") -> dict:
     page, per_page = normalize_pagination(page, per_page)
     status = status if status in ADMIN_ZIP_STATUS_FILTERS else "ready"
     normalized_name = name.strip()
+    if status == "ready":
+        ready_payload = _admin_internal_batch_ready_zips(db, page, per_page, normalized_name)
+        if ready_payload is not None:
+            return ready_payload
     batch_id_expr = Task.params["internalBatchId"].as_string()
     batch_name_expr = Task.params["internalBatchName"].as_string()
     batch_total_expr = Task.params["internalBatchTotal"].as_string()
@@ -699,7 +832,8 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
     items: list[dict] = []
     tab_counts = {"ready": 0, "processing": 0, "failed": 0}
     zip_jobs = _zip_job_states()
-    zip_names = _zip_storage_names()
+    zip_names = _zip_storage_name_index()
+    verify_missing_results = status in {"processing", "failed"}
     for batch in batches:
         ready_items: list[dict] = []
         user_id = str(batch["userId"])
@@ -738,7 +872,7 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
             continue
         zip_job = zip_jobs.get((user_id, batch_id))
         missing_result_tasks: list[dict] = []
-        if can_have_ready_zip and not zip_job:
+        if can_have_ready_zip and not zip_job and verify_missing_results:
             missing_result_tasks = [task for task in _skipped_tasks_for_batch(db, user_id, batch_id) if task.get("resultMissingReason")]
             if missing_result_tasks:
                 batch = {**batch, "missingResultCount": len(missing_result_tasks)}
