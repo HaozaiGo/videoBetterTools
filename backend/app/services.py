@@ -546,6 +546,10 @@ def _raise_for_internal_batch_zip_missing_results(batch: dict) -> None:
         raise HTTPException(status_code=409, detail=detail)
 
 
+def _internal_batch_zip_base_stem(batch: dict) -> str:
+    return f"{str(batch['_safeZipName'])}-{str(batch['id'])[:8]}-{batch['succeeded']}-of-{batch['total']}"
+
+
 def _internal_batch_zip_parts(batch: dict, entries: list[dict]) -> list[dict]:
     max_part_bytes = max(1, int(settings.internal_batch_zip_part_max_bytes))
     max_part_files = max(1, int(settings.internal_batch_zip_part_max_files))
@@ -565,7 +569,7 @@ def _internal_batch_zip_parts(batch: dict, entries: list[dict]) -> list[dict]:
 
     safe_batch_name = str(batch["_safeZipName"])
     zip_dir = Path(batch["_zipDir"])
-    base_zip_stem = f"{safe_batch_name}-{str(batch['id'])[:8]}-{batch['succeeded']}-of-{batch['total']}"
+    base_zip_stem = _internal_batch_zip_base_stem(batch)
     part_count = max(1, len(entry_parts))
     parts: list[dict] = []
 
@@ -637,6 +641,62 @@ def _internal_batch_zip_remote_download_url(marker: dict, filename: str) -> str:
     if storage_key and storage.is_remote:
         return storage.presign_download(storage_key, filename)
     return str(marker.get("url") or "")
+
+
+def _hydrate_existing_internal_batch_zip_part(part: dict) -> bool:
+    zip_path = Path(part["path"])
+    marker = _read_internal_batch_zip_remote_marker(zip_path, verify_remote=True)
+    if marker:
+        part["sizeBytes"] = int(marker["sizeBytes"])
+        part["storageKey"] = str(marker.get("storageKey") or "")
+        part["remoteUrl"] = _internal_batch_zip_remote_download_url(marker, part["filename"])
+        return True
+    if _internal_batch_zip_exists(zip_path):
+        part["sizeBytes"] = zip_path.stat().st_size
+        return True
+    return False
+
+
+def _archived_internal_batch_zip_part_numbers(path: Path) -> tuple[int, int]:
+    match = re.search(r"-part(\d+)-of(\d+)\.zip$", path.name)
+    if not match:
+        return 1, 1
+    return int(match.group(1)), int(match.group(2))
+
+
+def _existing_internal_batch_zip_parts(batch: dict) -> list[dict]:
+    zip_dir = Path(batch["_zipDir"])
+    if not zip_dir.exists():
+        return []
+    safe_batch_name = str(batch["_safeZipName"])
+    base_stem = _internal_batch_zip_base_stem(batch)
+    paths: dict[str, Path] = {}
+    single_name = f"{base_stem}.zip"
+    for path in zip_dir.iterdir():
+        name = path.name
+        if name == single_name or (name.startswith(f"{base_stem}-part") and name.endswith(".zip")):
+            paths[name] = zip_dir / name
+        elif name == f"{single_name}.remote.json":
+            paths[single_name] = zip_dir / single_name
+        elif name.startswith(f"{base_stem}-part") and name.endswith(".zip.remote.json"):
+            archived_name = name.removesuffix(".remote.json")
+            paths[archived_name] = zip_dir / archived_name
+
+    parts: list[dict] = []
+    for zip_path in sorted(paths.values(), key=lambda candidate: candidate.name):
+        part_index, part_count = _archived_internal_batch_zip_part_numbers(zip_path)
+        part = {
+            "path": zip_path,
+            "filename": f"{safe_batch_name}.zip" if part_count == 1 else f"{safe_batch_name}-part{part_index:02d}-of{part_count:02d}.zip",
+            "index": part_index,
+            "sizeBytes": 0,
+            "estimatedSizeBytes": 0,
+            "entries": [],
+            "partCount": part_count,
+        }
+        if _hydrate_existing_internal_batch_zip_part(part):
+            parts.append(part)
+    return parts
 
 
 def _internal_batch_zip_process_lock(lock_path: Path) -> threading.Lock:
@@ -839,12 +899,19 @@ def _create_remote_internal_batch_zip(batch: dict, task_summaries: list[dict], s
 
 def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: int | None = None) -> dict:
     batch, task_summaries, entries = _internal_batch_zip_entries(db, user_id, batch_id)
-    _raise_for_internal_batch_zip_missing_results(batch)
-    parts = _internal_batch_zip_parts(batch, entries)
+    parts = _existing_internal_batch_zip_parts(batch) or _internal_batch_zip_parts(batch, entries)
+    if not parts:
+        _raise_for_internal_batch_zip_missing_results(batch)
     if part is not None and (part < 1 or part > len(parts)):
         raise HTTPException(status_code=404, detail="download part not found")
 
     selected_parts = parts if part is None else [parts[part - 1]]
+    if selected_parts and all(_hydrate_existing_internal_batch_zip_part(selected_part) for selected_part in selected_parts):
+        db.close()
+        first_part = selected_parts[0]
+        return {"path": first_part["path"], "filename": first_part["filename"], "parts": parts, "partCount": len(parts)}
+
+    _raise_for_internal_batch_zip_missing_results(batch)
     db.close()
     for selected_part in selected_parts:
         zip_path = selected_part["path"]
@@ -870,12 +937,7 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: in
                     finally:
                         if temp_zip_path.exists():
                             temp_zip_path.unlink()
-        marker = _read_internal_batch_zip_remote_marker(zip_path, verify_remote=True)
-        if marker:
-            selected_part["sizeBytes"] = int(marker["sizeBytes"])
-            selected_part["storageKey"] = str(marker.get("storageKey") or "")
-            selected_part["remoteUrl"] = _internal_batch_zip_remote_download_url(marker, selected_part["filename"])
-        else:
+        if not _hydrate_existing_internal_batch_zip_part(selected_part):
             selected_part["sizeBytes"] = zip_path.stat().st_size
 
     first_part = selected_parts[0]

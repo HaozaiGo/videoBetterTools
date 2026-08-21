@@ -158,6 +158,76 @@ def test_admin_internal_batch_zips_lists_ready_local_zip(tmp_path, monkeypatch) 
     assert empty_search_payload["page"]["total"] == 0
 
 
+def test_internal_batch_zip_download_reuses_existing_archive_when_result_record_expired(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path / "uploads"))
+    monkeypatch.setattr(services, "storage", FakeLocalStorage(tmp_path))
+
+    result_path = tmp_path / "expired-result.mp4"
+    result_path.write_bytes(b"fake-video")
+
+    with Session(engine) as db:
+        user = User(id="zip-expired-user", email="zip-expired@example.com", name="Zip Expired User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        input_asset = Asset(
+            id="zip-expired-input",
+            user_id=user.id,
+            kind="video",
+            original_name="input.mp4",
+            mime_type="video/mp4",
+            storage_key="input.mp4",
+            url="/uploads/input.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        output_asset = Asset(
+            id="zip-expired-output",
+            user_id=user.id,
+            kind="result",
+            original_name="expired-result.mp4",
+            mime_type="video/mp4",
+            storage_key="expired-result.mp4",
+            url="/uploads/expired-result.mp4",
+            size_bytes=result_path.stat().st_size,
+            duration_seconds=0,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="zip-expired-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=input_asset.id,
+            output_asset_id=output_asset.id,
+            status="succeeded",
+            params={"internalBatchId": "zip-expired-batch", "internalBatchName": "已归档 ZIP 测试"},
+            estimated_credits=1,
+            frozen_credits=0,
+            charged_credits=1,
+            provider="mock",
+            provider_job_id="zip-expired-provider",
+            output_url="/uploads/expired-result.mp4",
+            progress_percent=100,
+            progress_stage="done",
+            completed_at=now(),
+        )
+        db.add_all([user, wallet, input_asset, output_asset, task])
+        db.commit()
+
+        archive = create_internal_batch_zip(db, user.id, "zip-expired-batch")
+        zip_path = archive["path"]
+        assert zip_path.exists()
+
+        task.output_asset_id = None
+        db.commit()
+
+        reused_archive = create_internal_batch_zip(db, user.id, "zip-expired-batch")
+
+    assert reused_archive["path"] == zip_path
+    assert reused_archive["parts"][0]["sizeBytes"] == zip_path.stat().st_size
+
+
 def test_admin_summary_includes_active_zip_queue(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

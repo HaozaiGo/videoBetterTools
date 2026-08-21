@@ -214,10 +214,26 @@ def _zip_storage_names() -> list[str]:
     return [path.name for path in zip_dir.iterdir()]
 
 
-def _available_zip_paths_for_batch(batch: dict, zip_names: list[str] | None = None) -> list[Path]:
-    zip_dir = settings.upload_path / "internal-batch-zips"
+def _zip_storage_name_index(zip_names: list[str] | None = None) -> dict[str, list[str]]:
     names = zip_names if zip_names is not None else _zip_storage_names()
+    index: dict[str, list[str]] = {}
+    for name in names:
+        zip_name = name.removesuffix(".remote.json")
+        if not zip_name.endswith(".zip"):
+            continue
+        stem = zip_name.removesuffix(".zip")
+        stem = re.sub(r"-part\d+-of\d+$", "", stem)
+        index.setdefault(stem, []).append(name)
+    return index
+
+
+def _available_zip_paths_for_batch(batch: dict, zip_names: list[str] | dict[str, list[str]] | None = None) -> list[Path]:
+    zip_dir = settings.upload_path / "internal-batch-zips"
     base_stem = _zip_base_stem_for_batch(batch)
+    if isinstance(zip_names, dict):
+        names = zip_names.get(base_stem, [])
+    else:
+        names = zip_names if zip_names is not None else _zip_storage_names()
     paths: dict[str, Path] = {}
     single_name = f"{base_stem}.zip"
     for name in names:
@@ -699,7 +715,8 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
     items: list[dict] = []
     tab_counts = {"ready": 0, "processing": 0, "failed": 0}
     zip_jobs = _zip_job_states()
-    zip_names = _zip_storage_names()
+    zip_names = _zip_storage_name_index()
+    verify_missing_results = status in {"processing", "failed"}
     for batch in batches:
         ready_items: list[dict] = []
         user_id = str(batch["userId"])
@@ -738,7 +755,7 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
             continue
         zip_job = zip_jobs.get((user_id, batch_id))
         missing_result_tasks: list[dict] = []
-        if can_have_ready_zip and not zip_job:
+        if can_have_ready_zip and not zip_job and verify_missing_results:
             missing_result_tasks = [task for task in _skipped_tasks_for_batch(db, user_id, batch_id) if task.get("resultMissingReason")]
             if missing_result_tasks:
                 batch = {**batch, "missingResultCount": len(missing_result_tasks)}
