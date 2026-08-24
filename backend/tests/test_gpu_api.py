@@ -153,3 +153,51 @@ def test_subtitle_translate_workflow_submits_single_remote_gpu_job(monkeypatch) 
     assert submitted[0]["regions"] == [{"x": 0, "y": 0.75, "width": 1, "height": 0.08}]
     assert submitted[0]["params"]["subtitleParams"]["removalTarget"] == "subtitle"
     assert submitted[0]["params"]["translateParams"]["targetLanguage"] == "en"
+
+
+def test_subtitle_translate_workflow_can_skip_subtitle_removal(monkeypatch) -> None:
+    translated: list[dict] = []
+
+    monkeypatch.setattr(workflow, "can_submit_remote_video_job", lambda: True)
+    monkeypatch.setattr(workflow, "submit_remote_video_job", lambda **kwargs: pytest.fail("workflow job should not be submitted"))
+    monkeypatch.setattr(workflow, "process_subtitle_removal", lambda *args, **kwargs: pytest.fail("subtitle removal should be skipped"))
+    monkeypatch.setattr(
+        workflow,
+        "process_video_translate",
+        lambda input_key, task_id, params: translated.append({"input_key": input_key, "task_id": task_id, "params": params})
+        or {
+            "remote_job_id": "remote-translate-1",
+            "storage_key": "task-workflow-translated.mp4",
+            "url": "https://cdn.example.test/task-workflow-translated.mp4",
+            "mime_type": "video/mp4",
+            "size_bytes": 0,
+        },
+    )
+
+    result = workflow.process_subtitle_translate_workflow(
+        "model-plaza/input/videos/input.mp4",
+        "task-workflow",
+        {
+            "_async_remote_gpu": True,
+            "runSubtitleRemoval": False,
+            "targetLanguage": "ja",
+            "subtitlePlacement": "bottom",
+            "keepAudio": True,
+        },
+    )
+
+    assert result["remote_job_id"] == "remote-translate-1"
+    assert translated == [
+        {
+            "input_key": "model-plaza/input/videos/input.mp4",
+            "task_id": "task-workflow",
+            "params": {
+                "_async_remote_gpu": True,
+                "runSubtitleRemoval": False,
+                "targetLanguage": "ja",
+                "subtitlePlacement": "bottom",
+                "keepAudio": True,
+                "priority": "standard",
+            },
+        }
+    ]

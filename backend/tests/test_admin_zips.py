@@ -26,6 +26,13 @@ class FakeLocalStorage:
         raise AssertionError("local storage should not presign downloads")
 
 
+class FakeRemoteZipStorage:
+    is_remote = True
+
+    def presign_download(self, storage_key: str, filename: str | None = None) -> str:
+        return f"https://signed.example.test/{storage_key}?filename={filename}"
+
+
 def test_admin_internal_batches_groups_batch_progress() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -156,6 +163,95 @@ def test_admin_internal_batch_zips_lists_ready_local_zip(tmp_path, monkeypatch) 
     assert item["downloadUrl"] == "/api/admin/internal-batch-zips/zip-batch/download?userId=zip-user&part=1"
     assert search_payload["page"]["total"] == 1
     assert empty_search_payload["page"]["total"] == 0
+
+
+def test_admin_existing_zip_part_can_download_incomplete_remote_archive(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path / "uploads"))
+    monkeypatch.setattr(admin, "storage", FakeRemoteZipStorage())
+
+    batch_id = "zip-partial"
+    batch_name = "后台 ZIP 测试（2集）"
+    zip_dir = services.settings.upload_path / "internal-batch-zips"
+    zip_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = admin.safe_storage_name(batch_name).removesuffix(".zip")
+    zip_path = zip_dir / f"{safe_name}-{batch_id[:8]}-1-of-2.zip"
+    zip_path.with_suffix(zip_path.suffix + ".remote.json").write_text(
+        '{"url":"https://expired.example.test/archive.zip","storageKey":"model-plaza/output/zips/zip-partial/archive.zip","sizeBytes":1234}',
+        encoding="utf-8",
+    )
+
+    with Session(engine) as db:
+        user = User(id="zip-partial-user", email="zip-partial@example.com", name="Zip Partial User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        input_asset = Asset(
+            id="zip-partial-input",
+            user_id=user.id,
+            kind="video",
+            original_name="input.mp4",
+            mime_type="video/mp4",
+            storage_key="input.mp4",
+            url="/uploads/input.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        output_asset = Asset(
+            id="zip-partial-output",
+            user_id=user.id,
+            kind="video",
+            original_name="output.mp4",
+            mime_type="video/mp4",
+            storage_key="output.mp4",
+            url="/uploads/output.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        succeeded_task = Task(
+            id="zip-partial-task-1",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=input_asset.id,
+            output_asset_id=output_asset.id,
+            status="succeeded",
+            params={"internalBatchId": batch_id, "internalBatchName": batch_name, "internalBatchTotal": 2, "internalBatchIndex": 1},
+            estimated_credits=1,
+            frozen_credits=0,
+            charged_credits=1,
+            provider="mock",
+            provider_job_id="zip-partial-provider-1",
+            progress_percent=100,
+            progress_stage="done",
+            completed_at=now(),
+        )
+        queued_task = Task(
+            id="zip-partial-task-2",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=input_asset.id,
+            status="queued",
+            params={"internalBatchId": batch_id, "internalBatchName": batch_name, "internalBatchTotal": 2, "internalBatchIndex": 2},
+            estimated_credits=1,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="zip-partial-provider-2",
+            progress_percent=5,
+            progress_stage="queued",
+            completed_at=None,
+        )
+        db.add_all([user, wallet, input_asset, output_asset, succeeded_task, queued_task])
+        db.commit()
+
+        part = admin.admin_existing_internal_batch_zip_part(db, user.id, batch_id, part=1)
+
+    assert part == {
+        "filename": f"{safe_name}.zip",
+        "remoteUrl": f"https://signed.example.test/model-plaza/output/zips/zip-partial/archive.zip?filename={safe_name}.zip",
+        "path": str(zip_path),
+    }
 
 
 def test_internal_batch_zip_download_reuses_existing_archive_when_result_record_expired(tmp_path, monkeypatch) -> None:

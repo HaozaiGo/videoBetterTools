@@ -56,6 +56,7 @@ function paramSummary(task: Task) {
     modelLabel ? `模型 ${modelLabel}` : "",
     typeof params.resolution === "string" ? `清晰度 ${params.resolution}` : "",
     typeof params.enhanceMode === "string" ? `模式 ${params.enhanceMode === "natural" ? "自然增强" : "高质量超分"}` : "",
+    params.runSubtitleRemoval === false ? "流程 跳过去字幕" : "",
     typeof params.targetLanguage === "string" ? `目标语言 ${translateLanguageLabel(params.targetLanguage)}` : "",
     typeof params.subtitlePlacement === "string" ? `字幕位置 ${params.subtitlePlacement === "top" ? "顶部" : params.subtitlePlacement === "middle-lower" ? "中下" : "底部"}` : "",
     typeof params.priority === "string" ? `优先级 ${params.priority === "express" ? "加急" : "标准"}` : "",

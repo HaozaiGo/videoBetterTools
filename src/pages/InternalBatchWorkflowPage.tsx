@@ -120,6 +120,7 @@ export function InternalBatchWorkflowPage() {
   const [batchName, setBatchName] = useState("");
   const [activeBatch, setActiveBatch] = useState<{ id: string; name: string; status?: InternalBatchStatus } | null>(null);
   const [downloadManifest, setDownloadManifest] = useState<InternalBatchDownloadManifest | null>(null);
+  const [runSubtitleRemoval, setRunSubtitleRemoval] = useState(true);
   const [targetLanguage, setTargetLanguage] = useState<TranslateTargetLanguage>("en");
   const [subtitlePlacement, setSubtitlePlacement] = useState<"bottom" | "middle-lower" | "top">("bottom");
   const [keepAudio, setKeepAudio] = useState(true);
@@ -145,7 +146,7 @@ export function InternalBatchWorkflowPage() {
         .filter((item) => item.duration >= internalBatchLongVideoWarningSeconds),
     [durations, files],
   );
-  const longVideoNotice = longVideoItems.length
+  const longVideoNotice = runSubtitleRemoval && longVideoItems.length
     ? `检测到 ${longVideoItems.length} 个超过 15 分钟的视频，ProPainter 会按分片去字幕，单条耗时可能超过 1 小时：${longVideoItems
         .slice(0, 3)
         .map((item) => `第 ${item.index + 1} 个约 ${Math.round(item.duration / 60)} 分钟`)
@@ -372,7 +373,7 @@ export function InternalBatchWorkflowPage() {
       }
       const trimmedBatchName = batchName.trim();
       if (!trimmedBatchName) throw new Error("请先输入本次批量任务的总名称");
-      const firstMissingIndex = files.findIndex((file, index) => !(regionsByFileId[fileBatchId(file, index)] || []).length);
+      const firstMissingIndex = runSubtitleRemoval ? files.findIndex((file, index) => !(regionsByFileId[fileBatchId(file, index)] || []).length) : -1;
       if (firstMissingIndex >= 0) {
         setActiveIndex(firstMissingIndex);
         setIsSelecting(true);
@@ -387,7 +388,7 @@ export function InternalBatchWorkflowPage() {
         const id = fileBatchId(file, index);
         const duration = durations[id] || 30;
         const longVideoWarning =
-          duration >= internalBatchLongVideoWarningSeconds
+          runSubtitleRemoval && duration >= internalBatchLongVideoWarningSeconds
             ? `视频时长约 ${Math.round(duration / 60)} 分钟，ProPainter 去字幕会按分片处理，耗时可能超过 1 小时`
             : "";
         try {
@@ -398,14 +399,15 @@ export function InternalBatchWorkflowPage() {
             durationSeconds: duration,
             onProgress: ({ percent, stage }) => updateItem(id, { percent, stage: `${stage}（${index + 1}/${files.length}）` }),
           });
-          updateItem(id, { status: "creating", stage: "创建去字幕+翻译任务", percent: 100 });
+          updateItem(id, { status: "creating", stage: runSubtitleRemoval ? "创建去字幕+翻译任务" : "创建翻译任务", percent: 100 });
           const payload = await createTask({
             toolSlug: workflowTool.slug,
             inputAssetId: upload.asset.id,
             params: {
               duration,
               mode: "manual",
-              regions: regionsByFileId[id],
+              regions: runSubtitleRemoval ? regionsByFileId[id] : [],
+              runSubtitleRemoval,
               removalTarget: "subtitle",
               modelAdapter,
               maskStrategy,
@@ -493,7 +495,7 @@ export function InternalBatchWorkflowPage() {
       <section className="internal-workflow-head">
         <span>INTERNAL BATCH WORKFLOW</span>
         <h1>批量去字幕并翻译</h1>
-        <p>上传多条视频，逐条框选原字幕区域，选择目标语言后创建顺序处理任务。</p>
+        <p>{runSubtitleRemoval ? "上传多条视频，逐条框选原字幕区域，选择目标语言后创建顺序处理任务。" : "上传多条视频，选择目标语言后直接创建翻译任务。"}</p>
       </section>
 
       <section className="internal-workflow-grid">
@@ -544,7 +546,7 @@ export function InternalBatchWorkflowPage() {
                       <div>
                         <strong>{item.name}</strong>
                         <span>
-                          {formatBytes(item.size)} / {itemRegions.length ? "已框选" : "待框选"}
+                          {formatBytes(item.size)} / {runSubtitleRemoval ? (itemRegions.length ? "已框选" : "待框选") : "无需框选"}
                         </span>
                       </div>
                       <div className="batch-file-progress">
@@ -557,7 +559,7 @@ export function InternalBatchWorkflowPage() {
                         <button
                           className="set-region-button"
                           type="button"
-                          disabled={submitMutation.isPending}
+                          disabled={submitMutation.isPending || !runSubtitleRemoval}
                           onClick={() => {
                             setActiveIndex(index);
                             setDraftRegion(null);
@@ -565,7 +567,7 @@ export function InternalBatchWorkflowPage() {
                             setNotice(itemRegions.length ? `正在查看第 ${index + 1} 个视频，可重新框选。` : `请为第 ${index + 1} 个视频框选字幕区域。`);
                           }}
                         >
-                          {itemRegions.length ? "重设选区" : "设置选区"}
+                          {runSubtitleRemoval ? (itemRegions.length ? "重设选区" : "设置选区") : "无需选区"}
                         </button>
                         <button className="remove-file-button" type="button" disabled={submitMutation.isPending} onClick={() => removeFile(index)}>
                           移除
@@ -578,7 +580,7 @@ export function InternalBatchWorkflowPage() {
             </div>
           ) : null}
 
-          {videoUrl ? (
+          {videoUrl && runSubtitleRemoval ? (
             <section className="video-region-editor">
               <div className="video-preview-wrap">
                 <video ref={videoRef} src={videoUrl} controls playsInline preload="metadata" onLoadedData={updateMediaBox} onLoadedMetadata={updateMediaBox} />
@@ -649,97 +651,103 @@ export function InternalBatchWorkflowPage() {
 
         <aside className="quote-panel internal-workflow-panel">
           <span className="quote-kicker">工作流设置</span>
-          <h2>去字幕 + 翻译</h2>
+          <h2>{runSubtitleRemoval ? "去字幕 + 翻译" : "直接翻译"}</h2>
           <label>
             批次总名称
             <input value={batchName} onChange={(event) => setBatchName(event.target.value)} placeholder="例如：1688口播素材-0618" />
           </label>
-          <div className="internal-settings-group">
-            <strong>去字幕参数</strong>
-            <label>
-              修复模式
-              <select
-                value={modelAdapter}
-                onChange={(event) => {
-                  const nextAdapter = event.target.value as SubtitleModelAdapter;
-                  setModelAdapter(nextAdapter);
-                  if (nextAdapter === "ffmpeg-delogo") {
-                    setMaskStrategy("rectangle");
-                  }
-                }}
-              >
-                <option value="propainter">高质量修复 ProPainter</option>
-                <option value="opencv-inpaint">轻量修复 OpenCV</option>
-                <option value="ffmpeg-delogo">快速遮盖 FFmpeg</option>
-              </select>
-            </label>
-            <label>
-              遮罩策略
-              <select value={maskStrategy} disabled={modelAdapter === "ffmpeg-delogo"} onChange={(event) => setMaskStrategy(event.target.value as SubtitleMaskStrategy)}>
-                <option value="subtitle-text">字幕文字精修</option>
-                <option value="dark-subtitle-line">黑色字幕整行修复</option>
-                <option value="rectangle">整块区域修复</option>
-              </select>
-            </label>
-            {showTextThreshold ? (
+          <label className="checkbox-field">
+            <input type="checkbox" checked={runSubtitleRemoval} onChange={(event) => setRunSubtitleRemoval(event.target.checked)} />
+            先去字幕生成清版视频
+          </label>
+          {runSubtitleRemoval ? (
+            <div className="internal-settings-group">
+              <strong>去字幕参数</strong>
               <label>
-                字幕亮度阈值
-                <input type="number" min={80} max={245} value={textLightThreshold} onChange={(event) => setTextLightThreshold(Number(event.target.value))} />
+                修复模式
+                <select
+                  value={modelAdapter}
+                  onChange={(event) => {
+                    const nextAdapter = event.target.value as SubtitleModelAdapter;
+                    setModelAdapter(nextAdapter);
+                    if (nextAdapter === "ffmpeg-delogo") {
+                      setMaskStrategy("rectangle");
+                    }
+                  }}
+                >
+                  <option value="propainter">高质量修复 ProPainter</option>
+                  <option value="opencv-inpaint">轻量修复 OpenCV</option>
+                  <option value="ffmpeg-delogo">快速遮盖 FFmpeg</option>
+                </select>
               </label>
-            ) : null}
-            {showMaskPadding ? (
               <label>
-                遮罩扩展
-                <input type="number" min={0} max={80} value={maskPadding} onChange={(event) => setMaskPadding(Number(event.target.value))} />
+                遮罩策略
+                <select value={maskStrategy} disabled={modelAdapter === "ffmpeg-delogo"} onChange={(event) => setMaskStrategy(event.target.value as SubtitleMaskStrategy)}>
+                  <option value="subtitle-text">字幕文字精修</option>
+                  <option value="dark-subtitle-line">黑色字幕整行修复</option>
+                  <option value="rectangle">整块区域修复</option>
+                </select>
               </label>
-            ) : null}
-            {showOpenCvControls ? (
-              <>
+              {showTextThreshold ? (
                 <label>
-                  OpenCV 算法
-                  <select value={inpaintMethod} onChange={(event) => setInpaintMethod(event.target.value as InpaintMethod)}>
-                    <option value="telea">Telea</option>
-                    <option value="ns">Navier-Stokes</option>
-                  </select>
+                  字幕亮度阈值
+                  <input type="number" min={80} max={245} value={textLightThreshold} onChange={(event) => setTextLightThreshold(Number(event.target.value))} />
                 </label>
+              ) : null}
+              {showMaskPadding ? (
                 <label>
-                  修复半径
-                  <input type="number" min={1} max={32} value={inpaintRadius} onChange={(event) => setInpaintRadius(Number(event.target.value))} />
+                  遮罩扩展
+                  <input type="number" min={0} max={80} value={maskPadding} onChange={(event) => setMaskPadding(Number(event.target.value))} />
                 </label>
-              </>
-            ) : null}
-          </div>
+              ) : null}
+              {showOpenCvControls ? (
+                <>
+                  <label>
+                    OpenCV 算法
+                    <select value={inpaintMethod} onChange={(event) => setInpaintMethod(event.target.value as InpaintMethod)}>
+                      <option value="telea">Telea</option>
+                      <option value="ns">Navier-Stokes</option>
+                    </select>
+                  </label>
+                  <label>
+                    修复半径
+                    <input type="number" min={1} max={32} value={inpaintRadius} onChange={(event) => setInpaintRadius(Number(event.target.value))} />
+                  </label>
+                </>
+              ) : null}
+            </div>
+          ) : null}
           <div className="internal-settings-group">
             <strong>翻译参数</strong>
-          <label>
-            目标语言
-            <select value={targetLanguage} onChange={(event) => setTargetLanguage(event.target.value as TranslateTargetLanguage)}>
-              {translateTargetLanguages.map((language) => (
-                <option key={language.value} value={language.value}>
-                  {language.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            字幕位置
-            <select value={subtitlePlacement} onChange={(event) => setSubtitlePlacement(event.target.value as "bottom" | "middle-lower" | "top")}>
-              <option value="bottom">底部</option>
-              <option value="middle-lower">中下</option>
-              <option value="top">顶部</option>
-            </select>
-          </label>
-          <label>
-            队列优先级
-            <select value={priority} onChange={(event) => setPriority(event.target.value as "standard" | "express")}>
-              <option value="standard">标准</option>
-              <option value="express">加急</option>
-            </select>
-          </label>
-          <label className="checkbox-field">
-            <input type="checkbox" checked={keepAudio} onChange={(event) => setKeepAudio(event.target.checked)} />
-            保留原音频
-          </label>
+            <label>
+              目标语言
+              <select value={targetLanguage} onChange={(event) => setTargetLanguage(event.target.value as TranslateTargetLanguage)}>
+                {translateTargetLanguages.map((language) => (
+                  <option key={language.value} value={language.value}>
+                    {language.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              字幕位置
+              <select value={subtitlePlacement} onChange={(event) => setSubtitlePlacement(event.target.value as "bottom" | "middle-lower" | "top")}>
+                <option value="bottom">底部</option>
+                <option value="middle-lower">中下</option>
+                <option value="top">顶部</option>
+              </select>
+            </label>
+            <label>
+              队列优先级
+              <select value={priority} onChange={(event) => setPriority(event.target.value as "standard" | "express")}>
+                <option value="standard">标准</option>
+                <option value="express">加急</option>
+              </select>
+            </label>
+            <label className="checkbox-field">
+              <input type="checkbox" checked={keepAudio} onChange={(event) => setKeepAudio(event.target.checked)} />
+              保留原音频
+            </label>
           </div>
           <div className="internal-workflow-summary">
             <dl>
@@ -792,7 +800,7 @@ export function InternalBatchWorkflowPage() {
           <button className="primary wide" type="button" disabled={!files.length || !batchName.trim() || available < totalEstimate || submitMutation.isPending} onClick={() => submitMutation.mutate()}>
             {!files.length ? "先上传视频" : !batchName.trim() ? "先输入批次名称" : available < totalEstimate ? "余额不足" : submitMutation.isPending ? "正在创建..." : `创建 ${files.length} 个工作流任务`}
           </button>
-          <p className="fine-print">每个视频会先去除原字幕，再对处理后的视频生成目标语言硬字幕。</p>
+          <p className="fine-print">{runSubtitleRemoval ? "每个视频会先去除原字幕，再对处理后的视频生成目标语言硬字幕。" : "每个视频会跳过去字幕，直接基于源视频生成目标语言硬字幕。"}</p>
         </aside>
       </section>
     </div>

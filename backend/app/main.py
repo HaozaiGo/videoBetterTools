@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from app.admin import admin_clear_failed_task_count, admin_create_internal_batch_missing_task, admin_delete_internal_batch, admin_delete_internal_batches, admin_delete_internal_batch_zips, admin_gpu_metrics, admin_internal_batches, admin_internal_batch_zips, admin_ledger, admin_regenerate_internal_batch_zip, admin_summary, admin_tasks, admin_users
+from app.admin import admin_clear_failed_task_count, admin_create_internal_batch_missing_task, admin_delete_internal_batch, admin_delete_internal_batches, admin_delete_internal_batch_zips, admin_existing_internal_batch_zip_part, admin_gpu_metrics, admin_internal_batches, admin_internal_batch_zips, admin_ledger, admin_regenerate_internal_batch_zip, admin_summary, admin_tasks, admin_users
 from app.auth import admin_user, create_token, current_user, find_user_by_email, verify_password
 from app.config import settings
 from app.database import SessionLocal, get_db
@@ -572,6 +572,12 @@ def admin_internal_batch_zip_download_endpoint(
     db: Session = Depends(get_db),
     _admin: User = Depends(admin_user),
 ):
+    existing = admin_existing_internal_batch_zip_part(db, user_id, batch_id, part)
+    if existing:
+        remote_url = existing.get("remoteUrl")
+        if remote_url:
+            return RedirectResponse(str(remote_url), status_code=302)
+        return FileResponse(str(existing["path"]), media_type="application/zip", filename=str(existing["filename"]), content_disposition_type="attachment")
     archive = create_internal_batch_zip(db, user_id, batch_id, part=part)
     selected = next((item for item in archive["parts"] if item["index"] == part), None)
     if selected is None:

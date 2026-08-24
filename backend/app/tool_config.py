@@ -122,7 +122,7 @@ TOOLS = [
         "category": "video",
         "categoryName": "视频工具",
         "name": "批量去字幕并翻译",
-        "summary": "内部批量工作流：先去除原字幕，再生成目标语言硬字幕视频。",
+        "summary": "内部批量工作流：可先去除原字幕，再生成目标语言硬字幕视频。",
         "route": "/internal/batch-workflow",
         "icon": "translate",
         "status": "online",
@@ -134,7 +134,7 @@ TOOLS = [
             "minimumCredits": 0,
             "priorityMultiplier": {"standard": 1, "express": 1},
         },
-        "inputs": ["duration", "targetLanguage", "subtitlePlacement", "keepAudio", "priority"],
+        "inputs": ["duration", "runSubtitleRemoval", "targetLanguage", "subtitlePlacement", "keepAudio", "priority"],
     },
     {
         "slug": "image-cleanup",

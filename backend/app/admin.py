@@ -287,6 +287,31 @@ def _ready_zip_parts_for_batch(batch: dict, zip_paths: list[Path] | None = None)
     return parts
 
 
+def admin_existing_internal_batch_zip_part(db: Session, user_id: str, batch_id: str, part: int = 1) -> dict | None:
+    batch_status = internal_batch_status(db, user_id, batch_id)
+    batch = {
+        "batchId": batch_status["id"],
+        "batchName": batch_status["name"],
+        "total": batch_status["total"],
+        "succeeded": batch_status["succeeded"],
+    }
+    safe_batch_name = safe_storage_name(str(batch.get("batchName") or batch_id or "内部批量任务")).removesuffix(".zip")
+    for zip_path in _available_zip_paths_for_batch(batch):
+        part_index, part_count = _zip_part_numbers(zip_path)
+        if part_index != part:
+            continue
+        filename = f"{safe_batch_name}.zip" if part_count == 1 else f"{safe_batch_name}-part{part_index:02d}-of{part_count:02d}.zip"
+        marker = _read_zip_remote_marker(zip_path)
+        if marker:
+            storage_key = str(marker.get("storageKey") or "").strip()
+            remote_url = storage.presign_download(storage_key, filename) if storage_key and storage.is_remote else str(marker.get("url") or "")
+            if remote_url:
+                return {"filename": filename, "remoteUrl": remote_url, "path": str(zip_path)}
+        if zip_path.exists() and zip_path.is_file() and zip_path.stat().st_size > 0:
+            return {"filename": filename, "path": str(zip_path)}
+    return None
+
+
 ADMIN_ZIP_STATUS_FILTERS = {"ready", "processing", "failed"}
 ADMIN_INTERNAL_BATCH_STATUS_FILTERS = {"all", "processing", "succeeded", "failed"}
 SKIPPED_TASK_STATUSES = {"failed", "cancelled", "queued", "processing"}

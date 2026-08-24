@@ -359,6 +359,7 @@ export type ToolFormValues = {
   languageCount: number;
   mode: "manual" | "auto";
   regions: WatermarkRegion[];
+  runSubtitleRemoval?: boolean;
   keepAudio: boolean;
   targetLanguage: TranslateTargetLanguage;
   subtitlePlacement: "bottom" | "middle-lower" | "top";

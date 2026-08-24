@@ -3,6 +3,13 @@ from app.video.translate import process_video_translate, translated_output_key
 from app.video.watermark import GpuUnavailableError, VideoProcessingError, process_subtitle_removal
 
 
+def _should_run_subtitle_removal(params: dict) -> bool:
+    value = params.get("runSubtitleRemoval", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return value is not False
+
+
 def process_subtitle_translate_workflow(input_storage_key: str, task_id: str, params: dict) -> dict:
     subtitle_params = {
         **params,
@@ -19,6 +26,9 @@ def process_subtitle_translate_workflow(input_storage_key: str, task_id: str, pa
         "keepAudio": params.get("keepAudio", True),
         "priority": params.get("priority") or "standard",
     }
+    if not _should_run_subtitle_removal(params):
+        return process_video_translate(input_storage_key, task_id, translate_params)
+
     if params.get("_async_remote_gpu") and can_submit_remote_video_job():
         try:
             return submit_remote_video_job(
