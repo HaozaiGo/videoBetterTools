@@ -1,4 +1,5 @@
 from datetime import timedelta
+import zipfile
 
 import pytest
 from sqlalchemy import create_engine
@@ -99,6 +100,8 @@ def test_admin_internal_batch_zips_lists_ready_local_zip(tmp_path, monkeypatch) 
 
     result_path = tmp_path / "result.mp4"
     result_path.write_bytes(b"fake-video")
+    subtitle_path = tmp_path / "subtitle-en.srt"
+    subtitle_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
 
     with Session(engine) as db:
         user = User(id="zip-user", email="zip@example.com", name="Zip User", role="user", status="active")
@@ -134,7 +137,19 @@ def test_admin_internal_batch_zips_lists_ready_local_zip(tmp_path, monkeypatch) 
             input_asset_id=input_asset.id,
             output_asset_id=output_asset.id,
             status="succeeded",
-            params={"internalBatchId": "zip-batch", "internalBatchName": "后台 ZIP 测试"},
+            params={
+                "internalBatchId": "zip-batch",
+                "internalBatchName": "后台 ZIP 测试",
+                "subtitleArtifacts": [
+                    {
+                        "language": "en",
+                        "filename": "en.srt",
+                        "storage_key": "subtitle-en.srt",
+                        "mime_type": "application/x-subrip",
+                        "size_bytes": subtitle_path.stat().st_size,
+                    }
+                ],
+            },
             estimated_credits=1,
             frozen_credits=0,
             charged_credits=1,
@@ -148,7 +163,7 @@ def test_admin_internal_batch_zips_lists_ready_local_zip(tmp_path, monkeypatch) 
         db.add_all([user, wallet, input_asset, output_asset, task])
         db.commit()
 
-        create_internal_batch_zip(db, user.id, "zip-batch")
+        archive = create_internal_batch_zip(db, user.id, "zip-batch")
         monkeypatch.setattr(admin, "plan_internal_batch_zip", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("zip listing should not re-plan ready batches")))
         payload = admin.admin_internal_batch_zips(db)
         search_payload = admin.admin_internal_batch_zips(db, name="后台 ZIP")
@@ -161,6 +176,10 @@ def test_admin_internal_batch_zips_lists_ready_local_zip(tmp_path, monkeypatch) 
     assert item["source"] == "local"
     assert item["sizeBytes"] > 0
     assert item["downloadUrl"] == "/api/admin/internal-batch-zips/zip-batch/download?userId=zip-user&part=1"
+    with zipfile.ZipFile(archive["path"]) as zip_file:
+        names = zip_file.namelist()
+    assert any(name.endswith(".mp4") for name in names)
+    assert any(name.endswith("-en.srt") for name in names)
     assert search_payload["page"]["total"] == 1
     assert empty_search_payload["page"]["total"] == 0
 

@@ -943,6 +943,55 @@ def _upload_result_with_deadline(job_id: str, output_path: Path) -> dict:
     return dict(payload.get("result") or {})
 
 
+def _subtitle_artifact_storage_key(job_id: str, language: str, filename: str) -> str:
+    config = _result_upload_config(job_id)
+    result_key = str(config.get("storage_key") or "").strip("/")
+    safe_language = _safe_zip_id(language or "subtitle").removesuffix(".zip") or "subtitle"
+    safe_filename = Path(filename or f"{safe_language}.srt").name
+    if result_key:
+        base = result_key.rsplit(".", 1)[0]
+        return f"{base}-{safe_language}.srt"
+    now = datetime.now(timezone.utc)
+    return f"model-plaza/output/subtitles/{now:%Y/%m/%d}/{job_id}-{safe_filename}"
+
+
+def _upload_subtitle_artifacts(job_id: str, work_dir: Path) -> list[dict]:
+    artifacts: list[dict] = []
+    manifests = sorted(work_dir.glob("**/subtitle-artifacts.json"))
+    if not manifests:
+        return artifacts
+    if not _tos_enabled():
+        return artifacts
+    seen_languages: set[str] = set()
+    for manifest_path in manifests:
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for item in payload.get("items") or []:
+            language = str(item.get("language") or "").strip()
+            local_path = Path(str(item.get("path") or ""))
+            if not language or language in seen_languages or not local_path.exists() or not local_path.is_file():
+                continue
+            filename = Path(str(item.get("filename") or f"{language}.srt")).name
+            object_key = _subtitle_artifact_storage_key(job_id, language, filename)
+            uploaded = _upload_file_to_tos_with_deadline(object_key, local_path, "MODEL_PLAZA_GPU_SUBTITLE_UPLOAD_TOTAL_TIMEOUT", 300)
+            if not uploaded:
+                continue
+            seen_languages.add(language)
+            artifacts.append(
+                {
+                    "language": language,
+                    "filename": filename,
+                    "storage_key": uploaded["storage_key"],
+                    "url": uploaded["url"],
+                    "mime_type": item.get("mime_type") or "application/x-subrip",
+                    "size_bytes": uploaded["size_bytes"],
+                }
+            )
+    return artifacts
+
+
 def _tail_text(path: Path, max_chars: int = 12000) -> str:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -1168,6 +1217,7 @@ def _run_model_job(job_id: str) -> None:
             return
         _write_status(job_id, status="uploading", upload_started_at=time.time())
         result_updates = _upload_result_with_deadline(job_id, output_path)
+        subtitle_artifacts = _upload_subtitle_artifacts(job_id, work_dir)
         cached_path = _persist_result_cache(str(result_updates.get("result_storage_key") or ""), output_path)
         _write_status(
             job_id,
@@ -1176,6 +1226,7 @@ def _run_model_job(job_id: str) -> None:
             result_path=str(cached_path or output_path),
             progress_percent=100,
             progress_stage="远端处理完成",
+            subtitle_artifacts=subtitle_artifacts,
             **result_updates,
         )
         _cleanup_result_cache_for_watermark()

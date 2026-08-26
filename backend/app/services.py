@@ -508,6 +508,7 @@ def _internal_batch_zip_entries(db: Session, user_id: str, batch_id: str) -> tup
                 "size": entry_size,
             }
         )
+        entries.extend(_subtitle_artifact_entries(task, index, used_names))
     batch["missingResultTasks"] = missing_result_tasks
     batch["missingResults"] = len(missing_result_tasks)
     task_summaries = [
@@ -522,6 +523,41 @@ def _internal_batch_zip_entries(db: Session, user_id: str, batch_id: str) -> tup
         for task in tasks
     ]
     return batch, task_summaries, entries
+
+
+def _subtitle_artifact_entries(task: Task, index: int, used_names: set[str]) -> list[dict]:
+    params = task.params if isinstance(task.params, dict) else {}
+    artifacts = params.get("subtitleArtifacts")
+    if not isinstance(artifacts, list):
+        return []
+    entries: list[dict] = []
+    input_name = task.input_asset.original_name if task.input_asset else task.id
+    base_stem = safe_storage_name(Path(input_name or task.id).stem or task.id)
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        storage_key = str(artifact.get("storage_key") or artifact.get("storageKey") or "").strip()
+        if not storage_key:
+            continue
+        language = safe_storage_name(str(artifact.get("language") or "subtitle")).removesuffix(".srt") or "subtitle"
+        filename = safe_storage_name(str(artifact.get("filename") or f"{language}.srt"))
+        suffix = Path(filename).suffix or ".srt"
+        zip_name = f"{index:03d}-{base_stem}-{language}{suffix}"
+        duplicate_index = 1
+        while zip_name in used_names:
+            zip_name = f"{index:03d}-{task.id[:8]}-{duplicate_index}-{base_stem}-{language}{suffix}"
+            duplicate_index += 1
+        used_names.add(zip_name)
+        entries.append(
+            {
+                "task_id": task.id,
+                "source_path": None,
+                "storage_key": storage_key,
+                "zip_name": zip_name,
+                "size": int(artifact.get("size_bytes") or artifact.get("sizeBytes") or 0),
+            }
+        )
+    return entries
 
 
 def _internal_batch_zip_missing_result_detail(batch: dict) -> str:

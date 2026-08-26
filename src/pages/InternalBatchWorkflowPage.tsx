@@ -121,7 +121,9 @@ export function InternalBatchWorkflowPage() {
   const [activeBatch, setActiveBatch] = useState<{ id: string; name: string; status?: InternalBatchStatus } | null>(null);
   const [downloadManifest, setDownloadManifest] = useState<InternalBatchDownloadManifest | null>(null);
   const [runSubtitleRemoval, setRunSubtitleRemoval] = useState(true);
+  const [generateMultiLanguageSrt, setGenerateMultiLanguageSrt] = useState(true);
   const [targetLanguage, setTargetLanguage] = useState<TranslateTargetLanguage>("en");
+  const [targetLanguages, setTargetLanguages] = useState<TranslateTargetLanguage[]>(["en"]);
   const [subtitlePlacement, setSubtitlePlacement] = useState<"bottom" | "middle-lower" | "top">("bottom");
   const [keepAudio, setKeepAudio] = useState(true);
   const [priority, setPriority] = useState<"standard" | "express">("standard");
@@ -162,6 +164,14 @@ export function InternalBatchWorkflowPage() {
   const showTextThreshold = modelAdapter !== "ffmpeg-delogo" && maskStrategy === "subtitle-text";
   const showMaskPadding = modelAdapter !== "ffmpeg-delogo";
   const showOpenCvControls = modelAdapter === "opencv-inpaint";
+
+  const toggleTargetLanguage = (language: TranslateTargetLanguage) => {
+    setTargetLanguages((current) => (current.includes(language) ? current.filter((item) => item !== language) : [...current, language]));
+  };
+
+  useEffect(() => {
+    setTargetLanguages((current) => (current.includes(targetLanguage) ? current : [targetLanguage, ...current]));
+  }, [targetLanguage]);
 
   useEffect(() => {
     if (modelAdapter === "ffmpeg-delogo" && maskStrategy !== "rectangle") {
@@ -420,6 +430,9 @@ export function InternalBatchWorkflowPage() {
               internalBatchTotal: files.length,
               internalBatchIndex: index + 1,
               targetLanguage,
+              targetLanguages: generateMultiLanguageSrt ? (targetLanguages.length ? targetLanguages : [targetLanguage]) : [targetLanguage],
+              generateSrt: generateMultiLanguageSrt,
+              generateMultiLanguageSrt,
               subtitlePlacement,
               keepAudio,
               priority,
@@ -660,6 +673,10 @@ export function InternalBatchWorkflowPage() {
             <input type="checkbox" checked={runSubtitleRemoval} onChange={(event) => setRunSubtitleRemoval(event.target.checked)} />
             先去字幕生成清版视频
           </label>
+          <label className="checkbox-field">
+            <input type="checkbox" checked={generateMultiLanguageSrt} onChange={(event) => setGenerateMultiLanguageSrt(event.target.checked)} />
+            生成多国语言 SRT
+          </label>
           {runSubtitleRemoval ? (
             <div className="internal-settings-group">
               <strong>去字幕参数</strong>
@@ -720,7 +737,7 @@ export function InternalBatchWorkflowPage() {
           <div className="internal-settings-group">
             <strong>翻译参数</strong>
             <label>
-              目标语言
+              硬字幕视频语言
               <select value={targetLanguage} onChange={(event) => setTargetLanguage(event.target.value as TranslateTargetLanguage)}>
                 {translateTargetLanguages.map((language) => (
                   <option key={language.value} value={language.value}>
@@ -729,6 +746,19 @@ export function InternalBatchWorkflowPage() {
                 ))}
               </select>
             </label>
+            {generateMultiLanguageSrt ? (
+              <div className="internal-language-grid">
+                <span>SRT 语言</span>
+                <div>
+                  {translateTargetLanguages.map((language) => (
+                    <label key={language.value} className="checkbox-field compact-checkbox">
+                      <input type="checkbox" checked={targetLanguages.includes(language.value)} onChange={() => toggleTargetLanguage(language.value)} />
+                      {language.label}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             <label>
               字幕位置
               <select value={subtitlePlacement} onChange={(event) => setSubtitlePlacement(event.target.value as "bottom" | "middle-lower" | "top")}>
@@ -800,7 +830,13 @@ export function InternalBatchWorkflowPage() {
           <button className="primary wide" type="button" disabled={!files.length || !batchName.trim() || available < totalEstimate || submitMutation.isPending} onClick={() => submitMutation.mutate()}>
             {!files.length ? "先上传视频" : !batchName.trim() ? "先输入批次名称" : available < totalEstimate ? "余额不足" : submitMutation.isPending ? "正在创建..." : `创建 ${files.length} 个工作流任务`}
           </button>
-          <p className="fine-print">{runSubtitleRemoval ? "每个视频会先去除原字幕，再对处理后的视频生成目标语言硬字幕。" : "每个视频会跳过去字幕，直接基于源视频生成目标语言硬字幕。"}</p>
+          <p className="fine-print">
+            {generateMultiLanguageSrt
+              ? "每个视频会生成硬字幕视频，并把多语言 SRT 一起放入 ZIP。"
+              : runSubtitleRemoval
+                ? "每个视频会先去除原字幕，再对处理后的视频生成目标语言硬字幕。"
+                : "每个视频会跳过去字幕，直接基于源视频生成目标语言硬字幕。"}
+          </p>
         </aside>
       </section>
     </div>

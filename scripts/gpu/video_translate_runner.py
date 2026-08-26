@@ -149,6 +149,18 @@ def _ass_time(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
+def _srt_time(seconds: float) -> str:
+    seconds = max(0, seconds)
+    milliseconds = int(round(seconds * 1000))
+    ms = milliseconds % 1000
+    total_seconds = milliseconds // 1000
+    s = total_seconds % 60
+    total_minutes = total_seconds // 60
+    m = total_minutes % 60
+    h = total_minutes // 60
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
 def _escape_ass_text(value: str) -> str:
     return value.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\n", " ")
 
@@ -291,7 +303,7 @@ def _target_is_english(target_language: str) -> bool:
     return target_language.lower() in {"en", "eng", "english", "英语", "英文"}
 
 
-def _transcribe_segments(input_path: Path, target_language: str) -> list[dict[str, Any]]:
+def _transcribe_source_segments(input_path: Path) -> list[dict[str, Any]]:
     try:
         from faster_whisper import WhisperModel
     except ImportError as exc:
@@ -302,25 +314,45 @@ def _transcribe_segments(input_path: Path, target_language: str) -> list[dict[st
     compute_type = os.environ.get("MODEL_PLAZA_WHISPER_COMPUTE_TYPE", "float16")
     model = WhisperModel(model_name, device=device, compute_type=compute_type)
     source_language = os.environ.get("MODEL_PLAZA_SOURCE_LANGUAGE", "").strip() or None
-    task = "translate" if _target_is_english(target_language) else "transcribe"
     print(
-        f"Whisper model={model_name} device={device} compute_type={compute_type} task={task} source_language={source_language or 'auto'}",
+        f"Whisper model={model_name} device={device} compute_type={compute_type} task=transcribe source_language={source_language or 'auto'}",
         flush=True,
     )
-    segments, _ = model.transcribe(str(input_path), language=source_language, task=task, vad_filter=True)
+    segments, _ = model.transcribe(str(input_path), language=source_language, task="transcribe", vad_filter=True)
 
-    translated: list[dict[str, Any]] = []
+    source_segments: list[dict[str, Any]] = []
     for segment in segments:
         source_text = re.sub(r"\s+", " ", segment.text).strip()
         if not source_text:
             continue
-        output_text = source_text if task == "translate" else _translate_text(source_text, target_language)
-        translated.append(
+        source_segments.append(
             {
                 "start": float(segment.start),
                 "end": float(segment.end),
+                "text": source_text,
+            }
+        )
+    return source_segments
+
+
+def _transcribe_segments(input_path: Path, target_language: str) -> list[dict[str, Any]]:
+    source_segments = _transcribe_source_segments(input_path)
+    return _translate_segments(source_segments, target_language)
+
+
+def _translate_segments(source_segments: list[dict[str, Any]], target_language: str) -> list[dict[str, Any]]:
+    translated: list[dict[str, Any]] = []
+    for segment in source_segments:
+        source_text = str(segment.get("text") or "").strip()
+        if not source_text:
+            continue
+        output_text = _translate_text(source_text, target_language)
+        translated.append(
+            {
+                "start": float(segment.get("start") or 0),
+                "end": float(segment.get("end") or 0),
                 "text": output_text,
-                "sourceText": "" if task == "translate" else source_text,
+                "sourceText": source_text,
             }
         )
     return translated
@@ -362,6 +394,43 @@ def _write_ass(path: Path, segments: list[dict[str, Any]], placement: str, video
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def _write_srt(path: Path, segments: list[dict[str, Any]]) -> None:
+    blocks = []
+    for index, segment in enumerate(segments, start=1):
+        start = float(segment.get("start") or 0)
+        end = max(start + 0.8, float(segment.get("end") or start + 2.5))
+        text = re.sub(r"\s+", " ", str(segment.get("text") or "").strip())
+        if not text:
+            continue
+        blocks.append(f"{index}\n{_srt_time(start)} --> {_srt_time(end)}\n{text}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n\n".join(blocks) + ("\n" if blocks else ""), encoding="utf-8")
+
+
+def _target_languages(params: dict[str, Any], fallback: str) -> list[str]:
+    raw = params.get("targetLanguages")
+    values: list[str] = []
+    if isinstance(raw, list):
+        values = [str(item).strip() for item in raw]
+    elif isinstance(raw, str):
+        values = [item.strip() for item in raw.split(",")]
+    if not values:
+        values = [fallback]
+    normalized: list[str] = []
+    for value in values:
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "", value)
+        if safe and safe not in normalized:
+            normalized.append(safe)
+    return normalized or [fallback]
+
+
+def _write_subtitle_artifact_manifest(workdir: Path, artifacts: list[dict[str, Any]]) -> None:
+    if not artifacts:
+        return
+    manifest_path = workdir / "subtitle-artifacts.json"
+    manifest_path.write_text(json.dumps({"items": artifacts}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _subtitle_filter_path(path: Path) -> str:
@@ -559,25 +628,48 @@ def main() -> None:
     workdir = Path(args.workdir).expanduser().resolve()
     params = _load_json(params_path)
     target_language = str(params.get("targetLanguage") or "en")
+    target_languages = _target_languages(params, target_language)
+    generate_srt = bool(params.get("generateSrt") or params.get("generateMultiLanguageSrt") or params.get("srtMode"))
     placement = str(params.get("subtitlePlacement") or "bottom")
     keep_audio = bool(params.get("keepAudio", True))
 
     _write_progress(15, "读取视频信息")
     duration = _probe_duration(input_path)
     video_width, video_height = _probe_video_size(input_path)
-    _write_progress(30, "识别语音并翻译英文字幕")
-    segments = _transcribe_segments(input_path, target_language)
-    if not segments:
+    _write_progress(30, "识别语音字幕")
+    source_segments = _transcribe_source_segments(input_path)
+    if not source_segments:
         if os.environ.get("MODEL_PLAZA_TRANSLATE_ALLOW_PLACEHOLDER", "").lower() in {"1", "true", "yes"}:
-            segments = _fallback_segments(duration)
+            source_segments = _fallback_segments(duration)
         elif os.environ.get("MODEL_PLAZA_TRANSLATE_EMPTY_SEGMENTS_MODE", "copy").lower() in {"copy", "passthrough", "success"}:
             _copy_input_as_success(input_path, output_path, workdir, duration)
             return
         else:
             raise RuntimeError("speech recognition returned no subtitle segments.")
+    _write_progress(45, "翻译硬字幕")
+    segments = _translate_segments(source_segments, target_language)
     segments_path = workdir / "segments.json"
     segments_path.parent.mkdir(parents=True, exist_ok=True)
     segments_path.write_text(json.dumps(segments, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if generate_srt:
+        artifacts: list[dict[str, Any]] = []
+        artifact_dir = workdir / "subtitle-artifacts"
+        for index, language in enumerate(target_languages, start=1):
+            _write_progress(min(68, 45 + index), f"生成 {language} SRT 字幕")
+            language_segments = segments if language == target_language else _translate_segments(source_segments, language)
+            srt_path = artifact_dir / f"{language}.srt"
+            _write_srt(srt_path, language_segments)
+            artifacts.append(
+                {
+                    "language": language,
+                    "path": str(srt_path),
+                    "filename": f"{language}.srt",
+                    "mime_type": "application/x-subrip",
+                    "size_bytes": srt_path.stat().st_size,
+                }
+            )
+        _write_subtitle_artifact_manifest(workdir, artifacts)
 
     _write_progress(70, "生成字幕文件")
     ass_path = workdir / "translated.ass"

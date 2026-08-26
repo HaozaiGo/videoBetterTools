@@ -140,12 +140,15 @@ def process_video_translate(input_storage_key: str, task_id: str, params: dict) 
         result_upload=None,
     )
     if remote_result:
-        return {
+        result = {
             "storage_key": str(remote_result["storage_key"]),
             "url": str(remote_result["url"]),
             "mime_type": str(remote_result.get("mime_type") or "video/mp4"),
             "size_bytes": int(remote_result.get("size_bytes") or 0),
         }
+        if isinstance(remote_result.get("subtitle_artifacts"), list):
+            result["subtitle_artifacts"] = remote_result["subtitle_artifacts"]
+        return result
     if params.get("_defer_result_upload"):
         return _local_result(output_key, output_path)
     return _final_result(output_key, output_path)

@@ -262,6 +262,7 @@ def _write_result_meta(status: dict, meta_path: Path) -> bool:
                 "url": result_url,
                 "mime_type": status.get("result_mime_type") or "video/mp4",
                 "size_bytes": int(status.get("result_size_bytes") or 0),
+                "subtitle_artifacts": status.get("subtitle_artifacts") or [],
             },
             ensure_ascii=False,
         ),

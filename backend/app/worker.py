@@ -217,6 +217,11 @@ def finalize_provider_job_result(task_id: str, provider_job_id: str, result: dic
         task = db.get(Task, task_id)
         if task is None or task.provider_job_id != provider_job_id or task.status in {"succeeded", "failed", "cancelled"}:
             return
+        subtitle_artifacts = finalized.get("subtitle_artifacts")
+        if isinstance(subtitle_artifacts, list):
+            params = dict(task.params or {})
+            params["subtitleArtifacts"] = subtitle_artifacts
+            task.params = params
         provider_callback(
             db,
             provider_job_id,
@@ -495,6 +500,7 @@ def _finalize_remote_gpu_result(task_id: str, provider_job_id: str, result: dict
                         "url": result_url,
                         "mime_type": str(status.get("result_mime_type") or result.get("mime_type") or "video/mp4"),
                         "size_bytes": size_bytes,
+                        "subtitle_artifacts": status.get("subtitle_artifacts") or [],
                     }
                 local_path = settings.upload_path / output_key
                 download_remote_video_result(remote_job_id, local_path)
@@ -573,6 +579,8 @@ def _finalize_subtitle_translate_workflow_result(task_id: str, provider_job_id: 
             "mime_type": str(translate_result.get("mime_type") or "video/mp4"),
             "size_bytes": int(translate_result.get("size_bytes") or 0),
         }
+        if isinstance(translate_result.get("subtitle_artifacts"), list):
+            finalized["subtitle_artifacts"] = translate_result["subtitle_artifacts"]
     if storage.is_remote:
         try:
             storage.delete_remote(str(intermediate["storage_key"]))
