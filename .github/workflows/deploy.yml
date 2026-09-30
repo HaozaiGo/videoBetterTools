@@ -240,7 +240,7 @@ jobs:
           ASSET_RETENTION_HOURS=48
           CLEANUP_RETENTION_HOURS=48
           CLEANUP_INTERVAL_SECONDS=3600
-          INTERNAL_BATCH_ZIP_RETENTION_HOURS=12
+          INTERNAL_BATCH_ZIP_RETENTION_HOURS=192
           INTERNAL_BATCH_ZIP_PART_MAX_BYTES=10737418240
           INTERNAL_BATCH_ZIP_PART_MAX_FILES=200
           CLEANUP_DISK_HIGH_WATERMARK_PERCENT=80
@@ -296,7 +296,7 @@ jobs:
           set_env_value ASSET_RETENTION_HOURS 48
           set_env_value CLEANUP_RETENTION_HOURS 48
           set_env_value CLEANUP_INTERVAL_SECONDS 3600
-          set_env_value INTERNAL_BATCH_ZIP_RETENTION_HOURS 12
+          set_env_value INTERNAL_BATCH_ZIP_RETENTION_HOURS 192
           set_env_value INTERNAL_BATCH_ZIP_PART_MAX_BYTES 10737418240
           set_env_value INTERNAL_BATCH_ZIP_PART_MAX_FILES 200
           set_env_value CLEANUP_DISK_HIGH_WATERMARK_PERCENT 80
@@ -339,6 +339,12 @@ jobs:
           zip_worker_replicas="${zip_worker_replicas:-8}"
           result_worker_replicas="$(grep -E '^RESULT_WORKER_REPLICAS=' .env | tail -n 1 | cut -d= -f2- || true)"
           result_worker_replicas="${result_worker_replicas:-8}"
+
+          cleanup_service_label="$(docker inspect model-plaza-cleanup-1 --format '{{ index .Config.Labels "com.docker.compose.service" }}' 2>/dev/null || true)"
+          if [ -n "$cleanup_service_label" ] && [ "$cleanup_service_label" != "cleanup" ]; then
+            docker rm -f model-plaza-cleanup-1
+          fi
+
           APP_VERSION="$GITHUB_SHA" docker compose -f docker-compose.prod.yml up -d --build --remove-orphans --scale "worker=$worker_replicas" --scale "zip-worker=$zip_worker_replicas" --scale "result-worker=$result_worker_replicas"
           docker compose -f docker-compose.prod.yml ps
 
