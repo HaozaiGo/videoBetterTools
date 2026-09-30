@@ -88,6 +88,39 @@ def test_internal_batch_zip_cleanup_defaults_to_twelve_hours(tmp_path, monkeypat
     assert fresh_zip.exists()
 
 
+def test_internal_batch_zip_cleanup_removes_remote_marker_and_object(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cleanup.settings, "upload_dir", str(tmp_path))
+    fake_storage = FakeRemoteStorage({"model-plaza/output/zips/old.zip"})
+    monkeypatch.setattr(cleanup, "storage", fake_storage)
+    cutoff = cleanup.utc_now() - timedelta(days=8)
+
+    old_zip = tmp_path / "internal-batch-zips" / "old.zip"
+    old_zip.parent.mkdir()
+    old_zip.write_bytes(b"zip")
+    old_marker = old_zip.with_suffix(old_zip.suffix + ".remote.json")
+    old_marker.write_text(
+        '{"storageKey":"model-plaza/output/zips/old.zip","sizeBytes":3,"url":"https://example.test/old.zip"}',
+        encoding="utf-8",
+    )
+    _age_path(old_zip, 9 * 24 * 60 * 60)
+
+    fresh_zip = tmp_path / "internal-batch-zips" / "fresh.zip"
+    fresh_zip.write_bytes(b"zip")
+    fresh_marker = fresh_zip.with_suffix(fresh_zip.suffix + ".remote.json")
+    fresh_marker.write_text(
+        '{"storageKey":"model-plaza/output/zips/fresh.zip","sizeBytes":3,"url":"https://example.test/fresh.zip"}',
+        encoding="utf-8",
+    )
+    _age_path(fresh_zip, 7 * 24 * 60 * 60)
+
+    assert cleanup.cleanup_internal_batch_zips(cutoff) == 1
+    assert fake_storage.deleted_remote == ["model-plaza/output/zips/old.zip"]
+    assert not old_zip.exists()
+    assert not old_marker.exists()
+    assert fresh_zip.exists()
+    assert fresh_marker.exists()
+
+
 def test_cleanup_synced_local_files_only_removes_remote_confirmed_files(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(cleanup.settings, "upload_dir", str(tmp_path))
     monkeypatch.setattr(cleanup, "storage", FakeRemoteStorage({"result.mp4"}))

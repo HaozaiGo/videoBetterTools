@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import shutil
 import time
@@ -84,6 +85,21 @@ def cleanup_internal_batch_zips(cutoff: datetime | None = None, dry_run: bool = 
     for zip_path in zip_dir.glob("*.zip"):
         if not zip_path.is_file() or not _is_older_than(zip_path, cutoff):
             continue
+        marker_path = zip_path.with_suffix(zip_path.suffix + ".remote.json")
+        if marker_path.exists():
+            storage_key = ""
+            try:
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                storage_key = str(marker.get("storageKey") or "").strip()
+            except (OSError, json.JSONDecodeError):
+                storage_key = ""
+            if storage_key and storage.is_remote:
+                if dry_run:
+                    pass
+                elif storage.remote_exists(storage_key) and not storage.delete_remote(storage_key):
+                    logger.warning("failed to delete expired remote ZIP object: %s", storage_key)
+                    continue
+            _remove_path(marker_path, dry_run)
         if _remove_path(zip_path, dry_run):
             removed += 1
     return removed
