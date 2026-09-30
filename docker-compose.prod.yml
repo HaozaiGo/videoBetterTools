@@ -161,7 +161,7 @@ services:
   cleanup:
     image: model-plaza-api:${APP_VERSION:-latest}
     restart: unless-stopped
-    command: python -m app.cleanup --loop
+    command: /app/backend/.venv/bin/python -m app.cleanup --loop
     env_file:
       - .env
     environment:
