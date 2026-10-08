@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from app.admin import admin_clear_failed_task_count, admin_create_internal_batch_missing_task, admin_delete_internal_batch, admin_delete_internal_batches, admin_delete_internal_batch_zips, admin_existing_internal_batch_zip_part, admin_gpu_metrics, admin_internal_batches, admin_internal_batch_zips, admin_ledger, admin_regenerate_internal_batch_zip, admin_summary, admin_tasks, admin_users
+from app.admin import admin_archive_internal_batch_zip_download, admin_clear_failed_task_count, admin_create_internal_batch_missing_task, admin_delete_internal_batch, admin_delete_internal_batches, admin_delete_internal_batch_zips, admin_existing_internal_batch_zip_part, admin_gpu_metrics, admin_internal_batches, admin_internal_batch_zips, admin_ledger, admin_regenerate_internal_batch_zip, admin_summary, admin_tasks, admin_users
 from app.auth import admin_user, create_token, current_user, find_user_by_email, verify_password
 from app.config import settings
 from app.database import SessionLocal, get_db
@@ -562,6 +562,16 @@ def admin_delete_internal_batch_zips_endpoint(
     _admin: User = Depends(admin_user),
 ) -> dict:
     return admin_delete_internal_batch_zips(db, [item.model_dump() for item in payload.items])
+
+
+@app.get("/api/admin/internal-batch-zips/archive/download")
+def admin_internal_batch_archive_zip_download_endpoint(
+    storage_key: str = Query(..., alias="storageKey"),
+    filename: str = Query("archive.zip"),
+    _admin: User = Depends(admin_user),
+):
+    remote_url = admin_archive_internal_batch_zip_download(storage_key, filename)
+    return RedirectResponse(str(remote_url), status_code=302)
 
 
 @app.get("/api/admin/internal-batch-zips/{batch_id}/download")

@@ -84,7 +84,7 @@ export function AdminZipStoragePage() {
   const allPageSelected = pageKeys.length > 0 && pageKeys.every((key) => selectedKeys.has(key));
   const somePageSelected = pageKeys.some((key) => selectedKeys.has(key));
   const deleteMutation = useMutation({
-    mutationFn: () => deleteAdminInternalBatchZips(selectedZips.map((zip) => ({ userId: zip.userId, batchId: zip.batchId, partIndex: zip.partIndex }))),
+    mutationFn: () => deleteAdminInternalBatchZips(selectedZips.map((zip) => ({ userId: zip.userId, batchId: zip.batchId, partIndex: zip.partIndex, storageKey: zip.storageKey, filename: zip.filename }))),
     onSuccess: (payload) => {
       setSelectedKeys(new Set());
       setNotice(payload.failed.length ? `已删除 ${payload.deleted} 行，${payload.failed.length} 行删除失败。` : `已删除 ${payload.deleted} 行。`);

@@ -287,6 +287,112 @@ def _ready_zip_parts_for_batch(batch: dict, zip_paths: list[Path] | None = None)
     return parts
 
 
+def _archive_zip_id(storage_key: str) -> str:
+    return f"archive-{sha256(storage_key.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _archive_zip_name_parts(filename: str) -> tuple[str, int, int]:
+    stem = filename.removesuffix(".zip")
+    stem = re.sub(r"-part\d+-of\d+$", "", stem)
+    match = re.search(r"^(.+)-[0-9a-fA-F]{8}-(\d+)-of-(\d+)$", stem)
+    if not match:
+        return stem or filename, 0, 0
+    return match.group(1), int(match.group(2)), int(match.group(3))
+
+
+def _archive_zip_download_url(storage_key: str, filename: str) -> str:
+    params = f"storageKey={quote(storage_key, safe='')}&filename={quote(filename, safe='')}"
+    return f"/api/admin/internal-batch-zips/archive/download?{params}"
+
+
+def _archive_zip_marker_items(used_storage_keys: set[str], name: str) -> list[dict]:
+    zip_dir = settings.upload_path / "internal-batch-zips"
+    if not zip_dir.exists():
+        return []
+
+    normalized_name = name.strip().lower()
+    items: list[dict] = []
+    for marker_path in zip_dir.glob("*.zip.remote.json"):
+        zip_filename = marker_path.name.removesuffix(".remote.json")
+        if normalized_name and normalized_name not in zip_filename.lower():
+            continue
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        storage_key = str(marker.get("storageKey") or "").strip()
+        size_bytes = int(marker.get("sizeBytes") or 0)
+        if not storage_key or size_bytes <= 0 or storage_key in used_storage_keys:
+            continue
+
+        part_index, part_count = _zip_part_numbers(Path(zip_filename))
+        batch_name, succeeded, total = _archive_zip_name_parts(zip_filename)
+        batch_id = _archive_zip_id(storage_key)
+        if _is_zip_row_deleted(ARCHIVE_ZIP_USER_ID, batch_id, part_index):
+            continue
+        updated_at = int(marker_path.stat().st_mtime * 1000)
+        items.append(
+            {
+                "userId": ARCHIVE_ZIP_USER_ID,
+                "batchId": batch_id,
+                "batchName": batch_name,
+                "total": total,
+                "created": total,
+                "succeeded": succeeded,
+                "failed": 0,
+                "cancelled": 0,
+                "missing": 0,
+                "activeProcessing": 0,
+                "processing": 0,
+                "createdAt": updated_at,
+                "updatedAt": updated_at,
+                "zipStatus": "ready",
+                "zipStage": "ready",
+                "zipJob": None,
+                "partIndex": part_index,
+                "partCount": part_count,
+                "filename": zip_filename,
+                "sizeBytes": size_bytes,
+                "estimatedSizeBytes": size_bytes,
+                "source": "tos",
+                "storageKey": storage_key,
+                "downloadUrl": _archive_zip_download_url(storage_key, zip_filename),
+                "message": "历史归档 ZIP",
+                "skippedTasks": [],
+            }
+        )
+    return items
+
+
+def admin_archive_internal_batch_zip_download(storage_key: str, filename: str) -> str:
+    normalized_key = storage_key.strip()
+    normalized_filename = safe_storage_name(filename.strip() or Path(normalized_key).name or "archive.zip")
+    if not normalized_key:
+        raise HTTPException(status_code=404, detail="ZIP 文件不存在")
+
+    zip_dir = settings.upload_path / "internal-batch-zips"
+    marker_found = False
+    if zip_dir.exists():
+        for marker_path in zip_dir.glob("*.zip.remote.json"):
+            try:
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if str(marker.get("storageKey") or "").strip() == normalized_key:
+                marker_found = True
+                break
+    if not marker_found:
+        raise HTTPException(status_code=404, detail="ZIP 归档记录不存在")
+    if storage.is_remote and not storage.remote_exists(normalized_key):
+        raise HTTPException(status_code=404, detail="远端 ZIP 文件不存在")
+    if storage.is_remote:
+        return storage.presign_download(normalized_key, normalized_filename)
+    local_path = storage.local_path(normalized_key)
+    if not local_path.exists():
+        raise HTTPException(status_code=404, detail="ZIP 文件不存在")
+    return str(local_path)
+
+
 def admin_existing_internal_batch_zip_part(db: Session, user_id: str, batch_id: str, part: int = 1) -> dict | None:
     batch_status = internal_batch_status(db, user_id, batch_id)
     batch = {
@@ -315,6 +421,7 @@ def admin_existing_internal_batch_zip_part(db: Session, user_id: str, batch_id: 
 ADMIN_ZIP_STATUS_FILTERS = {"ready", "processing", "failed"}
 ADMIN_INTERNAL_BATCH_STATUS_FILTERS = {"all", "processing", "succeeded", "failed"}
 SKIPPED_TASK_STATUSES = {"failed", "cancelled", "queued", "processing"}
+ARCHIVE_ZIP_USER_ID = "__archive_zip__"
 
 
 def _serialize_job_time(value) -> int | None:
@@ -753,6 +860,7 @@ def _admin_internal_batch_ready_zips(db: Session, page: int, per_page: int, name
     ).all()
 
     items: list[dict] = []
+    used_storage_keys: set[str] = set()
     for row in rows:
         batch = _batch_from_zip_row(row)
         user_id = str(batch["userId"])
@@ -780,7 +888,11 @@ def _admin_internal_batch_ready_zips(db: Session, page: int, per_page: int, name
                     "skippedTasks": [],
                 }
             )
+            storage_key = str(part.get("storageKey") or "")
+            if storage_key:
+                used_storage_keys.add(storage_key)
 
+    items.extend(_archive_zip_marker_items(used_storage_keys, name))
     items.sort(key=lambda item: (int(item["updatedAt"]), str(item["batchId"]), int(item["partIndex"])), reverse=True)
     total = len(items)
     start = (page - 1) * per_page
@@ -948,6 +1060,39 @@ def _delete_zip_part_file(part: dict) -> tuple[bool, str]:
     return deleted, "" if deleted else "ZIP 文件不存在或已删除"
 
 
+def _delete_archive_zip(storage_key: str) -> tuple[bool, str]:
+    normalized_key = storage_key.strip()
+    if not normalized_key:
+        return False, "ZIP 文件不存在或已删除"
+
+    zip_dir = settings.upload_path / "internal-batch-zips"
+    marker_paths: list[Path] = []
+    if zip_dir.exists():
+        for marker_path in zip_dir.glob("*.zip.remote.json"):
+            try:
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if str(marker.get("storageKey") or "").strip() == normalized_key:
+                marker_paths.append(marker_path)
+
+    deleted = False
+    if storage.is_remote and storage.remote_exists(normalized_key):
+        if not storage.delete_remote(normalized_key):
+            return False, "远端 ZIP 删除失败"
+        deleted = True
+    elif not storage.is_remote:
+        local_path = storage.local_path(normalized_key)
+        if local_path.exists():
+            local_path.unlink(missing_ok=True)
+            deleted = True
+
+    for marker_path in marker_paths:
+        marker_path.unlink(missing_ok=True)
+        deleted = True
+    return deleted, "" if deleted else "ZIP 文件不存在或已删除"
+
+
 def admin_delete_internal_batch_zips(db: Session, items: list[dict]) -> dict:
     deleted = 0
     missing = 0
@@ -962,6 +1107,17 @@ def admin_delete_internal_batch_zips(db: Session, items: list[dict]) -> dict:
             continue
         seen.add(key)
         try:
+            storage_key = str(item.get("storageKey") or "").strip()
+            if user_id == ARCHIVE_ZIP_USER_ID and storage_key:
+                did_delete, message = _delete_archive_zip(storage_key)
+                if not did_delete:
+                    missing += 1
+                    if message and message != "ZIP 文件不存在或已删除":
+                        failed.append({"userId": user_id, "batchId": batch_id, "partIndex": part_index, "message": message})
+                _mark_zip_row_deleted(user_id, batch_id, part_index)
+                deleted += 1
+                continue
+
             try:
                 archive = plan_internal_batch_zip(db, user_id, batch_id)
             except Exception:

@@ -665,7 +665,7 @@ export function getAdminInternalBatchZips(page = 1, perPage = 50, status: AdminI
   return request<PaginatedAdminInternalBatchZips>(`/api/admin/internal-batch-zips?${params.toString()}`);
 }
 
-export function deleteAdminInternalBatchZips(items: Pick<AdminInternalBatchZip, "userId" | "batchId" | "partIndex">[]) {
+export function deleteAdminInternalBatchZips(items: Pick<AdminInternalBatchZip, "userId" | "batchId" | "partIndex" | "storageKey" | "filename">[]) {
   return request<{ deleted: number; missing: number; failed: { userId: string; batchId: string; partIndex: number; message: string }[] }>("/api/admin/internal-batch-zips", {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },

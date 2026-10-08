@@ -24,6 +24,8 @@ class AdminInternalBatchZipDeleteItem(BaseModel):
     userId: str
     batchId: str
     partIndex: int = 1
+    storageKey: str | None = None
+    filename: str | None = None
 
 
 class AdminInternalBatchZipDeleteRequest(BaseModel):

@@ -237,7 +237,7 @@ jobs:
           WORKER_REPLICAS=8
           RESULT_WORKER_REPLICAS=8
           TASK_JOB_TIMEOUT_SECONDS=7200
-          ASSET_RETENTION_HOURS=48
+          ASSET_RETENTION_HOURS=192
           CLEANUP_RETENTION_HOURS=48
           CLEANUP_INTERVAL_SECONDS=3600
           INTERNAL_BATCH_ZIP_RETENTION_HOURS=192
@@ -293,7 +293,7 @@ jobs:
           set_env_value MODEL_PLAZA_GPU_API_URL https://piankexiu.uniphore-ai.com
           set_env_value WORKER_REPLICAS 8
           set_env_value RESULT_WORKER_REPLICAS 8
-          set_env_value ASSET_RETENTION_HOURS 48
+          set_env_value ASSET_RETENTION_HOURS 192
           set_env_value CLEANUP_RETENTION_HOURS 48
           set_env_value CLEANUP_INTERVAL_SECONDS 3600
           set_env_value INTERNAL_BATCH_ZIP_RETENTION_HOURS 192
