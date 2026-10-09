@@ -1,12 +1,18 @@
 from datetime import timedelta
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app import dispatcher
 from app.models import Asset, Base, Task, User, Wallet
 from app.services import now
+
+
+@pytest.fixture(autouse=True)
+def disable_remote_metrics(monkeypatch) -> None:
+    monkeypatch.setattr(dispatcher, "_remote_gpu_available_slots", lambda: None)
 
 
 def test_dispatcher_enqueues_ready_tasks_and_skips_cooling_down_tasks(monkeypatch) -> None:
@@ -60,6 +66,111 @@ def test_dispatcher_enqueues_ready_tasks_and_skips_cooling_down_tasks(monkeypatc
 
     assert result == {"dispatched": 2, "taskIds": ["task-1", "task-after-cooldown"]}
     assert enqueued == ["task-1", "task-after-cooldown"]
+
+
+def test_dispatcher_waits_when_remote_metrics_has_no_free_slots(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    enqueued: list[str] = []
+    monkeypatch.setattr(dispatcher, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(dispatcher, "_queued_rq_task_ids", lambda: set())
+    monkeypatch.setattr(dispatcher, "enqueue_provider_job", enqueued.append)
+    monkeypatch.setattr(dispatcher, "_remote_gpu_available_slots", lambda: 0)
+
+    with Session(engine) as db:
+        user = User(id="user-remote-full", email="remote-full@example.com", name="Remote Full", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        asset = Asset(
+            id="asset-remote-full",
+            user_id=user.id,
+            kind="video",
+            original_name="remote-full.mp4",
+            mime_type="video/mp4",
+            storage_key="remote-full.mp4",
+            url="https://cdn.example.test/remote-full.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="task-remote-full",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=asset.id,
+            status="queued",
+            params={"internalBatchId": "batch-remote-full", "internalBatchName": "Remote full", "internalBatchIndex": 1},
+            estimated_credits=0,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="provider-task-remote-full",
+            progress_percent=5,
+            progress_stage="等待调度",
+        )
+        db.add_all([user, wallet, asset, task])
+        db.commit()
+
+    result = dispatcher.dispatch_provider_queue_once(limit=2)
+
+    assert result == {"dispatched": 0, "taskIds": []}
+    assert enqueued == []
+
+
+def test_dispatcher_uses_remote_metrics_slot_and_ignores_queue_full_cooldown(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    enqueued: list[str] = []
+    monkeypatch.setattr(dispatcher, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(dispatcher, "_queued_rq_task_ids", lambda: set())
+    monkeypatch.setattr(dispatcher, "enqueue_provider_job", enqueued.append)
+    monkeypatch.setattr(dispatcher, "_remote_gpu_available_slots", lambda: 1)
+    monkeypatch.setattr(dispatcher.settings, "gpu_queue_dispatch_cooldown_seconds", 180)
+
+    with Session(engine) as db:
+        user = User(id="user-remote-slot", email="remote-slot@example.com", name="Remote Slot", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+        for index in [1, 2]:
+            task_id = f"task-remote-slot-{index}"
+            asset = Asset(
+                id=f"asset-{task_id}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"{task_id}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"{task_id}.mp4",
+                url=f"https://cdn.example.test/{task_id}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=task_id,
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=asset.id,
+                status="queued",
+                params={
+                    "internalBatchId": "batch-remote-slot",
+                    "internalBatchName": "Remote slot",
+                    "internalBatchIndex": index,
+                    "_gpuQueueFullLastAt": int(now().timestamp()),
+                },
+                estimated_credits=0,
+                frozen_credits=0,
+                charged_credits=0,
+                provider="mock",
+                provider_job_id=f"provider-{task_id}",
+                progress_percent=5,
+                progress_stage="远端 GPU 队列已满",
+            )
+            db.add_all([asset, task])
+        db.commit()
+
+    result = dispatcher.dispatch_provider_queue_once(limit=8)
+
+    assert result == {"dispatched": 1, "taskIds": ["task-remote-slot-1"]}
+    assert enqueued == ["task-remote-slot-1"]
 
 
 def test_dispatcher_keeps_active_batch_lock_when_active_batch_is_cooling(monkeypatch) -> None:

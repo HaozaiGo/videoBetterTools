@@ -1,6 +1,9 @@
+import json
 import time
+import urllib.request
 from collections import defaultdict
 from datetime import timezone
+from urllib.parse import urljoin
 
 from sqlalchemy import select
 
@@ -338,6 +341,46 @@ def _remote_gpu_inflight_count(db, now_seconds: int | None = None) -> int:
     return sum(1 for task in tasks if _remote_gpu_task_occupies_inflight_slot(task, now_seconds))
 
 
+def _remote_gpu_available_slots() -> int | None:
+    base_url = settings.model_plaza_gpu_api_url.rstrip("/")
+    if not base_url:
+        return None
+    headers = {"X-API-Key": settings.model_plaza_gpu_api_key} if settings.model_plaza_gpu_api_key else {}
+    request = urllib.request.Request(urljoin(f"{base_url}/", "metrics"), headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=6) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+
+    try:
+        capacity = int(payload.get("slotCapacity") or 0)
+    except (TypeError, ValueError):
+        capacity = 0
+    running_jobs = payload.get("runningJobs")
+    if isinstance(running_jobs, list):
+        running = len(running_jobs)
+    else:
+        running_by_gpu = payload.get("runningByGpu")
+        if isinstance(running_by_gpu, dict):
+            running = sum(int(value or 0) for value in running_by_gpu.values())
+        else:
+            running = 0
+    if capacity <= 0:
+        gpus = payload.get("gpus")
+        if isinstance(gpus, list):
+            for gpu in gpus:
+                if not isinstance(gpu, dict):
+                    continue
+                try:
+                    capacity += int(gpu.get("workerSlotsTotal") or 0)
+                except (TypeError, ValueError):
+                    continue
+    if capacity <= 0:
+        return None
+    return max(0, capacity - running)
+
+
 def dispatch_provider_queue_once(limit: int | None = None) -> dict:
     limit = max(1, int(limit or settings.gpu_queue_dispatch_batch_size))
     now_seconds = int(time.time())
@@ -348,9 +391,16 @@ def dispatch_provider_queue_once(limit: int | None = None) -> dict:
         active_batch_key = _select_active_batch_key(db, queued_tasks)
         _reorder_queued_rq_jobs_batch_fifo(db, active_batch_key)
         already_enqueued = _queued_rq_task_ids()
-        remote_inflight_limit = max(0, int(settings.gpu_remote_inflight_limit))
-        if remote_inflight_limit and _remote_gpu_inflight_count(db, now_seconds) >= remote_inflight_limit:
+        available_slots = _remote_gpu_available_slots()
+        use_cooldown = available_slots is None
+        if available_slots is None:
+            remote_inflight_limit = max(0, int(settings.gpu_remote_inflight_limit))
+            if remote_inflight_limit and _remote_gpu_inflight_count(db, now_seconds) >= remote_inflight_limit:
+                return {"dispatched": 0, "taskIds": []}
+        elif available_slots <= 0:
             return {"dispatched": 0, "taskIds": []}
+        else:
+            limit = min(limit, available_slots)
         tasks = _batch_fifo_ordered_tasks(queued_tasks)
         if active_batch_key:
             tasks = [task for task in tasks if _task_batch_key(task) == active_batch_key]
@@ -359,7 +409,7 @@ def dispatch_provider_queue_once(limit: int | None = None) -> dict:
                 break
             if task.id in already_enqueued:
                 continue
-            if not _task_cooldown_ready(task, now_seconds):
+            if use_cooldown and not _task_cooldown_ready(task, now_seconds):
                 continue
             enqueue_provider_job(task.id)
             already_enqueued.add(task.id)
