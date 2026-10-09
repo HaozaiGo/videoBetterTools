@@ -99,10 +99,10 @@ def _claim_provider_job(task_id: str) -> tuple[str, str] | None:
         return provider_job_id, tool_slug
 
 
-def prepare_internal_batch_zip(user_id: str, batch_id: str) -> None:
+def prepare_internal_batch_zip(user_id: str, batch_id: str, allow_partial: bool = False) -> None:
     with SessionLocal() as db:
         try:
-            create_internal_batch_zip(db, user_id, batch_id)
+            create_internal_batch_zip(db, user_id, batch_id, allow_partial=allow_partial)
         except Exception:
             logger.exception("Failed to auto-prepare internal batch zip %s for user %s", batch_id, user_id)
             raise

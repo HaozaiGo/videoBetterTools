@@ -41,6 +41,10 @@ function batchZipReady(batch: AdminInternalBatch) {
   return batch.total > 0 && batch.created >= batch.total && batchAvailableResults(batch) >= batch.total && (batch.missingResultCount || 0) <= 0 && batch.processing <= 0 && batch.failed <= 0 && batch.cancelled <= 0;
 }
 
+function batchCanRegenerateZip(batch: AdminInternalBatch) {
+  return batchAvailableResults(batch) > 0;
+}
+
 function taskStatusLabel(status: TaskStatus | "missing") {
   if (status === "succeeded") return "成功";
   if (status === "failed") return "失败";
@@ -616,7 +620,8 @@ export function InternalTasksPage() {
                 const percent = batchProgressPercent(batch);
                 const isExpanded = expandedBatchId === batch.batchId;
                 const availableResults = batchAvailableResults(batch);
-                const canRegenerateZip = batchZipReady(batch);
+                const canRegenerateZip = batchCanRegenerateZip(batch);
+                const isCompleteZipReady = batchZipReady(batch);
                 const zipBusy = regenerateZipMutation.isPending && zipBatchId === batch.batchId;
                 const zipDisabled = !canRegenerateZip || regenerateZipMutation.isPending;
                 const deleteBusy = deleteBatchMutation.isPending && deletingBatchId === batch.batchId;
@@ -673,7 +678,7 @@ export function InternalTasksPage() {
                           className="primary compact"
                           type="button"
                           disabled={zipDisabled || deleteBatchMutation.isPending}
-                          title={canRegenerateZip ? "删除旧 ZIP，并把新 ZIP 任务插队到最前" : "批次全部成功后才可重新生成 ZIP"}
+                          title={canRegenerateZip ? (isCompleteZipReady ? "删除旧 ZIP，并把新 ZIP 任务插队到最前" : "按当前可用结果生成部分 ZIP") : "暂无可用结果，不能生成 ZIP"}
                           onClick={() => {
                             setZipBatchId(batch.batchId);
                             setZipMessage("");

@@ -467,9 +467,9 @@ def internal_batch_status(db: Session, user_id: str, batch_id: str) -> dict:
     }
 
 
-def _internal_batch_zip_entries(db: Session, user_id: str, batch_id: str) -> tuple[dict, list[dict], list[dict]]:
+def _internal_batch_zip_entries(db: Session, user_id: str, batch_id: str, allow_partial: bool = False) -> tuple[dict, list[dict], list[dict]]:
     batch = internal_batch_status(db, user_id, batch_id)
-    if not batch["downloadReady"]:
+    if not allow_partial and not batch["downloadReady"]:
         _raise_for_internal_batch_zip_missing_results(batch)
         raise HTTPException(status_code=409, detail=f"batch is not complete: {batch['succeeded']}/{batch['total']} succeeded, {batch['processing']} pending")
 
@@ -542,6 +542,10 @@ def _internal_batch_zip_entries(db: Session, user_id: str, batch_id: str) -> tup
         }
         for task in tasks
     ]
+    if not entries:
+        if missing_result_tasks:
+            _raise_for_internal_batch_zip_missing_results(batch)
+        raise HTTPException(status_code=409, detail="batch has no available results to zip")
     return batch, task_summaries, entries
 
 
@@ -603,7 +607,10 @@ def _raise_for_internal_batch_zip_missing_results(batch: dict) -> None:
 
 
 def _internal_batch_zip_base_stem(batch: dict) -> str:
-    return f"{str(batch['_safeZipName'])}-{str(batch['id'])[:8]}-{batch['succeeded']}-of-{batch['total']}"
+    available_results = batch.get("availableResults")
+    if available_results is None:
+        available_results = max(0, int(batch.get("succeeded") or 0) - int(batch.get("missingResults") or 0))
+    return f"{str(batch['_safeZipName'])}-{str(batch['id'])[:8]}-{available_results}-of-{batch['total']}"
 
 
 def _internal_batch_zip_parts(batch: dict, entries: list[dict]) -> list[dict]:
@@ -781,9 +788,10 @@ def _locked_internal_batch_zip(zip_path: Path):
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def plan_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
-    batch, _tasks, entries = _internal_batch_zip_entries(db, user_id, batch_id)
-    _raise_for_internal_batch_zip_missing_results(batch)
+def plan_internal_batch_zip(db: Session, user_id: str, batch_id: str, allow_partial: bool = False) -> dict:
+    batch, _tasks, entries = _internal_batch_zip_entries(db, user_id, batch_id, allow_partial=allow_partial)
+    if not allow_partial:
+        _raise_for_internal_batch_zip_missing_results(batch)
     parts = _internal_batch_zip_parts(batch, entries)
     return {"parts": parts, "partCount": len(parts)}
 
@@ -1077,8 +1085,8 @@ def _create_remote_internal_batch_zip(batch: dict, task_summaries: list[dict], s
         return True
 
 
-def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: int | None = None) -> dict:
-    batch, task_summaries, entries = _internal_batch_zip_entries(db, user_id, batch_id)
+def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: int | None = None, allow_partial: bool = False) -> dict:
+    batch, task_summaries, entries = _internal_batch_zip_entries(db, user_id, batch_id, allow_partial=allow_partial)
     parts = _existing_internal_batch_zip_parts(batch) or _internal_batch_zip_parts(batch, entries)
     if not parts:
         _raise_for_internal_batch_zip_missing_results(batch)
@@ -1091,7 +1099,8 @@ def create_internal_batch_zip(db: Session, user_id: str, batch_id: str, part: in
         first_part = selected_parts[0]
         return {"path": first_part["path"], "filename": first_part["filename"], "parts": parts, "partCount": len(parts)}
 
-    _raise_for_internal_batch_zip_missing_results(batch)
+    if not allow_partial:
+        _raise_for_internal_batch_zip_missing_results(batch)
     db.close()
     for selected_part in selected_parts:
         zip_path = selected_part["path"]

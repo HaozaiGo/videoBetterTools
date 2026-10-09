@@ -692,7 +692,7 @@ def test_admin_regenerate_internal_batch_zip_deletes_old_zip_and_prioritizes_que
     monkeypatch.setattr(services, "storage", FakeLocalStorage(tmp_path))
     monkeypatch.setattr(admin.settings, "upload_dir", str(tmp_path / "uploads"))
     enqueued: list[tuple[str, str, bool]] = []
-    monkeypatch.setattr(admin, "enqueue_internal_batch_zip", lambda user_id, batch_id, at_front=False: enqueued.append((user_id, batch_id, at_front)))
+    monkeypatch.setattr(admin, "enqueue_internal_batch_zip", lambda user_id, batch_id, at_front=False, allow_partial=False: enqueued.append((user_id, batch_id, at_front, allow_partial)))
 
     result_path = tmp_path / "episode-1.mp4"
     result_path.write_bytes(b"episode-one")
@@ -753,7 +753,73 @@ def test_admin_regenerate_internal_batch_zip_deletes_old_zip_and_prioritizes_que
 
     assert payload == {"queued": True, "deleted": 1, "missing": 0, "failed": [], "partCount": 1}
     assert not zip_path.exists()
-    assert enqueued == [("zip-user", "zip-batch", True)]
+    assert enqueued == [("zip-user", "zip-batch", True, True)]
+
+
+def test_admin_regenerate_internal_batch_zip_allows_partial_created_batch(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path / "uploads"))
+    monkeypatch.setattr(services, "storage", FakeLocalStorage(tmp_path))
+    monkeypatch.setattr(admin.settings, "upload_dir", str(tmp_path / "uploads"))
+    enqueued: list[tuple[str, str, bool, bool]] = []
+    monkeypatch.setattr(admin, "enqueue_internal_batch_zip", lambda user_id, batch_id, at_front=False, allow_partial=False: enqueued.append((user_id, batch_id, at_front, allow_partial)))
+
+    result_path = tmp_path / "episode-1.mp4"
+    result_path.write_bytes(b"episode-one")
+
+    with Session(engine) as db:
+        user = User(id="partial-zip-user", email="partial-zip@example.com", name="Partial Zip User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        input_asset = Asset(
+            id="partial-zip-input",
+            user_id=user.id,
+            kind="video",
+            original_name="episode-1.mp4",
+            mime_type="video/mp4",
+            storage_key="episode-1-input.mp4",
+            url="/uploads/episode-1-input.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        output_asset = Asset(
+            id="partial-zip-output",
+            user_id=user.id,
+            kind="result",
+            original_name="episode-1.mp4",
+            mime_type="video/mp4",
+            storage_key="episode-1.mp4",
+            url="/uploads/episode-1.mp4",
+            size_bytes=result_path.stat().st_size,
+            duration_seconds=0,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="partial-zip-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=input_asset.id,
+            output_asset_id=output_asset.id,
+            status="succeeded",
+            params={"internalBatchId": "partial-zip-batch", "internalBatchName": "部分 ZIP 测试", "internalBatchTotal": 2},
+            estimated_credits=1,
+            frozen_credits=0,
+            charged_credits=1,
+            provider="mock",
+            provider_job_id="partial-zip-provider",
+            output_url="/uploads/result.mp4",
+            progress_percent=100,
+            progress_stage="done",
+            completed_at=now(),
+        )
+        db.add_all([user, wallet, input_asset, output_asset, task])
+        db.commit()
+
+        payload = admin.admin_regenerate_internal_batch_zip(db, user.id, "partial-zip-batch")
+
+    assert payload == {"queued": True, "deleted": 0, "missing": 1, "failed": [], "partCount": 1}
+    assert enqueued == [("partial-zip-user", "partial-zip-batch", True, True)]
 
 
 def test_admin_internal_batch_zips_reports_skipped_tasks_and_deletes_zip(tmp_path, monkeypatch) -> None:

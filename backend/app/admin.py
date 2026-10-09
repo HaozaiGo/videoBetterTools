@@ -1188,7 +1188,7 @@ def admin_delete_internal_batch_zips(db: Session, items: list[dict]) -> dict:
 
 
 def admin_regenerate_internal_batch_zip(db: Session, user_id: str, batch_id: str) -> dict:
-    archive = plan_internal_batch_zip(db, user_id, batch_id)
+    archive = plan_internal_batch_zip(db, user_id, batch_id, allow_partial=True)
     deleted = 0
     missing = 0
     failed: list[dict] = []
@@ -1206,7 +1206,7 @@ def admin_regenerate_internal_batch_zip(db: Session, user_id: str, batch_id: str
             failed.append({"userId": user_id, "batchId": batch_id, "partIndex": part_index, "message": message})
     if failed:
         return {"queued": False, "deleted": deleted, "missing": missing, "failed": failed, "partCount": int(archive.get("partCount") or 0)}
-    enqueue_internal_batch_zip(user_id, batch_id, at_front=True)
+    enqueue_internal_batch_zip(user_id, batch_id, at_front=True, allow_partial=True)
     return {"queued": True, "deleted": deleted, "missing": missing, "failed": [], "partCount": int(archive.get("partCount") or 0)}
 
 
