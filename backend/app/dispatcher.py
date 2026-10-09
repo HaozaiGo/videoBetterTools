@@ -354,17 +354,12 @@ def dispatch_provider_queue_once(limit: int | None = None) -> dict:
         tasks = _batch_fifo_ordered_tasks(queued_tasks)
         if active_batch_key:
             tasks = [task for task in tasks if _task_batch_key(task) == active_batch_key]
-        blocked_batch_keys: set[str] = set()
         for task in tasks:
             if len(dispatched) >= limit:
                 break
-            batch_key = _task_batch_key(task)
-            if batch_key in blocked_batch_keys:
-                continue
             if task.id in already_enqueued:
                 continue
             if not _task_cooldown_ready(task, now_seconds):
-                blocked_batch_keys.add(batch_key)
                 continue
             enqueue_provider_job(task.id)
             already_enqueued.add(task.id)

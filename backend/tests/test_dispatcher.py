@@ -9,7 +9,7 @@ from app.models import Asset, Base, Task, User, Wallet
 from app.services import now
 
 
-def test_dispatcher_enqueues_stable_queued_tasks_and_skips_cooldown(monkeypatch) -> None:
+def test_dispatcher_enqueues_ready_tasks_and_skips_cooling_down_tasks(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     enqueued: list[str] = []
@@ -58,8 +58,8 @@ def test_dispatcher_enqueues_stable_queued_tasks_and_skips_cooldown(monkeypatch)
 
     result = dispatcher.dispatch_provider_queue_once(limit=3)
 
-    assert result == {"dispatched": 1, "taskIds": ["task-1"]}
-    assert enqueued == ["task-1"]
+    assert result == {"dispatched": 2, "taskIds": ["task-1", "task-after-cooldown"]}
+    assert enqueued == ["task-1", "task-after-cooldown"]
 
 
 def test_dispatcher_keeps_manual_priority_ahead(monkeypatch) -> None:
