@@ -29,6 +29,18 @@ class FakeStorage:
 
         return Stored(storage_key)
 
+    def save_stream(self, storage_key: str, stream, size: int | None = None, content_type: str | None = None):
+        self.saved.append((storage_key, Path("<stream>")))
+
+        class Stored:
+            public_url = f"https://cdn.example.test/{storage_key}"
+
+            def __init__(self, key: str, saved_size: int) -> None:
+                self.storage_key = key
+                self.size = saved_size
+
+        return Stored(storage_key, int(size or 0))
+
     def delete_local_copy(self, storage_key: str) -> bool:
         self.deleted.append(storage_key)
         return True
@@ -284,6 +296,44 @@ def test_finalize_remote_gpu_result_waits_for_uploaded_object_visibility(monkeyp
         )
 
 
+def test_finalize_remote_gpu_result_streams_gpu_result_to_remote_storage(monkeypatch) -> None:
+    fake_storage = FakeStorage()
+    monkeypatch.setattr(worker, "storage", fake_storage)
+    monkeypatch.setattr(worker, "_sync_remote_gpu_progress", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        worker,
+        "get_remote_video_job",
+        lambda job_id: {
+            "status": "succeeded",
+        },
+    )
+
+    class Stored:
+        storage_key = "model-plaza/output/videos/result.mp4"
+        public_url = "https://cdn.example.test/model-plaza/output/videos/result.mp4"
+        size = 456
+
+    monkeypatch.setattr(worker, "stream_remote_video_result_to_storage", lambda job_id, storage_key, mime_type: Stored())
+    monkeypatch.setattr(worker, "download_remote_video_result", lambda *args, **kwargs: pytest.fail("remote storage should stream without local download"))
+
+    finalized = worker._finalize_remote_gpu_result(
+        "task-1",
+        "provider-1",
+        {
+            "remote_job_id": "remote-1",
+            "storage_key": "model-plaza/output/videos/result.mp4",
+            "url": "https://cdn.example.test/model-plaza/output/videos/result.mp4",
+        },
+    )
+
+    assert finalized == {
+        "storage_key": "model-plaza/output/videos/result.mp4",
+        "url": "https://cdn.example.test/model-plaza/output/videos/result.mp4",
+        "mime_type": "video/mp4",
+        "size_bytes": 456,
+    }
+
+
 def test_finalize_remote_gpu_result_recovers_upload_timeout_from_gpu_cache(monkeypatch, tmp_path) -> None:
     fake_storage = FakeStorage()
     callbacks: list[dict] = []
@@ -298,16 +348,17 @@ def test_finalize_remote_gpu_result_recovers_upload_timeout_from_gpu_cache(monke
     def fake_provider_callback(db, provider_job_id: str, status: str, **kwargs):
         callbacks.append({"provider_job_id": provider_job_id, "status": status, **kwargs})
 
-    def fake_download(job_id: str, output_path: Path) -> None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(b"recovered-video")
+    class Stored:
+        storage_key = "model-plaza/output/videos/result.mp4"
+        public_url = "https://cdn.example.test/model-plaza/output/videos/result.mp4"
+        size = len(b"recovered-video")
 
     monkeypatch.setattr(worker.settings, "upload_dir", str(tmp_path))
     monkeypatch.setattr(worker, "storage", fake_storage)
     monkeypatch.setattr(worker, "SessionLocal", lambda: DummySession())
     monkeypatch.setattr(worker, "provider_callback", fake_provider_callback)
     monkeypatch.setattr(worker, "_sync_remote_gpu_progress", lambda *args, **kwargs: True)
-    monkeypatch.setattr(worker, "download_remote_video_result", fake_download)
+    monkeypatch.setattr(worker, "stream_remote_video_result_to_storage", lambda job_id, storage_key, mime_type: Stored())
     monkeypatch.setattr(
         worker,
         "get_remote_video_job",
@@ -329,7 +380,7 @@ def test_finalize_remote_gpu_result_recovers_upload_timeout_from_gpu_cache(monke
 
     assert finalized["storage_key"] == "model-plaza/output/videos/result.mp4"
     assert finalized["size_bytes"] == len(b"recovered-video")
-    assert fake_storage.saved == [(finalized["storage_key"], tmp_path / finalized["storage_key"])]
+    assert fake_storage.saved == []
     assert callbacks == [
         {
             "provider_job_id": "provider-1",

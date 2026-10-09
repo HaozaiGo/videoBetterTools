@@ -24,6 +24,7 @@ from app.video.gpu_api import (
     cancel_remote_video_job,
     download_remote_video_result,
     get_remote_video_job,
+    stream_remote_video_result_to_storage,
 )
 from app.video.enhance import process_video_enhance
 from app.video.gptproto import GptProtoCancelled, GptProtoError, generate_video_redraw
@@ -495,14 +496,29 @@ def _finalize_remote_gpu_result(task_id: str, provider_job_id: str, result: dict
                 if status.get("result_storage_key") and status.get("result_url"):
                     if storage.is_remote and not storage.remote_exists(storage_key):
                         raise RemoteGpuResultNotReady(f"remote GPU result is not visible in storage yet: {storage_key}", result)
-                    return {
+                    finalized = {
                         "storage_key": storage_key,
                         "url": result_url,
                         "mime_type": str(status.get("result_mime_type") or result.get("mime_type") or "video/mp4"),
                         "size_bytes": size_bytes,
-                        "subtitle_artifacts": status.get("subtitle_artifacts") or [],
                     }
+                    subtitle_artifacts = status.get("subtitle_artifacts")
+                    if subtitle_artifacts:
+                        finalized["subtitle_artifacts"] = subtitle_artifacts
+                    return finalized
                 local_path = settings.upload_path / output_key
+                if storage.is_remote:
+                    stored = stream_remote_video_result_to_storage(
+                        remote_job_id,
+                        output_key,
+                        str(result.get("mime_type") or "video/mp4"),
+                    )
+                    return {
+                        "storage_key": stored.storage_key,
+                        "url": stored.public_url,
+                        "mime_type": str(result.get("mime_type") or "video/mp4"),
+                        "size_bytes": stored.size,
+                    }
                 download_remote_video_result(remote_job_id, local_path)
                 return _finalize_result_payload(
                     {
@@ -523,6 +539,18 @@ def _finalize_remote_gpu_result(task_id: str, provider_job_id: str, result: dict
                             progress_stage="远端结果已生成，上传超时，正在改由平台拉回",
                         )
                     local_path = settings.upload_path / output_key
+                    if storage.is_remote:
+                        stored = stream_remote_video_result_to_storage(
+                            remote_job_id,
+                            output_key,
+                            str(result.get("mime_type") or "video/mp4"),
+                        )
+                        return {
+                            "storage_key": stored.storage_key,
+                            "url": stored.public_url,
+                            "mime_type": str(result.get("mime_type") or "video/mp4"),
+                            "size_bytes": stored.size,
+                        }
                     download_remote_video_result(remote_job_id, local_path)
                     return _finalize_result_payload(
                         {

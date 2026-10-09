@@ -72,6 +72,13 @@ class LocalStorage:
             shutil.copyfile(local_path, target)
         return StoredObject(storage_key=storage_key, public_url=self.public_url(storage_key), size=target.stat().st_size)
 
+    def save_stream(self, storage_key: str, stream, size: int | None = None, content_type: str | None = None) -> StoredObject:
+        target = self.local_path(storage_key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("wb") as output_file:
+            shutil.copyfileobj(stream, output_file, length=1024 * 1024)
+        return StoredObject(storage_key=storage_key, public_url=self.public_url(storage_key), size=target.stat().st_size)
+
     def delete_local_copy(self, storage_key: str) -> bool:
         path = self.local_path(storage_key)
         if not path.exists():
@@ -170,6 +177,25 @@ class TosStorage(LocalStorage):
             if remote_size == size:
                 return StoredObject(storage_key=normalized_key, public_url=self.public_url(normalized_key), size=size)
         return StoredObject(storage_key=normalized_key, public_url=self.public_url(normalized_key), size=size)
+
+    def save_stream(self, storage_key: str, stream, size: int | None = None, content_type: str | None = None) -> StoredObject:
+        normalized_key = storage_key.strip("/")
+        content_length = int(size) if size is not None and int(size) >= 0 else None
+        upload_timeout = max(1, int(settings.volcengine_tos_upload_timeout_seconds))
+        with _operation_timeout(upload_timeout):
+            self.client.put_object(
+                self.bucket,
+                normalized_key,
+                content_length=content_length,
+                content_type=content_type,
+                content=stream,
+            )
+        remote_size = self.remote_size(normalized_key)
+        return StoredObject(
+            storage_key=normalized_key,
+            public_url=self.public_url(normalized_key),
+            size=int(remote_size if remote_size is not None else content_length or 0),
+        )
 
     def remote_size(self, storage_key: str) -> int | None:
         try:

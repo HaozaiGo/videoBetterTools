@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
-from app.storage import storage
+from app.storage import StoredObject, storage
 
 logger = logging.getLogger("model_plaza.gpu_api")
 
@@ -201,3 +201,30 @@ def download_remote_video_result(job_id: str, output_path: Path) -> None:
         finally:
             temp_path.unlink(missing_ok=True)
         time.sleep(5)
+
+
+def stream_remote_video_result_to_storage(job_id: str, storage_key: str, mime_type: str = "video/mp4") -> StoredObject:
+    request = urllib.request.Request(_api_url(f"/jobs/{job_id}/result"), headers=_headers(), method="GET")
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            with urllib.request.urlopen(request, timeout=settings.remote_gpu_result_download_timeout_seconds) as response:
+                size_header = response.headers.get("Content-Length") or response.headers.get("content-length")
+                size = int(size_header) if size_header else None
+                return storage.save_stream(storage_key, response, size=size, content_type=mime_type)
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            if exc.code == 404:
+                last_error = RemoteGpuJobNotFoundError(f"GPU API result HTTP {exc.code} on attempt {attempt}/3: {body}")
+            elif exc.code >= 500 or exc.code in {408, 425, 429}:
+                last_error = RemoteGpuUnavailableError(f"GPU API result HTTP {exc.code} on attempt {attempt}/3: {body}")
+            else:
+                last_error = RemoteGpuError(f"GPU API result HTTP {exc.code}: {body}")
+            if not isinstance(last_error, RemoteGpuUnavailableError) or attempt >= 3:
+                raise last_error from exc
+        except (TimeoutError, urllib.error.URLError, OSError, http.client.IncompleteRead) as exc:
+            last_error = RemoteGpuUnavailableError(f"GPU API result stream failed on attempt {attempt}/3: {exc}")
+            if attempt >= 3:
+                raise last_error from exc
+        time.sleep(5)
+    raise RemoteGpuUnavailableError(str(last_error or f"GPU API result stream failed after 3 attempts: {job_id}"))
