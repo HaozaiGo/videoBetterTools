@@ -20,11 +20,20 @@ def _task_cooldown_ready(task: Task, now_seconds: int) -> bool:
     return now_seconds - last_full_at >= max(1, int(settings.gpu_queue_dispatch_cooldown_seconds))
 
 
-def _task_priority_key(task: Task) -> tuple[int, int, float]:
+def _task_priority_key(task: Task) -> tuple[int, int, int, int, int, float]:
     params = task.params if isinstance(task.params, dict) else {}
+    zip_priority_rank = int(params.get("_zipPriorityRank") or 0)
+    zip_priority_boost_at = int(params.get("_zipPriorityBoostAt") or 0)
     priority_boost_at = int(params.get("_manualPriorityBoostAt") or 0)
     priority_boost_count = int(params.get("_manualPriorityBoostCount") or 0)
-    return (-priority_boost_count, -priority_boost_at, task.created_at.timestamp())
+    return (
+        0 if zip_priority_rank > 0 else 1,
+        zip_priority_rank if zip_priority_rank > 0 else 999_999,
+        -zip_priority_boost_at,
+        -priority_boost_count,
+        -priority_boost_at,
+        task.created_at.timestamp(),
+    )
 
 
 def _queued_rq_task_ids() -> set[str]:
@@ -97,7 +106,7 @@ def dispatch_provider_queue_once(limit: int | None = None) -> dict:
                 .where(Task.status == "queued", Task.tool_slug.in_(DISPATCHABLE_TOOL_SLUGS))
                 .options(selectinload(Task.input_asset))
                 .order_by(Task.created_at.asc())
-                .limit(max(limit * 8, 50))
+                .limit(max(limit * 100, 1000))
             ).scalars()
         )
         tasks.sort(key=_task_priority_key)
@@ -107,7 +116,7 @@ def dispatch_provider_queue_once(limit: int | None = None) -> dict:
             if task.id in already_enqueued:
                 continue
             if not _task_cooldown_ready(task, now_seconds):
-                break
+                continue
             enqueue_provider_job(task.id)
             already_enqueued.add(task.id)
             dispatched.append(task.id)
