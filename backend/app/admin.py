@@ -1065,8 +1065,12 @@ def admin_internal_batch_zips(db: Session, page: int = 1, per_page: int = 50, st
         pending_status = "processing"
         if missing_result_tasks:
             pending_status = "failed"
-        elif zip_job and zip_job.get("state") == "failed":
-            pending_status = "failed"
+        elif zip_job:
+            zip_job_state = str(zip_job.get("state") or "")
+            if zip_job_state in {"queued", "started", "scheduled"}:
+                pending_status = "processing"
+            elif zip_job_state == "failed":
+                pending_status = "failed"
         elif int(batch.get("missing") or 0) > 0 and int(batch.get("activeProcessing") or 0) <= 0:
             pending_status = "failed"
         elif int(batch["failed"]) + int(batch["cancelled"]) > 0 and int(batch["processing"]) <= 0:

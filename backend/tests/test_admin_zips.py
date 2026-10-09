@@ -1288,3 +1288,80 @@ def test_zip_process_message_prefers_active_zip_job_for_partial_batch() -> None:
 
     assert stage == "gpu"
     assert message == "ZIP worker 已接单：GPU 正在打包或上传 TOS"
+
+
+def test_admin_internal_batch_zips_lists_active_partial_zip_as_processing(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(
+        admin,
+        "_zip_job_states",
+        lambda include_failed=True: {
+            ("partial-user", "partial-batch"): {
+                "state": "started",
+                "jobId": "partial-zip-job",
+                "position": None,
+                "retriesLeft": 5,
+                "createdAt": 1,
+                "startedAt": 2,
+                "endedAt": None,
+                "excInfo": "",
+            }
+        },
+    )
+
+    with Session(engine) as db:
+        user = User(id="partial-user", email="partial@example.com", name="Partial", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        input_asset = Asset(
+            id="partial-input",
+            user_id=user.id,
+            kind="video",
+            original_name="1.mp4",
+            mime_type="video/mp4",
+            storage_key="partial-input.mp4",
+            url="/uploads/partial-input.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        output_asset = Asset(
+            id="partial-output",
+            user_id=user.id,
+            kind="video",
+            original_name="result.mp4",
+            mime_type="video/mp4",
+            storage_key="partial-output.mp4",
+            url="/uploads/partial-output.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="partial-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=input_asset.id,
+            output_asset_id=output_asset.id,
+            status="succeeded",
+            params={"internalBatchId": "partial-batch", "internalBatchName": "部分打包测试（2集）", "internalBatchTotal": 1},
+            estimated_credits=1,
+            frozen_credits=0,
+            charged_credits=1,
+            provider="mock",
+            provider_job_id="partial-provider",
+            output_url="/uploads/partial-output.mp4",
+            progress_percent=100,
+            progress_stage="完成",
+            completed_at=now(),
+        )
+        db.add_all([user, wallet, input_asset, output_asset, task])
+        db.commit()
+
+        payload = admin.admin_internal_batch_zips(db, status="processing", name="部分打包")
+
+    assert payload["page"]["total"] == 1
+    item = payload["items"][0]
+    assert item["batchId"] == "partial-batch"
+    assert item["zipStage"] == "gpu"
+    assert item["zipJob"]["state"] == "started"
