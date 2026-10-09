@@ -34,6 +34,16 @@ class FakeRemoteZipStorage:
         return f"https://signed.example.test/{storage_key}?filename={filename}"
 
 
+class FakeRemoteResultStorage:
+    is_remote = True
+
+    def __init__(self, existing_keys: set[str]) -> None:
+        self.existing_keys = existing_keys
+
+    def remote_exists(self, storage_key: str) -> bool:
+        return storage_key in self.existing_keys
+
+
 def test_admin_internal_batches_groups_batch_progress() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -89,6 +99,70 @@ def test_admin_internal_batches_groups_batch_progress() -> None:
     assert item["processing"] == 1
     assert item["status"] == "processing"
     assert processing_payload["page"]["total"] == 1
+
+
+def test_admin_internal_batches_counts_available_results(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services, "storage", FakeRemoteResultStorage({"result-2.mp4"}))
+
+    with Session(engine) as db:
+        user = User(id="batch-result-user", email="batch-result@example.com", name="Batch Result User", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+
+        for index in range(1, 4):
+            input_asset = Asset(
+                id=f"batch-result-input-{index}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"{index}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"input-{index}.mp4",
+                url=f"https://tos.example.test/input-{index}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            output_asset = Asset(
+                id=f"batch-result-output-{index}",
+                user_id=user.id,
+                kind="result",
+                original_name=f"{index}-result.mp4",
+                mime_type="video/mp4",
+                storage_key=f"result-{index}.mp4",
+                url=f"https://tos.example.test/result-{index}.mp4",
+                size_bytes=10,
+                duration_seconds=0,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=f"batch-result-task-{index}",
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=input_asset.id,
+                output_asset_id=output_asset.id,
+                status="succeeded",
+                params={"internalBatchId": "batch-result-availability", "internalBatchName": "结果可用性测试（3集）", "internalBatchTotal": 3},
+                estimated_credits=1,
+                frozen_credits=0,
+                charged_credits=1,
+                provider="mock",
+                provider_job_id=f"batch-result-provider-{index}",
+                progress_percent=100,
+                progress_stage="done",
+                completed_at=now(),
+            )
+            db.add_all([input_asset, output_asset, task])
+        db.commit()
+
+        payload = admin.admin_internal_batches(db)
+
+    item = payload["items"][0]
+    assert item["succeeded"] == 3
+    assert item["availableResults"] == 1
+    assert item["missingResultCount"] == 2
+    assert item["status"] == "failed"
 
 
 def test_admin_internal_batch_zips_lists_ready_local_zip(tmp_path, monkeypatch) -> None:

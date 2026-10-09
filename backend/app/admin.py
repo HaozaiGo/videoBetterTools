@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
 from app.models import Asset, Task, User, Wallet, WalletLedger
-from app.queue import enqueue_internal_batch_zip, internal_batch_zip_queue
+from app.queue import enqueue_internal_batch_zip, internal_batch_zip_queue, task_queue
 from app.services import add_ledger, create_task, failure_reason_for_task, get_tool, get_wallet, internal_batch_expected_total_from_name, internal_batch_expected_total_from_tasks, internal_batch_status, normalize_pagination, now, page_info, ledger_to_dict, plan_internal_batch_zip, serialize_datetime, task_result_missing_reason, task_to_dict
 from app.storage import safe_storage_name, storage
 
@@ -98,9 +98,47 @@ def _internal_batch_status_from_counts(batch: dict) -> str:
         return "processing"
     if int(batch["failed"]) + int(batch["cancelled"]) > 0:
         return "failed"
-    if int(batch["succeeded"]) >= int(batch["total"]):
+    if int(batch.get("missingResultCount") or 0) > 0:
+        return "failed"
+    available_results = int(batch.get("availableResults") if batch.get("availableResults") is not None else batch["succeeded"])
+    if available_results >= int(batch["total"]):
         return "succeeded"
     return "processing"
+
+
+def _annotate_internal_batch_result_availability(db: Session, batches: list[dict]) -> None:
+    if not batches:
+        return
+    by_key = {(str(batch["userId"]), str(batch["batchId"])): batch for batch in batches}
+    for batch in batches:
+        batch["missingResultCount"] = 0
+        batch["availableResults"] = int(batch.get("succeeded") or 0)
+
+    batch_id_expr = Task.params["internalBatchId"].as_string()
+    rows = db.execute(
+        select(Task)
+        .where(
+            Task.tool_slug == "subtitle-translate-workflow",
+            Task.user_id.in_({user_id for user_id, _batch_id in by_key}),
+            batch_id_expr.in_({batch_id for _user_id, batch_id in by_key}),
+            Task.status == "succeeded",
+            Task.params["internalBatchDeletedAt"].as_string().is_(None),
+        )
+        .options(selectinload(Task.output_asset))
+    ).scalars()
+    missing_by_key: dict[tuple[str, str], int] = {}
+    for task in rows:
+        params = task.params if isinstance(task.params, dict) else {}
+        key = (str(task.user_id), str(params.get("internalBatchId") or ""))
+        if key not in by_key:
+            continue
+        if task_result_missing_reason(task):
+            missing_by_key[key] = missing_by_key.get(key, 0) + 1
+
+    for key, missing_count in missing_by_key.items():
+        batch = by_key[key]
+        batch["missingResultCount"] = missing_count
+        batch["availableResults"] = max(0, int(batch.get("succeeded") or 0) - missing_count)
 
 
 def admin_internal_batches(db: Session, page: int = 1, per_page: int = 50, status: str = "all", name: str = "") -> dict:
@@ -160,14 +198,22 @@ def admin_internal_batches(db: Session, page: int = 1, per_page: int = 50, statu
             "createdAt": int(row.created_at.timestamp() * 1000),
             "updatedAt": int(row.updated_at.timestamp() * 1000),
         }
+        batches.append(batch)
+
+    filtered_batches: list[dict] = []
+    for batch in batches:
         batch["status"] = _internal_batch_status_from_counts(batch)
         tab_counts["all"] += 1
         tab_counts[str(batch["status"])] += 1
         if status == "all" or batch["status"] == status:
-            batches.append(batch)
-    total = len(batches)
+            filtered_batches.append(batch)
+    total = len(filtered_batches)
     start = (page - 1) * per_page
-    return {"items": batches[start : start + per_page], "page": page_info(total, page, per_page), "tabs": tab_counts}
+    items = filtered_batches[start : start + per_page]
+    _annotate_internal_batch_result_availability(db, items)
+    for batch in items:
+        batch["status"] = _internal_batch_status_from_counts(batch)
+    return {"items": items, "page": page_info(total, page, per_page), "tabs": tab_counts}
 
 
 def _batch_id_for_task(task: Task) -> str:
@@ -1310,39 +1356,57 @@ def _gpu_task_display_payload(task: Task) -> dict:
 
 
 def _queued_gpu_jobs(db: Session, limit: int = 10) -> list[dict]:
-    tasks = list(db.execute(
-        select(Task)
-        .where(Task.status == "queued")
-        .options(selectinload(Task.input_asset))
-        .order_by(Task.created_at.asc())
-        .limit(max(limit * 8, 50))
-    ).scalars())
-    if not tasks:
+    try:
+        queue = task_queue()
+        job_ids = list(queue.job_ids)
+    except Exception:
+        return []
+    if not job_ids:
         return []
 
-    def priority_key(task: Task) -> tuple[int, int, float]:
-        params = task.params if isinstance(task.params, dict) else {}
-        return (
-            -int(params.get("_manualPriorityBoostCount") or 0),
-            -int(params.get("_manualPriorityBoostAt") or 0),
-            task.created_at.timestamp(),
-        )
+    scan_limit = min(len(job_ids), max(limit * 20, 200))
+    ordered_task_positions: list[tuple[int, str, str]] = []
+    for position, job_id in enumerate(job_ids[:scan_limit], start=1):
+        try:
+            job = queue.fetch_job(job_id)
+        except Exception:
+            continue
+        if not job or not job.args:
+            continue
+        task_id = str(job.args[0] or "").strip()
+        if not task_id:
+            continue
+        ordered_task_positions.append((position, str(job_id), task_id))
+    if not ordered_task_positions:
+        return []
 
-    tasks.sort(key=priority_key)
+    task_ids = [task_id for _position, _job_id, task_id in ordered_task_positions]
+    tasks = list(db.execute(
+        select(Task)
+        .where(Task.id.in_(task_ids))
+        .options(selectinload(Task.input_asset))
+    ).scalars())
+    task_by_id = {task.id: task for task in tasks}
     queued_jobs = []
-    for position, task in enumerate(tasks[:limit], start=1):
+    for position, job_id, task_id in ordered_task_positions:
+        task = task_by_id.get(task_id)
+        if not task:
+            continue
         payload = _gpu_task_display_payload(task)
         payload.update(
             {
-                "id": task.provider_job_id,
+                "id": job_id,
+                "providerJobId": task.provider_job_id,
                 "position": position,
-                "queueState": "waiting",
+                "queueState": "queued",
                 "progressPercent": task.progress_percent,
                 "progressStage": task.progress_stage,
                 "createdAt": int(task.created_at.timestamp() * 1000),
             }
         )
         queued_jobs.append(payload)
+        if len(queued_jobs) >= limit:
+            break
     return queued_jobs
 
 

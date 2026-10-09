@@ -125,6 +125,7 @@ export type GpuRunningJob = {
 
 export type GpuQueuedJob = {
   id: string;
+  providerJobId?: string;
   position: number;
   queueState?: "queued" | "scheduled" | "waiting";
   displayName?: string;
@@ -252,6 +253,8 @@ export type AdminInternalBatch = {
   total: number;
   created: number;
   succeeded: number;
+  availableResults: number;
+  missingResultCount: number;
   failed: number;
   cancelled: number;
   missing: number;
@@ -322,6 +325,8 @@ export type InternalBatchStatus = {
   total: number;
   created: number;
   succeeded: number;
+  availableResults: number;
+  missingResultCount: number;
   failed: number;
   cancelled: number;
   missing: number;

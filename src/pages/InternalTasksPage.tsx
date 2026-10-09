@@ -21,19 +21,24 @@ function internalBatchStatusLabel(status: AdminInternalBatch["status"]) {
 function batchStatusText(batch: AdminInternalBatch) {
   const parts = [];
   if (batch.activeProcessing > 0) parts.push(`${batch.activeProcessing} 个处理中/排队`);
+  if ((batch.missingResultCount || 0) > 0) parts.push(`结果缺失 ${batch.missingResultCount}`);
   if (batch.missing > 0) parts.push(`缺少 ${batch.missing} 个任务`);
   if (batch.failed > 0) parts.push(`${batch.failed} 个失败`);
   if (batch.cancelled > 0) parts.push(`${batch.cancelled} 个取消`);
-  return parts.length ? parts.join("，") : "全部任务已完成";
+  return parts.length ? parts.join("，") : "全部结果可用";
+}
+
+function batchAvailableResults(batch: AdminInternalBatch) {
+  return typeof batch.availableResults === "number" && Number.isFinite(batch.availableResults) ? batch.availableResults : Math.max(0, batch.succeeded - (batch.missingResultCount || 0));
 }
 
 function batchProgressPercent(batch: AdminInternalBatch) {
   if (batch.total <= 0) return 0;
-  return Math.round((batch.succeeded / batch.total) * 100);
+  return Math.round((batchAvailableResults(batch) / batch.total) * 100);
 }
 
 function batchZipReady(batch: AdminInternalBatch) {
-  return batch.total > 0 && batch.created >= batch.total && batch.succeeded >= batch.total && batch.processing <= 0 && batch.failed <= 0 && batch.cancelled <= 0;
+  return batch.total > 0 && batch.created >= batch.total && batchAvailableResults(batch) >= batch.total && (batch.missingResultCount || 0) <= 0 && batch.processing <= 0 && batch.failed <= 0 && batch.cancelled <= 0;
 }
 
 function taskStatusLabel(status: TaskStatus | "missing") {
@@ -201,7 +206,7 @@ function InternalBatchDetail({ batch }: { batch: AdminInternalBatch }) {
         <div>
           <strong>{detail?.name || batch.batchName}</strong>
           <span>
-            {detail ? `完成 ${detail.succeeded}/${detail.total}，失败 ${detail.failed}，处理中 ${detail.processing}，结果缺失 ${missingResultCount}` : "正在读取批次明细"}
+            {detail ? `可用结果 ${detail.succeeded - missingResultCount}/${detail.total}，任务成功 ${detail.succeeded}/${detail.total}，失败 ${detail.failed}，处理中 ${detail.processing}，结果缺失 ${missingResultCount}` : "正在读取批次明细"}
           </span>
         </div>
         <div>
@@ -610,6 +615,7 @@ export function InternalTasksPage() {
               batches.map((batch) => {
                 const percent = batchProgressPercent(batch);
                 const isExpanded = expandedBatchId === batch.batchId;
+                const availableResults = batchAvailableResults(batch);
                 const canRegenerateZip = batchZipReady(batch);
                 const zipBusy = regenerateZipMutation.isPending && zipBatchId === batch.batchId;
                 const zipDisabled = !canRegenerateZip || regenerateZipMutation.isPending;
@@ -651,13 +657,13 @@ export function InternalTasksPage() {
                       <td>
                         <div className="internal-batch-progress">
                           <div>
-                            <strong>{batch.succeeded}/{batch.total}</strong>
+                            <strong>{availableResults}/{batch.total}</strong>
                             <span>{percent}%</span>
                           </div>
                           <div className="task-progress-track">
                             <span style={{ width: `${percent}%` }} />
                           </div>
-                          <em className="subtle">已创建 {batch.created}/{batch.total}</em>
+                          <em className="subtle">任务成功 {batch.succeeded}/{batch.total}，已创建 {batch.created}/{batch.total}</em>
                         </div>
                       </td>
                       <td>{formatDate(batch.createdAt)}</td>

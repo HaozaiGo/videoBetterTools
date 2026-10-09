@@ -8,7 +8,23 @@ from app.models import Asset, Base, Task, User, Wallet
 from app.services import now
 
 
-def test_queued_gpu_jobs_uses_queue_order_and_precise_names() -> None:
+class FakeRqJob:
+    def __init__(self, task_id: str) -> None:
+        self.args = (task_id,)
+
+
+class FakeTaskQueue:
+    job_ids = ["job-task-2", "job-task-1"]
+
+    def fetch_job(self, job_id: str) -> FakeRqJob | None:
+        mapping = {
+            "job-task-2": FakeRqJob("task-2"),
+            "job-task-1": FakeRqJob("task-1"),
+        }
+        return mapping.get(job_id)
+
+
+def test_queued_gpu_jobs_uses_queue_order_and_precise_names(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
 
@@ -47,12 +63,15 @@ def test_queued_gpu_jobs_uses_queue_order_and_precise_names() -> None:
             db.add_all([asset, task])
         db.commit()
 
+        monkeypatch.setattr(admin, "task_queue", lambda: FakeTaskQueue())
         queued_jobs = admin._queued_gpu_jobs(db)
 
-    assert [job["taskId"] for job in queued_jobs] == ["task-1", "task-2"]
+    assert [job["taskId"] for job in queued_jobs] == ["task-2", "task-1"]
     assert queued_jobs[0]["position"] == 1
-    assert queued_jobs[0]["queueState"] == "waiting"
+    assert queued_jobs[0]["queueState"] == "queued"
     assert queued_jobs[1]["position"] == 2
-    assert queued_jobs[1]["queueState"] == "waiting"
+    assert queued_jobs[1]["queueState"] == "queued"
     assert queued_jobs[0]["displayName"] == "143.和离后，我停了他的续命香（59集）"
-    assert queued_jobs[0]["displaySubtitle"] == "第 1 集 · episode-1.mp4"
+    assert queued_jobs[0]["displaySubtitle"] == "第 2 集 · episode-2.mp4"
+    assert queued_jobs[0]["id"] == "job-task-2"
+    assert queued_jobs[0]["providerJobId"] == "provider-2"

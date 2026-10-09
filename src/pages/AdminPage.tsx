@@ -256,7 +256,7 @@ export function AdminPage() {
                   <strong>{job.displayName || job.inputAssetName || job.toolSlug || "video"}</strong>
                   <span>{job.displaySubtitle || job.taskId || job.id}</span>
                 </div>
-                <span>{job.queueState === "waiting" ? `等待调度 ${job.position}` : job.queueState === "scheduled" ? `延迟重试 ${job.position}` : `第 ${job.position} 位`}</span>
+                <span>{job.queueState === "queued" ? `真实队列 ${job.position}` : job.queueState === "waiting" ? `等待调度 ${job.position}` : job.queueState === "scheduled" ? `延迟重试 ${job.position}` : `第 ${job.position} 位`}</span>
                 <span>{job.taskStatus ? statusLabel(job.taskStatus) : "排队中"}</span>
                 <span>{job.progressPercent}%</span>
                 <em>{job.progressStage || "等待 worker 领取任务"}</em>

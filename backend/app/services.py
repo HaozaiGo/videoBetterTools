@@ -429,6 +429,21 @@ def internal_batch_status(db: Session, user_id: str, batch_id: str) -> dict:
     total = internal_batch_expected_total_from_tasks(tasks)
     missing = max(0, total - created)
     succeeded = sum(1 for task in tasks if task.status == "succeeded")
+    missing_result_tasks: list[dict] = []
+    for index, task in enumerate(tasks, start=1):
+        missing_reason = task_result_missing_reason(task)
+        if missing_reason:
+            params = task.params if isinstance(task.params, dict) else {}
+            missing_result_tasks.append(
+                {
+                    "taskId": task.id,
+                    "episode": params.get("internalBatchIndex") or index,
+                    "inputAssetName": task.input_asset.original_name if task.input_asset else "",
+                    "reason": missing_reason,
+                }
+            )
+    missing_result_count = len(missing_result_tasks)
+    available_results = max(0, succeeded - missing_result_count)
     failed = sum(1 for task in tasks if task.status == "failed")
     cancelled = sum(1 for task in tasks if task.status == "cancelled")
     active_processing = sum(1 for task in tasks if task.status in {"queued", "processing"})
@@ -439,11 +454,15 @@ def internal_batch_status(db: Session, user_id: str, batch_id: str) -> dict:
         "total": total,
         "created": created,
         "succeeded": succeeded,
+        "availableResults": available_results,
+        "missingResultCount": missing_result_count,
         "failed": failed,
         "cancelled": cancelled,
         "missing": missing,
         "processing": processing,
-        "downloadReady": succeeded > 0 and missing == 0 and active_processing == 0,
+        "missingResults": missing_result_count,
+        "missingResultTasks": missing_result_tasks,
+        "downloadReady": available_results > 0 and missing_result_count == 0 and missing == 0 and active_processing == 0,
         "tasks": [task_to_dict(task, verify_result=True) for task in tasks],
     }
 
@@ -451,6 +470,7 @@ def internal_batch_status(db: Session, user_id: str, batch_id: str) -> dict:
 def _internal_batch_zip_entries(db: Session, user_id: str, batch_id: str) -> tuple[dict, list[dict], list[dict]]:
     batch = internal_batch_status(db, user_id, batch_id)
     if not batch["downloadReady"]:
+        _raise_for_internal_batch_zip_missing_results(batch)
         raise HTTPException(status_code=409, detail=f"batch is not complete: {batch['succeeded']}/{batch['total']} succeeded, {batch['processing']} pending")
 
     tasks = _internal_batch_tasks(db, user_id, batch_id)
