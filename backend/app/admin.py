@@ -524,13 +524,6 @@ def _zip_process_message(batch: dict, zip_status: str, zip_job: dict | None) -> 
     failed = int(batch["failed"])
     cancelled = int(batch["cancelled"])
     missing_results = int(batch.get("missingResultCount") or 0)
-    if missing_results > 0:
-        return "failed", f"已有成功任务的结果文件缺失：{missing_results} 个；请先在内部任务里重跑缺失集后再打包"
-    if missing > 0 and active_processing <= 0:
-        return "failed", f"批次任务数不完整：缺少 {missing} 个任务，当前已创建 {batch.get('created', total - missing)}/{total}；请补传或重新创建完整批次"
-    if processing > 0:
-        suffix = f"，缺少 {missing} 个未创建任务" if missing else ""
-        return "tasks", f"任务还没全部完成：{processing} 个仍未完成，已成功 {succeeded}/{total}{suffix}"
     if zip_job:
         state = str(zip_job.get("state") or "")
         if state == "queued":
@@ -542,6 +535,15 @@ def _zip_process_message(batch: dict, zip_status: str, zip_job: dict | None) -> 
             retries = zip_job.get("retriesLeft")
             suffix = f"，剩余重试 {retries} 次" if retries is not None else ""
             return "retry", f"ZIP 任务等待自动重试{suffix}"
+    if missing_results > 0:
+        return "failed", f"已有成功任务的结果文件缺失：{missing_results} 个；请先在内部任务里重跑缺失集后再打包"
+    if missing > 0 and active_processing <= 0:
+        return "failed", f"批次任务数不完整：缺少 {missing} 个任务，当前已创建 {batch.get('created', total - missing)}/{total}；请补传或重新创建完整批次"
+    if processing > 0:
+        suffix = f"，缺少 {missing} 个未创建任务" if missing else ""
+        return "tasks", f"任务还没全部完成：{processing} 个仍未完成，已成功 {succeeded}/{total}{suffix}"
+    if zip_job:
+        state = str(zip_job.get("state") or "")
         if state == "failed":
             exc_info = str(zip_job.get("excInfo") or "")
             if "结果文件缺失" in exc_info:

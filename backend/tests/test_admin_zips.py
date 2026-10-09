@@ -1269,3 +1269,22 @@ def test_admin_internal_batch_zips_processing_does_not_plan_archives(monkeypatch
 
     assert payload["page"]["total"] == 1
     assert payload["items"][0]["batchId"] == "zip-fast-batch"
+
+
+def test_zip_process_message_prefers_active_zip_job_for_partial_batch() -> None:
+    batch = {
+        "processing": 1,
+        "missing": 1,
+        "activeProcessing": 0,
+        "succeeded": 99,
+        "total": 100,
+        "failed": 0,
+        "cancelled": 0,
+        "missingResultCount": 0,
+        "created": 99,
+    }
+
+    stage, message = admin._zip_process_message(batch, "processing", {"state": "started"})
+
+    assert stage == "gpu"
+    assert message == "ZIP worker 已接单：GPU 正在打包或上传 TOS"
