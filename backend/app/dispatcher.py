@@ -1,4 +1,5 @@
 import time
+from collections import defaultdict
 from datetime import timezone
 
 from sqlalchemy import select
@@ -36,6 +37,39 @@ def _task_priority_key(task: Task) -> tuple[int, int, int, int, int, float]:
     )
 
 
+def _task_batch_key(task: Task) -> str:
+    params = task.params if isinstance(task.params, dict) else {}
+    batch_id = str(params.get("internalBatchId") or "").strip()
+    if batch_id:
+        return f"internal:{task.user_id}:{batch_id}"
+    return f"task:{task.id}"
+
+
+def _task_episode_key(task: Task) -> tuple[int, float]:
+    params = task.params if isinstance(task.params, dict) else {}
+    try:
+        episode = int(params.get("internalBatchIndex") or 0)
+    except (TypeError, ValueError):
+        episode = 0
+    return (episode if episode > 0 else 999_999, task.created_at.timestamp())
+
+
+def _batch_fifo_ordered_tasks(tasks: list[Task]) -> list[Task]:
+    if not settings.gpu_queue_batch_fifo_enabled:
+        return sorted(tasks, key=_task_priority_key)
+    grouped: dict[str, list[Task]] = defaultdict(list)
+    for task in tasks:
+        grouped[_task_batch_key(task)].append(task)
+    batches = list(grouped.values())
+    for batch_tasks in batches:
+        batch_tasks.sort(key=lambda task: (_task_priority_key(task), _task_episode_key(task)))
+    batches.sort(key=lambda batch_tasks: min(_task_priority_key(task) for task in batch_tasks))
+    ordered: list[Task] = []
+    for batch_tasks in batches:
+        ordered.extend(batch_tasks)
+    return ordered
+
+
 def _queued_rq_task_ids() -> set[str]:
     queue = task_queue()
     task_ids: set[str] = set()
@@ -51,6 +85,102 @@ def _queued_rq_task_ids() -> set[str]:
         if task_id:
             task_ids.add(task_id)
     return task_ids
+
+
+def _reorder_queued_rq_jobs_batch_fifo(db) -> int:
+    if not settings.gpu_queue_batch_fifo_enabled:
+        return 0
+    try:
+        queue = task_queue()
+        job_ids = list(queue.job_ids)
+    except Exception:
+        return 0
+    scan_size = max(0, int(settings.gpu_queue_batch_fifo_reorder_scan_size))
+    if scan_size:
+        job_ids = job_ids[:scan_size]
+    if len(job_ids) <= 1:
+        return 0
+
+    task_id_by_job_id: dict[str, str] = {}
+    job_ids_by_task_id: dict[str, list[str]] = defaultdict(list)
+    passthrough_job_ids: list[str] = []
+    for job_id in job_ids:
+        try:
+            job = queue.fetch_job(job_id)
+        except Exception:
+            passthrough_job_ids.append(str(job_id))
+            continue
+        if job is None or not job.args:
+            passthrough_job_ids.append(str(job_id))
+            continue
+        task_id = str(job.args[0] or "").strip()
+        if not task_id:
+            passthrough_job_ids.append(str(job_id))
+            continue
+        normalized_job_id = str(job_id)
+        task_id_by_job_id[normalized_job_id] = task_id
+        job_ids_by_task_id[task_id].append(normalized_job_id)
+    if not task_id_by_job_id:
+        return 0
+
+    tasks = list(
+        db.execute(
+            select(Task)
+            .where(Task.id.in_(set(task_id_by_job_id.values())))
+        ).scalars()
+    )
+    task_by_id = {task.id: task for task in tasks}
+    batch_first_position: dict[str, int] = {}
+    batch_job_ids: dict[str, list[str]] = defaultdict(list)
+    passthrough_index = 0
+    for position, job_id in enumerate(job_ids):
+        normalized_job_id = str(job_id)
+        task_id = task_id_by_job_id.get(normalized_job_id)
+        task = task_by_id.get(task_id or "")
+        if task is None:
+            batch_key = f"passthrough:{passthrough_index}"
+            passthrough_index += 1
+        else:
+            batch_key = _task_batch_key(task)
+        batch_first_position.setdefault(batch_key, position)
+        batch_job_ids[batch_key].append(normalized_job_id)
+
+    reordered_prefix: list[str] = []
+    for batch_key in sorted(batch_job_ids, key=lambda key: batch_first_position[key]):
+        reordered_prefix.extend(batch_job_ids[batch_key])
+    if reordered_prefix == [str(job_id) for job_id in job_ids]:
+        return 0
+
+    script = """
+local key = KEYS[1]
+local current = redis.call('LRANGE', key, 0, -1)
+local current_set = {}
+for i = 1, #current do
+  current_set[current[i]] = true
+end
+local selected = {}
+local next_items = {}
+for i = 1, #ARGV do
+  local id = ARGV[i]
+  selected[id] = true
+  if current_set[id] then
+    table.insert(next_items, id)
+  end
+end
+for i = 1, #current do
+  local id = current[i]
+  if not selected[id] then
+    table.insert(next_items, id)
+  end
+end
+redis.call('DEL', key)
+if #next_items > 0 then
+  redis.call('RPUSH', key, unpack(next_items))
+end
+return #next_items
+"""
+    queue.connection.eval(script, 1, queue.key, *reordered_prefix)
+    return len(reordered_prefix)
 
 
 def _task_created_at_seconds(task: Task) -> int:
@@ -97,6 +227,7 @@ def dispatch_provider_queue_once(limit: int | None = None) -> dict:
     dispatched: list[str] = []
 
     with SessionLocal() as db:
+        _reorder_queued_rq_jobs_batch_fifo(db)
         remote_inflight_limit = max(0, int(settings.gpu_remote_inflight_limit))
         if remote_inflight_limit and _remote_gpu_inflight_count(db, now_seconds) >= remote_inflight_limit:
             return {"dispatched": 0, "taskIds": []}
@@ -109,13 +240,18 @@ def dispatch_provider_queue_once(limit: int | None = None) -> dict:
                 .limit(max(limit * 100, 1000))
             ).scalars()
         )
-        tasks.sort(key=_task_priority_key)
+        tasks = _batch_fifo_ordered_tasks(tasks)
+        blocked_batch_keys: set[str] = set()
         for task in tasks:
             if len(dispatched) >= limit:
                 break
+            batch_key = _task_batch_key(task)
+            if batch_key in blocked_batch_keys:
+                continue
             if task.id in already_enqueued:
                 continue
             if not _task_cooldown_ready(task, now_seconds):
+                blocked_batch_keys.add(batch_key)
                 continue
             enqueue_provider_job(task.id)
             already_enqueued.add(task.id)

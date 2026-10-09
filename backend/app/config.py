@@ -77,6 +77,8 @@ class Settings(BaseSettings):
     gpu_queue_dispatch_interval_seconds: int = 30
     gpu_queue_dispatch_batch_size: int = 8
     gpu_queue_dispatch_cooldown_seconds: int = 180
+    gpu_queue_batch_fifo_enabled: bool = True
+    gpu_queue_batch_fifo_reorder_scan_size: int = 2000
     gpu_remote_inflight_limit: int = 16
     gpu_remote_inflight_stale_seconds: int = 1800
 

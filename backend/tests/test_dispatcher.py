@@ -114,6 +114,64 @@ def test_dispatcher_keeps_manual_priority_ahead(monkeypatch) -> None:
     assert enqueued == ["boosted-task", "normal-task"]
 
 
+def test_dispatcher_drains_same_internal_batch_before_next_batch(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    enqueued: list[str] = []
+    monkeypatch.setattr(dispatcher, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(dispatcher, "_queued_rq_task_ids", lambda: set())
+    monkeypatch.setattr(dispatcher, "enqueue_provider_job", enqueued.append)
+
+    with Session(engine) as db:
+        user = User(id="user-batch-fifo", email="batch-fifo@example.com", name="Batch FIFO", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+        for index, (task_id, batch_id, batch_name, episode) in enumerate(
+            [
+                ("batch-a-1", "batch-a", "A batch", 1),
+                ("batch-b-1", "batch-b", "B batch", 1),
+                ("batch-a-2", "batch-a", "A batch", 2),
+                ("batch-b-2", "batch-b", "B batch", 2),
+            ],
+            start=1,
+        ):
+            asset = Asset(
+                id=f"asset-{task_id}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"{task_id}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"{task_id}.mp4",
+                url=f"https://cdn.example.test/{task_id}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=task_id,
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=asset.id,
+                status="queued",
+                params={"internalBatchId": batch_id, "internalBatchName": batch_name, "internalBatchIndex": episode},
+                estimated_credits=0,
+                frozen_credits=0,
+                charged_credits=0,
+                provider="mock",
+                provider_job_id=f"provider-{task_id}",
+                progress_percent=5,
+                progress_stage="等待调度",
+                created_at=now() + timedelta(seconds=index),
+            )
+            db.add_all([asset, task])
+        db.commit()
+
+    result = dispatcher.dispatch_provider_queue_once(limit=4)
+
+    assert result == {"dispatched": 4, "taskIds": ["batch-a-1", "batch-a-2", "batch-b-1", "batch-b-2"]}
+    assert enqueued == ["batch-a-1", "batch-a-2", "batch-b-1", "batch-b-2"]
+
+
 def test_dispatcher_stops_when_remote_gpu_inflight_limit_is_reached(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
