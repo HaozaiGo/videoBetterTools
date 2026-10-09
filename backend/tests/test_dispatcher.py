@@ -62,17 +62,14 @@ def test_dispatcher_enqueues_ready_tasks_and_skips_cooling_down_tasks(monkeypatc
     assert enqueued == ["task-1", "task-after-cooldown"]
 
 
-def test_dispatcher_moves_to_next_batch_when_active_batch_is_cooling(monkeypatch) -> None:
+def test_dispatcher_keeps_active_batch_lock_when_active_batch_is_cooling(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     enqueued: list[str] = []
-    stored: list[str] = []
     monkeypatch.setattr(dispatcher, "SessionLocal", lambda: Session(engine))
     monkeypatch.setattr(dispatcher, "_queued_rq_task_ids", lambda: set())
     monkeypatch.setattr(dispatcher, "enqueue_provider_job", enqueued.append)
     monkeypatch.setattr(dispatcher, "_select_active_batch_key", lambda _db, _queued: "internal:user-cooling-active:batch-a")
-    monkeypatch.setattr(dispatcher, "_clear_active_batch_key", lambda: stored.append(""))
-    monkeypatch.setattr(dispatcher, "_store_active_batch_key", stored.append)
     monkeypatch.setattr(dispatcher.settings, "gpu_queue_dispatch_cooldown_seconds", 180)
     monkeypatch.setattr(dispatcher.settings, "gpu_remote_inflight_limit", 0)
 
@@ -123,9 +120,8 @@ def test_dispatcher_moves_to_next_batch_when_active_batch_is_cooling(monkeypatch
 
     result = dispatcher.dispatch_provider_queue_once(limit=2)
 
-    assert result == {"dispatched": 1, "taskIds": ["batch-b-ready"]}
-    assert enqueued == ["batch-b-ready"]
-    assert stored == ["", "internal:user-cooling-active:batch-b"]
+    assert result == {"dispatched": 0, "taskIds": []}
+    assert enqueued == []
 
 
 def test_dispatcher_keeps_manual_priority_ahead(monkeypatch) -> None:

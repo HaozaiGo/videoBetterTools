@@ -338,15 +338,6 @@ def _remote_gpu_inflight_count(db, now_seconds: int | None = None) -> int:
     return sum(1 for task in tasks if _remote_gpu_task_occupies_inflight_slot(task, now_seconds))
 
 
-def _batch_has_ready_task(tasks: list[Task], batch_key: str, already_enqueued: set[str], now_seconds: int) -> bool:
-    return any(
-        _task_batch_key(task) == batch_key
-        and task.id not in already_enqueued
-        and _task_cooldown_ready(task, now_seconds)
-        for task in tasks
-    )
-
-
 def dispatch_provider_queue_once(limit: int | None = None) -> dict:
     limit = max(1, int(limit or settings.gpu_queue_dispatch_batch_size))
     now_seconds = int(time.time())
@@ -361,15 +352,6 @@ def dispatch_provider_queue_once(limit: int | None = None) -> dict:
         if remote_inflight_limit and _remote_gpu_inflight_count(db, now_seconds) >= remote_inflight_limit:
             return {"dispatched": 0, "taskIds": []}
         tasks = _batch_fifo_ordered_tasks(queued_tasks)
-        if active_batch_key and not _batch_has_ready_task(tasks, active_batch_key, already_enqueued, now_seconds):
-            active_batch_key = ""
-            _clear_active_batch_key()
-            for task in tasks:
-                candidate_batch_key = _task_batch_key(task)
-                if _batch_has_ready_task(tasks, candidate_batch_key, already_enqueued, now_seconds):
-                    active_batch_key = candidate_batch_key
-                    _store_active_batch_key(active_batch_key)
-                    break
         if active_batch_key:
             tasks = [task for task in tasks if _task_batch_key(task) == active_batch_key]
         for task in tasks:
