@@ -792,6 +792,17 @@ def _remote_internal_batch_zip_enabled() -> bool:
     return bool(settings.internal_batch_zip_gpu_enabled and settings.model_plaza_gpu_api_url and storage.is_remote)
 
 
+def _internal_batch_complete_zip_ready(batch: dict) -> bool:
+    return (
+        int(batch.get("availableResults") or 0) >= int(batch.get("total") or 0)
+        and int(batch.get("missingResultCount") or 0) == 0
+        and int(batch.get("missing") or 0) == 0
+        and int(batch.get("processing") or 0) == 0
+        and int(batch.get("failed") or 0) == 0
+        and int(batch.get("cancelled") or 0) == 0
+    )
+
+
 def _completed_internal_batch_id_for_auto_zip(db: Session, task: Task) -> str | None:
     if not settings.internal_batch_zip_auto_prepare_enabled or not _remote_internal_batch_zip_enabled():
         return None
@@ -808,7 +819,120 @@ def _completed_internal_batch_id_for_auto_zip(db: Session, task: Task) -> str | 
     terminal_statuses = {"succeeded", "failed", "cancelled"}
     if any(item.status not in terminal_statuses for item in tasks):
         return None
+    try:
+        batch = internal_batch_status(db, task.user_id, batch_id)
+    except Exception:
+        logger.exception("Failed to inspect internal batch %s before auto ZIP enqueue", batch_id)
+        return None
+    if not _internal_batch_complete_zip_ready(batch):
+        return None
     return batch_id
+
+
+def _internal_batch_auto_repair_retry_limit() -> int:
+    try:
+        return max(0, int(settings.internal_batch_zip_auto_repair_retry_max))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _prepare_internal_batch_auto_repair_task(db: Session, task: Task) -> str | None:
+    params = task.params if isinstance(task.params, dict) else {}
+    missing_reason = task_result_missing_reason(task)
+    if task.status == "succeeded" and missing_reason:
+        repair_reason = missing_reason
+    elif task.status in {"failed", "cancelled"}:
+        repair_reason = task.error_code or task.progress_stage or task.status
+    else:
+        return None
+
+    retry_limit = _internal_batch_auto_repair_retry_limit()
+    retry_count = int(params.get("_autoZipRepairRetryCount") or 0)
+    if retry_limit <= 0 or retry_count >= retry_limit:
+        return None
+
+    tool = get_tool(task.tool_slug)
+    if tool is None or tool["status"] != "online":
+        logger.warning("Skip auto ZIP repair for task %s because tool is unavailable", task.id)
+        return None
+    input_asset = getattr(task, "input_asset", None) or db.get(Asset, task.input_asset_id)
+    if input_asset is None or input_asset.user_id != task.user_id:
+        logger.warning("Skip auto ZIP repair for task %s because input asset is missing", task.id)
+        return None
+    try:
+        ensure_input_asset_remote_readable(input_asset)
+    except HTTPException:
+        logger.warning("Skip auto ZIP repair for task %s because input asset is not remotely readable", task.id)
+        return None
+
+    repair_params = clear_remote_gpu_retry_params(params)
+    retry_at = int(now().timestamp() * 1000)
+    repair_params.update(
+        {
+            "forceSingleGpu": True,
+            "exclusiveGpu": True,
+            "singleGpuRetry": True,
+            "singleGpuRetryAt": retry_at,
+            "_noChargeRetry": True,
+            "_autoZipRepairRetryAt": retry_at,
+            "_autoZipRepairRetryCount": retry_count + 1,
+            "_autoZipRepairReason": repair_reason,
+        }
+    )
+    if missing_reason:
+        repair_params["_missingResultRetryAt"] = retry_at
+        repair_params["_missingResultReason"] = missing_reason
+
+    task.params = repair_params
+    task.status = "queued"
+    task.provider_job_id = f"mock_{uuid4()}"
+    task.frozen_credits = 0
+    task.error_code = None
+    task.progress_percent = 0
+    task.progress_stage = "批次收尾巡检发现 ZIP 不可生成，已自动单卡重跑"
+    task.output_asset_id = None
+    task.output_url = ""
+    task.completed_at = None
+    cancel_marker = settings.upload_path / f"{task.id}.cancel"
+    cancel_marker.unlink(missing_ok=True)
+    return task.id
+
+
+def _auto_repair_internal_batch_for_zip(db: Session, task: Task) -> list[str]:
+    if not settings.internal_batch_zip_auto_repair_enabled:
+        return []
+    if task.tool_slug != "subtitle-translate-workflow" or not isinstance(task.params, dict):
+        return []
+    batch_id = str(task.params.get("internalBatchId") or "").strip()
+    if not batch_id:
+        return []
+
+    tasks = _internal_batch_tasks(db, task.user_id, batch_id)
+    if not tasks:
+        return []
+    if any(item.status in {"queued", "processing"} for item in tasks):
+        return []
+
+    try:
+        batch = internal_batch_status(db, task.user_id, batch_id)
+    except Exception:
+        logger.exception("Failed to inspect internal batch %s before auto ZIP repair", batch_id)
+        return []
+    if _internal_batch_complete_zip_ready(batch):
+        return []
+
+    repaired_task_ids: list[str] = []
+    for item in tasks:
+        try:
+            repaired_task_id = _prepare_internal_batch_auto_repair_task(db, item)
+        except Exception:
+            logger.exception("Failed to prepare auto ZIP repair for task %s", item.id)
+            repaired_task_id = None
+        if repaired_task_id:
+            repaired_task_ids.append(repaired_task_id)
+    if repaired_task_ids:
+        logger.info("Auto ZIP repair queued %s tasks for internal batch %s", len(repaired_task_ids), batch_id)
+    return repaired_task_ids
 
 
 def _enqueue_internal_batch_zip_after_commit(user_id: str, batch_id: str) -> None:
@@ -1791,6 +1915,7 @@ def provider_callback(
     wallet = get_wallet(db, task.user_id, lock=True)
     tool = get_tool(task.tool_slug) or {"name": task.tool_slug}
     auto_zip_batch_id: str | None = None
+    auto_repair_task_ids: list[str] = []
 
     if progress_percent is not None:
         normalized_progress = max(0, min(100, progress_percent))
@@ -1839,6 +1964,7 @@ def provider_callback(
         task.progress_percent = 100
         task.progress_stage = "处理完成，结果已入库"
         task.output_asset_id = output_asset.id
+        task.output_asset = output_asset
         task.output_url = output_asset.url
         task.charged_credits = previous_charged if no_charge_retry else charge
         task.completed_at = now()
@@ -1857,8 +1983,15 @@ def provider_callback(
         wallet.frozen_credits = max(0, wallet.frozen_credits - task.frozen_credits)
         add_ledger(db, task.user_id, "refund", 0, f"{tool['name']} 失败，释放 {task.frozen_credits} 积分", task.id)
 
+    if task.status in {"succeeded", "failed", "cancelled"}:
+        auto_repair_task_ids = _auto_repair_internal_batch_for_zip(db, task)
+        if auto_repair_task_ids:
+            auto_zip_batch_id = None
+
     db.commit()
     db.refresh(task)
     if auto_zip_batch_id:
         _enqueue_internal_batch_zip_after_commit(task.user_id, auto_zip_batch_id)
+    for repair_task_id in auto_repair_task_ids:
+        enqueue_provider_job(repair_task_id)
     return False, task

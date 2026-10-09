@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     internal_batch_zip_gpu_enabled: bool = False
     internal_batch_zip_gpu_timeout_seconds: int = 7200
     internal_batch_zip_auto_prepare_enabled: bool = False
+    internal_batch_zip_auto_repair_enabled: bool = True
+    internal_batch_zip_auto_repair_retry_max: int = 2
     internal_batch_zip_retry_max: int = 5
     internal_batch_zip_retry_interval_seconds: int = 60
     result_finalize_retry_max: int = 6

@@ -878,6 +878,221 @@ def test_completed_internal_batch_auto_enqueues_gpu_zip_prepare(tmp_path, monkey
     assert enqueued == [("user-auto-zip", batch_id)]
 
 
+def test_completed_internal_batch_auto_repairs_failed_task_for_zip(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(services.settings, "internal_batch_zip_auto_repair_enabled", True)
+    monkeypatch.setattr(
+        services,
+        "storage",
+        FakeRemoteStorage(existing_keys={"input-done.mp4", "input-failed.mp4", "model-plaza/output/videos/done.mp4"}),
+    )
+    enqueued: list[tuple[str, bool]] = []
+    monkeypatch.setattr(services, "enqueue_provider_job", lambda task_id, at_front=False: enqueued.append((task_id, at_front)))
+
+    batch_id = "auto-repair-failed-batch"
+    with Session(engine) as db:
+        user = User(id="user-auto-repair-failed", email="auto-repair-failed@example.com", name="Auto Repair Failed", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=1)
+        done_input = Asset(
+            id="auto-repair-done-input",
+            user_id=user.id,
+            kind="video",
+            original_name="done.mp4",
+            mime_type="video/mp4",
+            storage_key="input-done.mp4",
+            url="https://tos.example.test/input-done.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        failed_input = Asset(
+            id="auto-repair-failed-input",
+            user_id=user.id,
+            kind="video",
+            original_name="failed.mp4",
+            mime_type="video/mp4",
+            storage_key="input-failed.mp4",
+            url="https://tos.example.test/input-failed.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() - timedelta(days=1),
+        )
+        done_task = Task(
+            id="auto-repair-done-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=done_input.id,
+            status="processing",
+            params={"internalBatchId": batch_id, "internalBatchName": "auto repair failed", "internalBatchTotal": 2},
+            estimated_credits=1,
+            frozen_credits=1,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="auto-repair-done-provider",
+            progress_percent=95,
+            progress_stage="远端处理完成",
+        )
+        failed_task = Task(
+            id="auto-repair-failed-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=failed_input.id,
+            status="failed",
+            params={"internalBatchId": batch_id, "internalBatchName": "auto repair failed", "internalBatchTotal": 2},
+            estimated_credits=1,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="old-failed-provider",
+            error_code="CUDA_OUT_OF_MEMORY",
+            progress_percent=10,
+            progress_stage="显存不足",
+            completed_at=now(),
+        )
+        db.add_all([user, wallet, done_input, failed_input, done_task, failed_task])
+        db.commit()
+
+        services.provider_callback(
+            db,
+            "auto-repair-done-provider",
+            "succeeded",
+            callback_id="auto-repair-done-provider:succeeded",
+            output_url="https://tos.example.test/done.mp4",
+            output_storage_key="model-plaza/output/videos/done.mp4",
+            output_mime_type="video/mp4",
+            output_size_bytes=10,
+        )
+        repaired = db.get(Task, failed_task.id)
+        wallet_after = db.get(Wallet, user.id)
+
+    assert repaired.status == "queued"
+    assert repaired.provider_job_id != "old-failed-provider"
+    assert repaired.params["forceSingleGpu"] is True
+    assert repaired.params["exclusiveGpu"] is True
+    assert repaired.params["_noChargeRetry"] is True
+    assert repaired.params["_autoZipRepairRetryCount"] == 1
+    assert repaired.params["_autoZipRepairReason"] == "CUDA_OUT_OF_MEMORY"
+    assert repaired.frozen_credits == 0
+    assert wallet_after.frozen_credits == 0
+    assert enqueued == [("auto-repair-failed-task", False)]
+
+
+def test_completed_internal_batch_auto_repairs_missing_result_for_zip(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services.settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(services.settings, "internal_batch_zip_auto_repair_enabled", True)
+    monkeypatch.setattr(
+        services,
+        "storage",
+        FakeRemoteStorage(existing_keys={"input-missing-result.mp4", "input-current.mp4", "model-plaza/output/videos/current.mp4"}),
+    )
+    enqueued: list[tuple[str, bool]] = []
+    monkeypatch.setattr(services, "enqueue_provider_job", lambda task_id, at_front=False: enqueued.append((task_id, at_front)))
+
+    batch_id = "auto-repair-missing-result-batch"
+    with Session(engine) as db:
+        user = User(id="user-auto-repair-missing", email="auto-repair-missing@example.com", name="Auto Repair Missing", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=1)
+        missing_input = Asset(
+            id="auto-repair-missing-input",
+            user_id=user.id,
+            kind="video",
+            original_name="missing.mp4",
+            mime_type="video/mp4",
+            storage_key="input-missing-result.mp4",
+            url="https://tos.example.test/input-missing-result.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() - timedelta(days=1),
+        )
+        missing_output = Asset(
+            id="auto-repair-missing-output",
+            user_id=user.id,
+            kind="result",
+            original_name="missing-result.mp4",
+            mime_type="video/mp4",
+            storage_key="model-plaza/output/videos/missing-result.mp4",
+            url="https://tos.example.test/missing-result.mp4",
+            size_bytes=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        current_input = Asset(
+            id="auto-repair-current-input",
+            user_id=user.id,
+            kind="video",
+            original_name="current.mp4",
+            mime_type="video/mp4",
+            storage_key="input-current.mp4",
+            url="https://tos.example.test/input-current.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        missing_task = Task(
+            id="auto-repair-missing-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=missing_input.id,
+            output_asset_id=missing_output.id,
+            status="succeeded",
+            params={"internalBatchId": batch_id, "internalBatchName": "auto repair missing", "internalBatchTotal": 2},
+            estimated_credits=1,
+            frozen_credits=0,
+            charged_credits=1,
+            provider="mock",
+            provider_job_id="old-missing-provider",
+            output_url=missing_output.url,
+            progress_percent=100,
+            progress_stage="处理完成",
+            completed_at=now(),
+        )
+        current_task = Task(
+            id="auto-repair-current-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=current_input.id,
+            status="processing",
+            params={"internalBatchId": batch_id, "internalBatchName": "auto repair missing", "internalBatchTotal": 2},
+            estimated_credits=1,
+            frozen_credits=1,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="auto-repair-current-provider",
+            progress_percent=95,
+            progress_stage="远端处理完成",
+        )
+        db.add_all([user, wallet, missing_input, missing_output, current_input, missing_task, current_task])
+        db.commit()
+
+        services.provider_callback(
+            db,
+            "auto-repair-current-provider",
+            "succeeded",
+            callback_id="auto-repair-current-provider:succeeded",
+            output_url="https://tos.example.test/current.mp4",
+            output_storage_key="model-plaza/output/videos/current.mp4",
+            output_mime_type="video/mp4",
+            output_size_bytes=10,
+        )
+        repaired = db.get(Task, missing_task.id)
+        wallet_after = db.get(Wallet, user.id)
+
+    assert repaired.status == "queued"
+    assert repaired.provider_job_id != "old-missing-provider"
+    assert repaired.params["forceSingleGpu"] is True
+    assert repaired.params["exclusiveGpu"] is True
+    assert repaired.params["_noChargeRetry"] is True
+    assert repaired.params["_missingResultReason"] == "结果对象存储文件不存在，可能已过期清理"
+    assert repaired.params["_autoZipRepairRetryCount"] == 1
+    assert repaired.output_asset_id is None
+    assert repaired.charged_credits == 1
+    assert wallet_after.frozen_credits == 0
+    assert enqueued == [("auto-repair-missing-task", False)]
+
+
 def test_internal_batch_retry_resets_failed_and_cancelled_tasks(tmp_path, monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -1093,7 +1308,7 @@ def test_internal_batch_retry_can_replace_unreadable_input_and_enqueue_front(tmp
 def test_internal_batch_status_flags_succeeded_task_with_missing_result(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
-    monkeypatch.setattr(services, "storage", FakeRemoteStorage(existing_keys={"input-ok.mp4"}))
+    monkeypatch.setattr(services, "storage", FakeRemoteStorage(existing_keys={"input-ok.mp4", "new-result.mp4"}))
 
     with Session(engine) as db:
         user = User(id="user-missing-result", email="missing-result@example.com", name="Missing Result", role="user", status="active")
@@ -1153,7 +1368,7 @@ def test_internal_batch_status_flags_succeeded_task_with_missing_result(monkeypa
 def test_missing_result_retry_fronts_queue_without_double_charge(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
-    monkeypatch.setattr(services, "storage", FakeRemoteStorage(existing_keys={"input-ok.mp4"}))
+    monkeypatch.setattr(services, "storage", FakeRemoteStorage(existing_keys={"input-ok.mp4", "new-result.mp4"}))
     enqueued: list[tuple[str, bool]] = []
 
     def fake_enqueue(task_id: str, at_front: bool = False) -> None:
