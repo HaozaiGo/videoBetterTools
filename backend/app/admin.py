@@ -13,6 +13,7 @@ from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
+from app.dispatcher import DISPATCHABLE_TOOL_SLUGS, _batch_fifo_ordered_tasks, _select_active_batch_key, _task_batch_key
 from app.models import Asset, Task, User, Wallet, WalletLedger
 from app.queue import enqueue_internal_batch_zip, internal_batch_zip_queue, task_queue
 from app.services import add_ledger, create_task, failure_reason_for_task, get_tool, get_wallet, internal_batch_expected_total_from_name, internal_batch_expected_total_from_tasks, internal_batch_status, normalize_pagination, now, page_info, ledger_to_dict, plan_internal_batch_zip, serialize_datetime, task_result_missing_reason, task_to_dict
@@ -1355,14 +1356,51 @@ def _gpu_task_display_payload(task: Task) -> dict:
     }
 
 
+def _planned_gpu_jobs(db: Session, limit: int, skip_task_ids: set[str]) -> list[dict]:
+    if limit <= 0:
+        return []
+    tasks = list(
+        db.execute(
+            select(Task)
+            .where(Task.status == "queued", Task.tool_slug.in_(DISPATCHABLE_TOOL_SLUGS))
+            .options(selectinload(Task.input_asset))
+            .order_by(Task.created_at.asc())
+            .limit(max(limit * 200, 1000))
+        ).scalars()
+    )
+    active_batch_key = _select_active_batch_key(db, tasks)
+    tasks = _batch_fifo_ordered_tasks(tasks)
+    if active_batch_key:
+        tasks = [task for task in tasks if _task_batch_key(task) == active_batch_key]
+
+    planned_jobs = []
+    for task in tasks:
+        if task.id in skip_task_ids:
+            continue
+        payload = _gpu_task_display_payload(task)
+        payload.update(
+            {
+                "id": f"planned-{task.id}",
+                "providerJobId": task.provider_job_id,
+                "position": len(planned_jobs) + 1,
+                "queueState": "waiting",
+                "progressPercent": task.progress_percent,
+                "progressStage": task.progress_stage or "等待 dispatcher 按批次调度",
+                "createdAt": int(task.created_at.timestamp() * 1000),
+            }
+        )
+        planned_jobs.append(payload)
+        if len(planned_jobs) >= limit:
+            break
+    return planned_jobs
+
+
 def _queued_gpu_jobs(db: Session, limit: int = 10) -> list[dict]:
     try:
         queue = task_queue()
         job_ids = list(queue.job_ids)
     except Exception:
-        return []
-    if not job_ids:
-        return []
+        job_ids = []
 
     scan_limit = min(len(job_ids), max(limit * 20, 200))
     ordered_task_positions: list[tuple[int, str, str]] = []
@@ -1377,9 +1415,6 @@ def _queued_gpu_jobs(db: Session, limit: int = 10) -> list[dict]:
         if not task_id:
             continue
         ordered_task_positions.append((position, str(job_id), task_id))
-    if not ordered_task_positions:
-        return []
-
     task_ids = [task_id for _position, _job_id, task_id in ordered_task_positions]
     tasks = list(db.execute(
         select(Task)
@@ -1407,6 +1442,8 @@ def _queued_gpu_jobs(db: Session, limit: int = 10) -> list[dict]:
         queued_jobs.append(payload)
         if len(queued_jobs) >= limit:
             break
+    if len(queued_jobs) < limit:
+        queued_jobs.extend(_planned_gpu_jobs(db, limit - len(queued_jobs), {job["taskId"] for job in queued_jobs}))
     return queued_jobs
 
 
