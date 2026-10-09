@@ -93,9 +93,10 @@ def _queued_rq_task_ids() -> set[str]:
     queue = task_queue()
     task_ids: set[str] = set()
     job_ids = list(queue.get_job_ids())
-    started_registry = getattr(queue, "started_job_registry", None)
-    if started_registry is not None:
-        job_ids.extend(started_registry.get_job_ids())
+    for registry_name in ("started_job_registry", "scheduled_job_registry", "deferred_job_registry"):
+        registry = getattr(queue, registry_name, None)
+        if registry is not None:
+            job_ids.extend(registry.get_job_ids())
     for job_id in job_ids:
         job = queue.fetch_job(job_id)
         if job is None or not job.args:
