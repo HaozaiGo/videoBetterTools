@@ -1,4 +1,5 @@
 from datetime import timedelta
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -112,6 +113,276 @@ def test_dispatcher_keeps_manual_priority_ahead(monkeypatch) -> None:
 
     assert result == {"dispatched": 2, "taskIds": ["boosted-task", "normal-task"]}
     assert enqueued == ["boosted-task", "normal-task"]
+
+
+def test_dispatcher_drains_same_internal_batch_before_next_batch(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    enqueued: list[str] = []
+    monkeypatch.setattr(dispatcher, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(dispatcher, "_queued_rq_task_ids", lambda: set())
+    monkeypatch.setattr(dispatcher, "enqueue_provider_job", enqueued.append)
+
+    with Session(engine) as db:
+        user = User(id="user-batch-fifo", email="batch-fifo@example.com", name="Batch FIFO", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+        for index, (task_id, batch_id, batch_name, episode) in enumerate(
+            [
+                ("batch-a-1", "batch-a", "A batch", 1),
+                ("batch-b-1", "batch-b", "B batch", 1),
+                ("batch-a-2", "batch-a", "A batch", 2),
+                ("batch-b-2", "batch-b", "B batch", 2),
+            ],
+            start=1,
+        ):
+            asset = Asset(
+                id=f"asset-{task_id}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"{task_id}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"{task_id}.mp4",
+                url=f"https://cdn.example.test/{task_id}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=task_id,
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=asset.id,
+                status="queued",
+                params={"internalBatchId": batch_id, "internalBatchName": batch_name, "internalBatchIndex": episode},
+                estimated_credits=0,
+                frozen_credits=0,
+                charged_credits=0,
+                provider="mock",
+                provider_job_id=f"provider-{task_id}",
+                progress_percent=5,
+                progress_stage="等待调度",
+                created_at=now() + timedelta(seconds=index),
+            )
+            db.add_all([asset, task])
+        db.commit()
+
+    result = dispatcher.dispatch_provider_queue_once(limit=4)
+
+    assert result == {"dispatched": 2, "taskIds": ["batch-a-1", "batch-a-2"]}
+    assert enqueued == ["batch-a-1", "batch-a-2"]
+
+    with Session(engine) as db:
+        for task in db.query(Task).filter(Task.id.in_(["batch-a-1", "batch-a-2"])):
+            task.status = "processing"
+        db.commit()
+
+    result = dispatcher.dispatch_provider_queue_once(limit=4)
+
+    assert result == {"dispatched": 2, "taskIds": ["batch-b-1", "batch-b-2"]}
+    assert enqueued == ["batch-a-1", "batch-a-2", "batch-b-1", "batch-b-2"]
+
+
+def test_dispatcher_starts_next_batch_after_active_batch_enters_processing(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    enqueued: list[str] = []
+    monkeypatch.setattr(dispatcher, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(dispatcher, "_queued_rq_task_ids", lambda: set())
+    monkeypatch.setattr(dispatcher, "enqueue_provider_job", enqueued.append)
+    monkeypatch.setattr(dispatcher.settings, "gpu_remote_inflight_limit", 0)
+
+    with Session(engine) as db:
+        user = User(id="user-active-lock", email="active-lock@example.com", name="Active Lock", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+        for index, (task_id, batch_id, status) in enumerate(
+            [
+                ("batch-a-processing", "batch-a", "processing"),
+                ("batch-b-queued", "batch-b", "queued"),
+            ],
+            start=1,
+        ):
+            asset = Asset(
+                id=f"asset-{task_id}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"{task_id}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"{task_id}.mp4",
+                url=f"https://cdn.example.test/{task_id}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=task_id,
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=asset.id,
+                status=status,
+                params={"internalBatchId": batch_id, "internalBatchName": batch_id, "internalBatchIndex": index},
+                estimated_credits=0,
+                frozen_credits=0,
+                charged_credits=0,
+                provider="mock",
+                provider_job_id=f"provider-{task_id}",
+                progress_percent=10 if status == "processing" else 5,
+                progress_stage="开始去字幕" if status == "processing" else "等待调度",
+                created_at=now() + timedelta(seconds=index),
+            )
+            db.add_all([asset, task])
+        db.commit()
+
+    result = dispatcher.dispatch_provider_queue_once(limit=2)
+
+    assert result == {"dispatched": 1, "taskIds": ["batch-b-queued"]}
+    assert enqueued == ["batch-b-queued"]
+
+
+def test_dispatcher_reorders_existing_rq_batch_by_episode(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    class FakeConnection:
+        def __init__(self, queue) -> None:
+            self.queue = queue
+
+        def eval(self, _script, _key_count, _key, *argv):
+            selected = set(argv)
+            self.queue.job_ids = list(argv) + [job_id for job_id in self.queue.job_ids if job_id not in selected]
+            return len(self.queue.job_ids)
+
+    class FakeQueue:
+        def __init__(self) -> None:
+            self.key = "rq:queue:model-plaza-tasks"
+            self.job_ids = ["job-39", "job-57", "job-54"]
+            self.connection = FakeConnection(self)
+
+        def fetch_job(self, job_id):
+            return SimpleNamespace(args=[job_id.replace("job-", "task-")])
+
+    fake_queue = FakeQueue()
+    monkeypatch.setattr(dispatcher, "task_queue", lambda: fake_queue)
+    monkeypatch.setattr(dispatcher.settings, "gpu_queue_batch_fifo_enabled", True)
+    monkeypatch.setattr(dispatcher.settings, "gpu_queue_batch_fifo_reorder_scan_size", 2000)
+
+    with Session(engine) as db:
+        user = User(id="user-rq-fifo", email="rq-fifo@example.com", name="RQ FIFO", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+        for episode in [39, 57, 54]:
+            task_id = f"task-{episode}"
+            asset = Asset(
+                id=f"asset-{task_id}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"{episode}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"{episode}.mp4",
+                url=f"https://cdn.example.test/{episode}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=task_id,
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=asset.id,
+                status="queued",
+                params={"internalBatchId": "batch-rq", "internalBatchName": "RQ batch", "internalBatchIndex": episode},
+                estimated_credits=0,
+                frozen_credits=0,
+                charged_credits=0,
+                provider="mock",
+                provider_job_id=f"provider-{task_id}",
+                progress_percent=5,
+                progress_stage="等待调度",
+            )
+            db.add_all([asset, task])
+        db.commit()
+
+        reordered = dispatcher._reorder_queued_rq_jobs_batch_fifo(db)
+
+    assert reordered == 3
+    assert fake_queue.job_ids == ["job-39", "job-54", "job-57"]
+
+
+def test_dispatcher_active_batch_prunes_other_batches_from_rq(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    class FakeConnection:
+        def __init__(self, queue) -> None:
+            self.queue = queue
+
+        def eval(self, _script, _key_count, _key, *argv):
+            args = list(argv)
+            delimiter = args.index("__SCANNED_JOB_IDS__")
+            desired = args[:delimiter]
+            scanned = set(args[delimiter + 1:])
+            self.queue.job_ids = desired + [job_id for job_id in self.queue.job_ids if job_id not in scanned]
+            return len(self.queue.job_ids)
+
+    class FakeQueue:
+        def __init__(self) -> None:
+            self.key = "rq:queue:model-plaza-tasks"
+            self.job_ids = ["job-a-2", "job-b-1", "job-a-1"]
+            self.connection = FakeConnection(self)
+
+        def fetch_job(self, job_id):
+            return SimpleNamespace(args=[job_id.replace("job-", "task-")])
+
+    fake_queue = FakeQueue()
+    monkeypatch.setattr(dispatcher, "task_queue", lambda: fake_queue)
+    monkeypatch.setattr(dispatcher.settings, "gpu_queue_batch_fifo_enabled", True)
+    monkeypatch.setattr(dispatcher.settings, "gpu_queue_batch_fifo_reorder_scan_size", 10000)
+
+    with Session(engine) as db:
+        user = User(id="user-rq-lock", email="rq-lock@example.com", name="RQ Lock", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+        rows = [
+            ("task-a-2", "batch-a", 2),
+            ("task-b-1", "batch-b", 1),
+            ("task-a-1", "batch-a", 1),
+        ]
+        for task_id, batch_id, episode in rows:
+            asset = Asset(
+                id=f"asset-{task_id}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"{task_id}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"{task_id}.mp4",
+                url=f"https://cdn.example.test/{task_id}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=task_id,
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=asset.id,
+                status="queued",
+                params={"internalBatchId": batch_id, "internalBatchName": batch_id, "internalBatchIndex": episode},
+                estimated_credits=0,
+                frozen_credits=0,
+                charged_credits=0,
+                provider="mock",
+                provider_job_id=f"provider-{task_id}",
+                progress_percent=5,
+                progress_stage="等待调度",
+            )
+            db.add_all([asset, task])
+        db.commit()
+
+        reordered = dispatcher._reorder_queued_rq_jobs_batch_fifo(db, "internal:user-rq-lock:batch-a")
+
+    assert reordered == 2
+    assert fake_queue.job_ids == ["job-a-1", "job-a-2"]
 
 
 def test_dispatcher_stops_when_remote_gpu_inflight_limit_is_reached(monkeypatch) -> None:
