@@ -240,6 +240,94 @@ def test_dispatcher_starts_next_batch_after_active_batch_enters_processing(monke
     assert enqueued == ["batch-b-queued"]
 
 
+def test_dispatcher_dispatches_active_batch_outside_created_at_scan_window(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    enqueued: list[str] = []
+    monkeypatch.setattr(dispatcher, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(dispatcher, "_queued_rq_task_ids", lambda: set())
+    monkeypatch.setattr(dispatcher, "enqueue_provider_job", enqueued.append)
+    monkeypatch.setattr(dispatcher.settings, "gpu_remote_inflight_limit", 0)
+
+    with Session(engine) as db:
+        user = User(id="user-scan-window", email="scan-window@example.com", name="Scan Window", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+        base_time = now()
+        for index in range(1000):
+            task_id = f"old-task-{index}"
+            asset = Asset(
+                id=f"asset-{task_id}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"{task_id}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"{task_id}.mp4",
+                url=f"https://cdn.example.test/{task_id}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=task_id,
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=asset.id,
+                status="queued",
+                params={"internalBatchId": "old-batch", "internalBatchName": "Old batch", "internalBatchIndex": index + 1},
+                estimated_credits=0,
+                frozen_credits=0,
+                charged_credits=0,
+                provider="mock",
+                provider_job_id=f"provider-{task_id}",
+                progress_percent=5,
+                progress_stage="等待调度",
+                created_at=base_time + timedelta(seconds=index),
+            )
+            db.add_all([asset, task])
+
+        priority_asset = Asset(
+            id="asset-priority-task",
+            user_id=user.id,
+            kind="video",
+            original_name="priority.mp4",
+            mime_type="video/mp4",
+            storage_key="priority.mp4",
+            url="https://cdn.example.test/priority.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        priority_task = Task(
+            id="priority-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=priority_asset.id,
+            status="queued",
+            params={
+                "internalBatchId": "priority-batch",
+                "internalBatchName": "Priority batch",
+                "internalBatchIndex": 1,
+                "_zipPriorityRank": 1,
+            },
+            estimated_credits=0,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="provider-priority-task",
+            progress_percent=5,
+            progress_stage="等待调度",
+            created_at=base_time + timedelta(seconds=2000),
+        )
+        db.add_all([priority_asset, priority_task])
+        db.commit()
+
+    result = dispatcher.dispatch_provider_queue_once(limit=1)
+
+    assert result == {"dispatched": 1, "taskIds": ["priority-task"]}
+    assert enqueued == ["priority-task"]
+
+
 def test_dispatcher_reorders_existing_rq_batch_by_episode(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

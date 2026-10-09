@@ -3,7 +3,6 @@ from collections import defaultdict
 from datetime import timezone
 
 from sqlalchemy import select
-from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database import SessionLocal
@@ -352,16 +351,7 @@ def dispatch_provider_queue_once(limit: int | None = None) -> dict:
         remote_inflight_limit = max(0, int(settings.gpu_remote_inflight_limit))
         if remote_inflight_limit and _remote_gpu_inflight_count(db, now_seconds) >= remote_inflight_limit:
             return {"dispatched": 0, "taskIds": []}
-        tasks = list(
-            db.execute(
-                select(Task)
-                .where(Task.status == "queued", Task.tool_slug.in_(DISPATCHABLE_TOOL_SLUGS))
-                .options(selectinload(Task.input_asset))
-                .order_by(Task.created_at.asc())
-                .limit(max(limit * 100, 1000))
-            ).scalars()
-        )
-        tasks = _batch_fifo_ordered_tasks(tasks)
+        tasks = _batch_fifo_ordered_tasks(queued_tasks)
         if active_batch_key:
             tasks = [task for task in tasks if _task_batch_key(task) == active_batch_key]
         blocked_batch_keys: set[str] = set()
