@@ -148,15 +148,21 @@ def _select_active_batch_key(db, queued_tasks: list[Task]) -> str:
         return ""
     stored_key = _stored_active_batch_key().strip()
     queued_batch_keys = {_task_batch_key(task) for task in queued_tasks}
+    ordered_tasks = _batch_fifo_ordered_tasks(queued_tasks)
+    preferred_key = _task_batch_key(ordered_tasks[0]) if ordered_tasks else ""
     if stored_key and stored_key in queued_batch_keys:
+        stored_priority = min(_task_priority_key(task) for task in queued_tasks if _task_batch_key(task) == stored_key)
+        preferred_priority = min(_task_priority_key(task) for task in ordered_tasks if _task_batch_key(task) == preferred_key)
+        if preferred_key and preferred_key != stored_key and preferred_priority < stored_priority:
+            _store_active_batch_key(preferred_key)
+            return preferred_key
         return stored_key
     if stored_key:
         _clear_active_batch_key()
     if not queued_tasks:
         return ""
-    batch_key = _task_batch_key(_batch_fifo_ordered_tasks(queued_tasks)[0])
-    _store_active_batch_key(batch_key)
-    return batch_key
+    _store_active_batch_key(preferred_key)
+    return preferred_key
 
 
 def _reorder_queued_rq_jobs_batch_fifo(db, active_batch_key: str = "") -> int:

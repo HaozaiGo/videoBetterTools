@@ -501,6 +501,74 @@ def test_dispatcher_dispatches_active_batch_outside_created_at_scan_window(monke
     assert enqueued == ["priority-task"]
 
 
+def test_select_active_batch_allows_higher_priority_batch_to_preempt(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    stored_key = ["internal:user-active-preempt:batch-a"]
+    stored_updates: list[str] = []
+    monkeypatch.setattr(dispatcher.settings, "gpu_queue_batch_fifo_enabled", True)
+    monkeypatch.setattr(dispatcher, "_stored_active_batch_key", lambda: stored_key[0])
+
+    def store_active_batch_key(batch_key: str) -> None:
+        stored_updates.append(batch_key)
+        stored_key[0] = batch_key
+
+    monkeypatch.setattr(dispatcher, "_store_active_batch_key", store_active_batch_key)
+
+    with Session(engine) as db:
+        user = User(id="user-active-preempt", email="active-preempt@example.com", name="Active Preempt", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+        for index, (task_id, batch_id, rank) in enumerate(
+            [
+                ("active-task", "batch-a", 100),
+                ("priority-task", "batch-b", 1),
+            ],
+            start=1,
+        ):
+            asset = Asset(
+                id=f"asset-{task_id}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"{task_id}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"{task_id}.mp4",
+                url=f"https://cdn.example.test/{task_id}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=task_id,
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=asset.id,
+                status="queued",
+                params={
+                    "internalBatchId": batch_id,
+                    "internalBatchName": batch_id,
+                    "internalBatchIndex": index,
+                    "_zipPriorityRank": rank,
+                },
+                estimated_credits=0,
+                frozen_credits=0,
+                charged_credits=0,
+                provider="mock",
+                provider_job_id=f"provider-{task_id}",
+                progress_percent=5,
+                progress_stage="等待调度",
+                created_at=now() + timedelta(seconds=index),
+            )
+            db.add_all([asset, task])
+        db.commit()
+
+        queued_tasks = list(db.query(Task).filter(Task.status == "queued").all())
+        active_key = dispatcher._select_active_batch_key(db, queued_tasks)
+
+    assert active_key == "internal:user-active-preempt:batch-b"
+    assert stored_updates == ["internal:user-active-preempt:batch-b"]
+
+
 def test_dispatcher_reorders_existing_rq_batch_by_episode(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
