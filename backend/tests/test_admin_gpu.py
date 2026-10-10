@@ -4,6 +4,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app import admin
+from app import dispatcher
 from app.models import Asset, Base, Task, User, Wallet
 from app.services import now
 
@@ -131,3 +132,89 @@ def test_queued_gpu_jobs_falls_back_to_planned_dispatch_order(monkeypatch) -> No
     assert [job["position"] for job in queued_jobs] == [1, 2, 3]
     assert queued_jobs[0]["displayName"] == "等待展示批次"
     assert queued_jobs[0]["displaySubtitle"] == "第 2 集 · episode-2.mp4"
+
+
+def test_queued_gpu_jobs_finds_priority_task_outside_created_at_window(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    stored_key = ["internal:user-planned-priority:old-batch"]
+    monkeypatch.setattr(admin, "task_queue", lambda: EmptyFakeTaskQueue())
+    monkeypatch.setattr(dispatcher.settings, "gpu_queue_batch_fifo_enabled", True)
+    monkeypatch.setattr(dispatcher, "_stored_active_batch_key", lambda: stored_key[0])
+
+    def store_active_batch_key(batch_key: str) -> None:
+        stored_key[0] = batch_key
+
+    monkeypatch.setattr(dispatcher, "_store_active_batch_key", store_active_batch_key)
+
+    with Session(engine) as db:
+        user = User(id="user-planned-priority", email="planned-priority@example.com", name="Planned Priority", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+        base_time = now()
+        for index in range(1000):
+            asset = Asset(
+                id=f"old-asset-{index}",
+                user_id=user.id,
+                kind="video",
+                original_name=f"old-{index}.mp4",
+                mime_type="video/mp4",
+                storage_key=f"old-{index}.mp4",
+                url=f"https://cdn.example.test/old-{index}.mp4",
+                size_bytes=10,
+                duration_seconds=10,
+                expires_at=now() + timedelta(days=1),
+            )
+            task = Task(
+                id=f"old-task-{index}",
+                user_id=user.id,
+                tool_slug="subtitle-translate-workflow",
+                input_asset_id=asset.id,
+                status="queued",
+                params={"internalBatchId": "old-batch", "internalBatchName": "Old batch", "internalBatchIndex": index + 1, "_zipPriorityRank": 100},
+                estimated_credits=0,
+                frozen_credits=0,
+                charged_credits=0,
+                provider="mock",
+                provider_job_id=f"old-provider-{index}",
+                progress_percent=5,
+                progress_stage="等待调度",
+                created_at=base_time + timedelta(seconds=index),
+            )
+            db.add_all([asset, task])
+
+        priority_asset = Asset(
+            id="priority-asset",
+            user_id=user.id,
+            kind="video",
+            original_name="priority.mp4",
+            mime_type="video/mp4",
+            storage_key="priority.mp4",
+            url="https://cdn.example.test/priority.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        priority_task = Task(
+            id="priority-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=priority_asset.id,
+            status="queued",
+            params={"internalBatchId": "priority-batch", "internalBatchName": "Priority batch", "internalBatchIndex": 1, "_zipPriorityRank": 1},
+            estimated_credits=0,
+            frozen_credits=0,
+            charged_credits=0,
+            provider="mock",
+            provider_job_id="priority-provider",
+            progress_percent=5,
+            progress_stage="等待调度",
+            created_at=base_time + timedelta(seconds=2000),
+        )
+        db.add_all([priority_asset, priority_task])
+        db.commit()
+
+        queued_jobs = admin._queued_gpu_jobs(db, limit=1)
+
+    assert queued_jobs[0]["taskId"] == "priority-task"
+    assert queued_jobs[0]["displayName"] == "Priority batch"

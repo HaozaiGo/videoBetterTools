@@ -1382,7 +1382,6 @@ def _planned_gpu_jobs(db: Session, limit: int, skip_task_ids: set[str]) -> list[
             .where(Task.status == "queued", Task.tool_slug.in_(DISPATCHABLE_TOOL_SLUGS))
             .options(selectinload(Task.input_asset))
             .order_by(Task.created_at.asc())
-            .limit(max(limit * 200, 1000))
         ).scalars()
     )
     active_batch_key = _select_active_batch_key(db, tasks)
