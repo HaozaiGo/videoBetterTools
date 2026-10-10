@@ -44,6 +44,13 @@ class FakeRemoteResultStorage:
         return storage_key in self.existing_keys
 
 
+class FailingRemoteResultStorage:
+    is_remote = True
+
+    def remote_exists(self, _storage_key: str) -> bool:
+        raise AssertionError("processing batch list should not verify remote result objects")
+
+
 def test_admin_internal_batches_groups_batch_progress() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -163,6 +170,67 @@ def test_admin_internal_batches_counts_available_results(monkeypatch) -> None:
     assert item["availableResults"] == 1
     assert item["missingResultCount"] == 2
     assert item["status"] == "failed"
+
+
+def test_admin_internal_batches_processing_skips_remote_result_checks(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(services, "storage", FailingRemoteResultStorage())
+
+    with Session(engine) as db:
+        user = User(id="batch-processing-user", email="batch-processing@example.com", name="Batch Processing", role="user", status="active")
+        wallet = Wallet(user_id=user.id, credits=100, frozen_credits=0)
+        db.add_all([user, wallet])
+
+        input_asset = Asset(
+            id="batch-processing-input",
+            user_id=user.id,
+            kind="video",
+            original_name="1.mp4",
+            mime_type="video/mp4",
+            storage_key="input-processing.mp4",
+            url="https://tos.example.test/input-processing.mp4",
+            size_bytes=10,
+            duration_seconds=10,
+            expires_at=now() + timedelta(days=1),
+        )
+        output_asset = Asset(
+            id="batch-processing-output",
+            user_id=user.id,
+            kind="result",
+            original_name="1-result.mp4",
+            mime_type="video/mp4",
+            storage_key="result-processing.mp4",
+            url="https://tos.example.test/result-processing.mp4",
+            size_bytes=10,
+            duration_seconds=0,
+            expires_at=now() + timedelta(days=1),
+        )
+        task = Task(
+            id="batch-processing-task",
+            user_id=user.id,
+            tool_slug="subtitle-translate-workflow",
+            input_asset_id=input_asset.id,
+            output_asset_id=output_asset.id,
+            status="succeeded",
+            params={"internalBatchId": "batch-processing", "internalBatchName": "处理中跳过结果校验（2集）", "internalBatchTotal": 2},
+            estimated_credits=1,
+            frozen_credits=0,
+            charged_credits=1,
+            provider="mock",
+            provider_job_id="batch-processing-provider",
+            output_url="https://tos.example.test/result-processing.mp4",
+            progress_percent=100,
+            progress_stage="done",
+            completed_at=now(),
+        )
+        db.add_all([input_asset, output_asset, task])
+        db.commit()
+
+        payload = admin.admin_internal_batches(db, status="processing")
+
+    assert payload["page"]["total"] == 1
+    assert payload["items"][0]["status"] == "processing"
 
 
 def test_admin_internal_batch_zips_lists_ready_local_zip(tmp_path, monkeypatch) -> None:

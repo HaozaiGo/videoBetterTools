@@ -110,11 +110,22 @@ def _internal_batch_status_from_counts(batch: dict) -> str:
 def _annotate_internal_batch_result_availability(db: Session, batches: list[dict]) -> None:
     if not batches:
         return
-    by_key = {(str(batch["userId"]), str(batch["batchId"])): batch for batch in batches}
     for batch in batches:
         batch["missingResultCount"] = 0
         batch["availableResults"] = int(batch.get("succeeded") or 0)
 
+    # Remote object checks are expensive on large in-flight batches. Missing-result
+    # verification can only change the visible status of batches that otherwise look
+    # complete, so skip active/failed batches on list pages.
+    verifiable_batches = [
+        batch
+        for batch in batches
+        if int(batch.get("processing") or 0) <= 0 and int(batch.get("failed") or 0) + int(batch.get("cancelled") or 0) <= 0
+    ]
+    if not verifiable_batches:
+        return
+
+    by_key = {(str(batch["userId"]), str(batch["batchId"])): batch for batch in verifiable_batches}
     batch_id_expr = Task.params["internalBatchId"].as_string()
     rows = db.execute(
         select(Task)
